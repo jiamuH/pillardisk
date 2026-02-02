@@ -1,0 +1,110 @@
+# Configuration file for Pillar Disk Model
+# Edit these parameters to customize the disk model and computation
+
+# Disk Geometry Parameters
+disk:
+  rin: 0.1              # Inner radius (light days)
+  rout: 100.0           # Outer radius (light days)
+  nr: 300               # Number of radial points (affects speed)
+  nphi: 360             # Number of azimuthal points (affects speed)
+  h1: 0.01              # Height at reference radius (light days)
+  r0: 100.0              # Reference radius (light days)
+  beta: 10.0            # Height power-law index: h = h1 * (r/r0)^beta
+
+# Temperature Parameters
+temperature:
+  tv1: 1e4              # Viscous temperature at r0 (K)
+  alpha: 0.75           # Temperature power-law index: T = tv1 * (r0/r)^alpha
+  tx1: 1e4              # Irradiation temperature at r0 (K)
+  fcol: 1.0             # Color temperature factor: Tcol = fcol * Teff
+
+# Lamp Post Parameters
+lamp:
+  hlamp: 0.05           # Lamp height (light days)
+
+# Observation Parameters
+observation:
+  dmpc: 100.0           # Distance (Mpc)
+  cosi: 0.5            # cos(inclination), 1=face-on, 0=edge-on
+  redshift: 0.0        # Redshift
+
+# Pillar Parameters
+# Three modes: manual placement or random generation
+pillars:
+  # Mode selection
+  make_many: true        # If true, generate random pillars; if false, use manual list below
+  
+  # Manual pillar placement (used when make_many=false)
+  # You can specify pillars in two ways:
+  # 1. List format (old way - still supported):
+  #    - r_pillar: 80.0
+  #      phi_pillar: 0.0
+  #      ...
+  # 2. List-based format (new way - easier for multiple pillars):
+  r_pillar: [50.0, 80.0]      # List of radial positions (light days)
+  phi_pillar: [0.0, pi]    # List of azimuthal positions (radians) - use pi for 180 degrees
+  height: [0.1, 0.1]        # List of heights at center (light days)
+  sigma_r: [5, 5]       # List of radial widths (light days)
+  sigma_phi: [0.1, 0.1]     # List of azimuthal widths (radians)
+  modify_height: [true, true] # List of whether to modify height
+  modify_temp: [true, false]  # List of whether to modify temperature
+  temp_factor: [5, 10]   # List of temperature enhancement factors
+  
+  # Random pillar generation (used when make_many=true)
+  N_pillar: 100           # Number of random pillars to generate
+  r_mean: 25.0            # Mean radial position for Gaussian distribution (light days)
+  sig_r: 10.0             # Standard deviation of radial position (light days)
+  # phi is uniformly distributed from 0 to 2*pi (no parameters needed)
+  h_pillar: 0.05          # Height of pillars (light days) - can be single value or list
+  sigma_r_pillar: 1.0     # Radial width of each pillar (light days) - can be single value or list
+  sigma_phi_pillar: 0.1   # Azimuthal width of each pillar (radians) - can be single value or list
+  modify_height_pillar: true   # Whether to modify disk height
+  modify_temp_pillar: true     # Whether to modify disk temperature
+  temp_factor_pillar: 1.5     # Temperature enhancement factor
+# Example with multiple manual pillars:
+# pillars:
+#   make_many: false
+#   r_pillar: [80.0, 20.0, 50.0]
+#   phi_pillar: [0.0, 3.14159, 1.5708]  # 0, pi, pi/2
+#   height: [0.15, 0.10, 0.12]
+#   sigma_r: [3.0, 2.0, 2.5]
+#   sigma_phi: [0.3, 0.2, 0.25]
+#   modify_height: [true, true, true]
+#   modify_temp: [true, false, true]
+#   temp_factor: [1.5, 1.0, 1.3]
+
+# Computation Parameters
+computation:
+  # Wavelength grid
+  wlog_min: 2.0         # Minimum log10(wavelength) in Angstroms
+  wlog_max: 4.5         # Maximum log10(wavelength) in Angstroms
+  nwavelengths: 100     # Number of wavelength points
+  
+  # Lag spectrum computation
+  ntau: 40              # Number of delay bins (affects speed)
+  taumax: 250.0         # Maximum delay (days)
+  
+  # Parallel processing
+  use_parallel: true    # Enable parallel processing (faster on multi-core CPUs)
+  n_jobs: null          # Number of parallel jobs (null = use all CPU cores)
+  
+  # Emission line computation (for pillar_line.py)
+  nlambda: 200          # Number of wavelength bins for velocity delay map
+  ntau_line: 200        # Number of delay bins for velocity delay map
+
+# Emission Line Parameters (for pillar_line.py)
+emission_line:
+  lambda0: 4861.0       # Rest wavelength of emission line (Angstroms, e.g., Hβ = 4861)
+  v_virial: 1000.0      # Virial velocity (km/s) - assumed constant for simplicity
+
+# Plotting Parameters
+plotting:
+  save_results: true    # Save the 4-panel results plot
+  save_3d: true         # Save the 3D visualization
+  results_filename: "pillar_disk_results.png"
+  plot3d_filename: "pillar_disk_3d.png"
+  dpi: 150              # Resolution for saved plots
+  # 3D plot resolution (higher = better quality but slower)
+  n_phi_plot: 720       # Number of azimuthal points for 3D plot
+  n_r_plot: 400         # Number of radial points for 3D plot
+

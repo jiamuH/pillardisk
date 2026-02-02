@@ -1,0 +1,103 @@
+# Configuration file for pillar_line.py - Emission Line Velocity Delay Map
+# This file contains parameters for computing velocity delay maps of emission lines
+# from AGN accretion disks with pillars.
+
+# Disk Geometry Parameters (same as pillar_disk.py)
+disk:
+  rin: 0.1              # Inner radius (light days)
+  rout: 50.0          # Outer radius (light days)
+  nr: 300              # Number of radial points
+  nphi: 360            # Number of azimuthal points
+
+# Temperature Profile Parameters
+temperature:
+  h1: 0.05             # Height at reference radius (light days)
+  r0: 50.0             # Reference radius (light days)
+  beta: 10.0           # Height power-law index h = h1 * (r/r0)^beta
+  tv1: 1e3             # Viscous temperature at r0 (K)
+  alpha: 0.75          # Temperature power-law index (deprecated, now fixed at 0.75 for r^-3/4)
+  tirrad_tvisc_ratio: 10.0  # Ratio T_irrad/T_visc at r0 (both follow r^-3/4)
+                              # In shadows, T_irrad = 0, so only T_visc remains
+
+# Lamp Parameters
+lamp:
+  hlamp: 0.10          # Lamp height (light days)
+  tx1: 1e3             # Irradiation temperature at r0 (K) (deprecated, use tirrad_tvisc_ratio instead)
+
+# Observation Parameters
+observation:
+  dmpc: 100.0          # Distance (Mpc)
+  cosi: 0.5            # cos(inclination), 1=face-on, 0=edge-on
+  fcol: 1.0            # Color temperature factor Tcol = fcol * Teff
+  redshift: 0.0        # Redshift
+
+# Pillar Parameters
+# Two modes: manual placement or random generation
+pillars:
+  # Mode selection
+  make_many: false        # If true, generate random pillars; if false, use manual list below
+  
+  # Manual pillar placement (used when make_many=false)
+  # You can specify pillars in two ways:
+  # 1. List format (old way - still supported):
+  #    - r_pillar: 80.0
+  #      phi_pillar: 0.0
+  #      ...
+  # 2. List-based format (new way - easier for multiple pillars):
+  r_pillar: [5.0, 10.0, 15.0]
+  phi_pillar: [pi/4, -pi/4, 3*pi/4]
+  height: [0.15, 0.10, 0.12]
+  sigma_r: [0.01, 0.01, 0.01]
+  sigma_phi: [0.01, 0.01, 0.01]
+  modify_height: [true, true, true]
+  modify_temp: [true, true, true]
+  temp_factor: [1, 1, 1]
+  
+  # Random pillar generation (used when make_many=true)
+  N_pillar: 100           # Number of random pillars to generate
+  r_mean: 30.0            # Mean radial position for Gaussian distribution (light days)
+  sig_r: 20.0             # Standard deviation of radial position (light days)
+  rmin: 5.0               # Minimum radius allowed for random pillars (light days)
+  # phi is uniformly distributed from 0 to 2*pi (no parameters needed)
+  h_pillar: 0.04          # Height of pillars (light days) - can be single value or list
+  sigma_r_pillar: 0.01     # Radial width of each pillar (light days) - can be single value or list
+  sigma_phi_pillar: 0.01   # Azimuthal width of each pillar (radians) - can be single value or list
+  modify_height_pillar: true   # Whether to modify disk height
+  modify_temp_pillar: true     # Whether to modify disk temperature
+  temp_factor_pillar: 20     # Temperature enhancement factor
+
+# Computation Parameters
+computation:
+  # Velocity delay map computation
+  nlambda: 200          # Number of wavelength bins for velocity delay map
+  ntau_line: 100        # Number of delay bins for velocity delay map (used in pillar_line.py)
+  taumax: 150.0         # Maximum delay (days) for velocity-delay map (used in pillar_line.py)
+
+  # Time-evolving Cloudy maps (pillar_line_time_cloudy.py)
+  ntime: 50             # Number of time steps (Ntstep)
+  tmax: 10000.0          # Maximum time (days)
+  # Optional: number of CPU cores for multiprocessing (None = auto-detect)
+  # n_cores: 8
+
+# Emission Line Parameters
+emission_line:
+  lambda0: 4861.0       # Rest wavelength of emission line (Angstroms)
+                        # Common values:
+                        #   Hβ (Balmer beta): 4861.0
+                        #   Hα (Balmer alpha): 6563.0
+                        #   C IV: 1549.0
+                        #   Mg II: 2798.0
+  v_virial: 1000.0      # FWHM of emission line (km/s)
+                        # This is the full width at half maximum of the line profile
+                        # The actual Keplerian velocity v(r) = v_virial * sqrt(r0/r)
+                        # where r0 is the reference radius from disk parameters
+
+# Plotting Parameters
+plotting:
+  velocity_delay_filename: velocity_delay_map.png  # Output filename for velocity delay map
+  plot_3d_geometry: true    # Whether to plot 3D disk geometry
+  plot3d_filename: pillar_line_3d.png  # Output filename for 3D plot
+  show_light_rays: true      # Whether to show light rays in 3D plot
+  n_phi_plot: 360           # Number of azimuthal points for 3D plot
+  n_r_plot: 200             # Number of radial points for 3D plot
+

@@ -21,7 +21,7 @@ temperature:
 
 # Lamp Parameters
 lamp:
-  hlamp: 0.10          # Lamp height (light days)
+  hlamp: 0.2          # Lamp height (light days)
   tx1: 1e3             # Irradiation temperature at r0 (K) (deprecated, use tirrad_tvisc_ratio instead)
 
 # Observation Parameters
@@ -44,14 +44,23 @@ pillars:
   #      phi_pillar: 0.0
   #      ...
   # 2. List-based format (new way - easier for multiple pillars):
-  r_pillar: [5.0, 10.0, 15.0]
-  phi_pillar: [pi/4, -pi/4, 3*pi/4]
-  height: [0.15, 0.10, 0.12]
-  sigma_r: [0.01, 0.01, 0.01]
-  sigma_phi: [0.01, 0.01, 0.01]
-  modify_height: [true, true, true]
-  modify_temp: [true, true, true]
-  temp_factor: [1, 1, 1]
+  # r_pillar: [5.0, 10.0, 15.0]
+  # phi_pillar: [pi/4, -pi/4, 3*pi/4]
+  # height: [0.1, 0.1, 0.1]
+  # sigma_r: [0.5, 0.5, 0.5] # in light days
+  # sigma_phi: [1.0, 1.0, 1.0] # in radians
+  # modify_height: [true, true, true]
+  # modify_temp: [true, true, true]
+  # temp_factor: [1, 1, 1]
+
+  r_pillar: [10.0]
+  phi_pillar: [pi/4]
+  height: [0.5]
+  sigma_r: [0.01] # in light days
+  sigma_phi: [0.1] # in radians
+  modify_height: [true]
+  modify_temp: [true]
+  temp_factor: [1]
   
   # Random pillar generation (used when make_many=true)
   N_pillar: 100           # Number of random pillars to generate
@@ -74,7 +83,7 @@ computation:
   taumax: 150.0         # Maximum delay (days) for velocity-delay map (used in pillar_line.py)
 
   # Time-evolving Cloudy maps (pillar_line_time_cloudy.py)
-  ntime: 50             # Number of time steps (Ntstep)
+  ntime: 100             # Number of time steps (Ntstep)
   tmax: 10000.0          # Maximum time (days)
   # Optional: number of CPU cores for multiprocessing (None = auto-detect)
   # n_cores: 8

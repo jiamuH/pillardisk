@@ -214,19 +214,98 @@ def _process_time_step(args):
     omega_2d = np.zeros_like(r_2d)
     for ir in range(disk.nr):
         omega_2d[ir, :] = omega_r[ir]
-    
+
     phi_t_2d = phi_0_2d + omega_2d * t
     # Wrap to [0, 2π)
     phi_t_2d = np.mod(phi_t_2d, 2*np.pi)
-    
+
+    # Rotate pillar positions to their current azimuth so that
+    # get_height / get_temperature / _compute_shadow_mask see the
+    # pillar at the correct lab-frame position at this time step.
+    original_pillar_phis = [p['phi'] for p in disk.pillars]
+    for pillar in disk.pillars:
+        ir_p = np.argmin(np.abs(disk.r - pillar['r']))
+        pillar['phi'] = np.mod(pillar['phi'] + omega_r[ir_p] * t, 2*np.pi)
+
     # Get height at rotated positions
     h_t_2d = disk.get_height(r_2d, phi_t_2d)
-    
+
     # Get temperature at rotated positions (needed for fallback)
     T_t_2d = disk.get_temperature(r_2d, phi_t_2d, compute_shadows=True)
-    
+
     # Compute ionizing flux map at current time (with shadows)
     log_phi_2d = compute_ionizing_flux(disk, r_2d, phi_t_2d)
+
+    # Observer occultation: pillar wall blocks the observer's line of sight
+    # to shadow cells directly behind it.  Only cells that are ACTUALLY IN
+    # SHADOW should be occluded — occluding non-shadow (baseline) cells
+    # removes their emission without compensation and creates a spurious
+    # deficit.
+    #
+    # Geometric model: the face wall (height h_p) at inclination i blocks
+    # the view of disk cells at r > r_p out to:
+    #   dr_occ = h_p × tan(i) × |cos(phi_p)|
+    # This is a hard geometric cutoff, not a Gaussian.
+    shadow_mask_2d = disk._compute_shadow_mask(r_2d, phi_t_2d, h_t_2d)
+    is_shadowed = shadow_mask_2d < 0.99   # cells at least partially shadowed
+
+    observer_occult = np.ones_like(log_phi_2d)
+
+    for pillar in disk.pillars:
+        r_p = pillar['r']
+        phi_p = pillar['phi']          # already rotated to lab frame
+        h_p = pillar.get('height', 0.01)
+        sigma_phi_p = pillar.get('sigma_phi', 0.1)
+
+        # Geometric occultation depth: how far behind the pillar the
+        # observer's line of sight is blocked by the wall of height h_p.
+        cos_phi_p = np.cos(phi_p)
+        face_foreshort = max(0.0, -cos_phi_p) * disk.sini
+        if face_foreshort < 1e-4:
+            continue                   # face edge-on or on near side
+
+        # Maximum radial extent blocked by the wall
+        tani = disk.sini / (disk.cosi + 1e-10)
+        dr_occ_max = h_p * tani * max(0.0, -cos_phi_p)
+
+        # Vectorised over grid
+        dr_2d_occ = r_2d - r_p
+        dphi_2d_occ = (phi_t_2d - phi_p + np.pi) % (2 * np.pi) - np.pi
+
+        # Only occult cells that are:
+        #  1. Behind the pillar (r > r_p)
+        #  2. Within the geometric occultation depth
+        #  3. Within the pillar's azimuthal extent
+        #  4. Actually in shadow (not baseline cells)
+        gauss_phi = np.exp(-0.5 * (dphi_2d_occ / sigma_phi_p) ** 2)
+
+        eligible = (is_shadowed
+                    & (dr_2d_occ > 0)
+                    & (dr_2d_occ < dr_occ_max)
+                    & (np.abs(dphi_2d_occ) < 3 * sigma_phi_p))
+
+        # Smooth radial ramp within the geometric extent
+        radial_weight = np.where(dr_occ_max > 0,
+                                 np.clip(1.0 - dr_2d_occ / (dr_occ_max + 1e-10), 0, 1),
+                                 0.0)
+
+        occ_frac = np.where(eligible,
+                            face_foreshort * radial_weight * gauss_phi,
+                            0.0)
+        occ_frac = np.clip(occ_frac, 0.0, 1.0)
+        observer_occult *= (1.0 - occ_frac)
+
+        if itime % 10 == 0:
+            n_occ = int(np.sum(occ_frac > 0.01))
+            max_occ = float(np.max(occ_frac))
+            print(f"  Occultation: phi_p={np.degrees(phi_p):.1f}deg, "
+                  f"foreshort={face_foreshort:.3f}, dr_occ={dr_occ_max:.3f}, "
+                  f"max_occ={max_occ:.3f}, n_cells(>1%)={n_occ}")
+
+    # Restore original pillar positions for the explicit-pillar loop
+    # below, which tracks rotation independently.
+    for i, pillar in enumerate(disk.pillars):
+        pillar['phi'] = original_pillar_phis[i]
     
     # Interpolate Cloudy models to get line intensities
     line_intensity_2d = {}
@@ -329,8 +408,8 @@ def _process_time_step(args):
                     gauss = np.exp(-0.5 * (lambda_rel / siglambda)**2)
                     gauss_lambda_norm += gauss
                 
-                # Weight by area, foreshortening, and line intensity
-                weight = da[iphi] * dot * line_intensity
+                # Weight by area, foreshortening, line intensity, and observer occultation
+                weight = da[iphi] * dot * line_intensity * observer_occult[ir, iphi]
                 
                 # Add contribution with Gaussian spread
                 if gauss_lambda_norm > 0:
@@ -339,89 +418,160 @@ def _process_time_step(args):
                         gauss_lambda = np.exp(-0.5 * (lambda_rel / siglambda)**2) / gauss_lambda_norm
                         flux_slice_dict[line_key][ilambda] += weight * gauss_lambda
     
-    # Add emission from pillars (rotating with the disk)
+    # Add emission from pillars (distributed across azimuthal extent).
+    #
+    # Physical model: the pillar is an opaque wall on the disk.  It
+    # REPLACES a patch of normal disk surface with its visible face.
+    #
+    #   ΔF = (face_emission − baseline_disk_emission) × foreshortening × area
+    #
+    # Foreshortening of the radial face:  |cos(φ) · sin(i)|
+    #   • cos(φ)>0  (near side, v≈0) → observer sees outward/shadow face
+    #   • cos(φ)<0  (far  side, v≈0) → observer sees inward/illuminated face
+    #   • cos(φ)≈0  (quadrature, |v|=max) → face is edge-on, ΔF→0
+    #
+    # Shadow face has LOW ionizing flux → line emission BELOW baseline → ΔF<0
+    # Illuminated face has HIGH flux   → line emission ABOVE baseline → ΔF>0
     if len(disk.pillars) > 0:
+        # Temporarily rotate pillars to current lab-frame positions
+        for j, p in enumerate(disk.pillars):
+            ir_j = np.argmin(np.abs(disk.r - p['r']))
+            p['phi'] = np.mod(original_pillar_phis[j] + omega_r[ir_j] * t, 2*np.pi)
+
         for pillar in disk.pillars:
             r_pillar = pillar['r']
-            phi_pillar_0 = pillar['phi']  # Initial azimuth
-            
-            # Find angular velocity at pillar radius
-            ir_pillar = np.argmin(np.abs(disk.r - r_pillar))
-            omega_pillar = omega_r[ir_pillar]
-            
-            # Rotated azimuth
-            phi_pillar_t = phi_pillar_0 + omega_pillar * t
-            phi_pillar_t = np.mod(phi_pillar_t, 2*np.pi)
-            
-            # Get height and ionizing flux at pillar location
-            h_pillar = disk.get_height(r_pillar, phi_pillar_t)
-            
-            # Create a small 2x2 grid around the pillar point for gradient computation
-            dr_small = r_pillar * 0.001
-            dphi_small = 0.001
-            r_pillar_grid = np.array([[r_pillar - dr_small, r_pillar + dr_small],
-                                     [r_pillar - dr_small, r_pillar + dr_small]])
-            phi_pillar_grid = np.array([[phi_pillar_t - dphi_small, phi_pillar_t - dphi_small],
-                                       [phi_pillar_t + dphi_small, phi_pillar_t + dphi_small]])
-            log_phi_pillar_grid = compute_ionizing_flux(disk, r_pillar_grid, phi_pillar_grid)
-            log_phi_pillar = np.clip(log_phi_pillar_grid[0, 0], phi_grid[0], phi_grid[-1])
-            
-            # Compute velocity at pillar location
+            phi_pillar_t = pillar['phi']  # Already rotated
+            sigma_r_p = pillar.get('sigma_r', 2.0)
+            sigma_phi_p = pillar.get('sigma_phi', 0.2)
+            h_pillar_p = pillar.get('height', 0.01)
+
+            # Baseline ionizing flux at r_pillar (smooth disk, no pillar)
+            T_visc_rp = np.interp(r_pillar, disk.r, disk.tv_base)
+            T_irrad_rp = np.interp(r_pillar, disk.r, disk.tx_base)
+            T_base_rp = (T_visc_rp**4 + T_irrad_rp**4)**0.25
+            T_ref = disk.tv1 * disk.tirrad_tvisc_ratio
+            T_ratio_base = np.clip(T_base_rp / T_ref, 0.1, 10.0)
+            T_ratio_norm = (T_ratio_base - 0.1) / (10.0 - 0.1)
+            log_phi_baseline = 17.0 + T_ratio_norm * (21.5 - 17.0)
+            log_phi_baseline = np.clip(log_phi_baseline, phi_grid[0], phi_grid[-1])
+
+            # Geometric irradiation enhancement for illuminated face
+            # The pillar face is roughly perpendicular to the lamp direction,
+            # so it intercepts much more flux per unit area than the nearly
+            # face-on flat disk at the same radius.
+            # cos(theta_face) ~ r_p / d  (face normal points radially toward lamp)
+            # cos(theta_disk) ~ (hlamp - h_disk) / d  (disk normal points up)
+            h_pillar_val = float(np.asarray(disk.get_height(
+                np.atleast_1d(r_pillar), np.atleast_1d(phi_pillar_t))).flat[0])
+            d_lamp = np.sqrt(r_pillar**2 + (disk.hlamp - h_pillar_val)**2)
+            cos_face = r_pillar / d_lamp  # face perpendicular to radial direction
+            h_disk_base = np.interp(r_pillar, disk.r, disk.h_base)
+            d_disk_base = np.sqrt(r_pillar**2 + (disk.hlamp - h_disk_base)**2)
+            cos_disk = (disk.hlamp - h_disk_base) / d_disk_base  # flat disk
+            irrad_enhancement = cos_face / (cos_disk + 1e-10)
+            log_phi_illuminated = np.clip(
+                log_phi_baseline + np.log10(max(irrad_enhancement, 1.0)),
+                phi_grid[0], phi_grid[-1])
+            # Shadow face: only viscous temperature (no irradiation)
+            T_ratio_shadow = np.clip(T_visc_rp / T_ref, 0.1, 10.0)
+            T_ratio_norm_shadow = (T_ratio_shadow - 0.1) / (10.0 - 0.1)
+            log_phi_shadow = np.clip(
+                17.0 + T_ratio_norm_shadow * (21.5 - 17.0),
+                phi_grid[0], phi_grid[-1])
+
+            # Keplerian velocity at pillar radius
             v_phi_pillar = v_virial_cgs * np.sqrt(r_virial / r_pillar)
-            v_los_pillar = v_phi_pillar * np.sin(phi_pillar_t) * disk.sini
-            
-            # Process each emission line
-            for line_key, lambda0 in lambda0_dict.items():
-                # Doppler shift
-                lambda_obs_pillar = lambda0 * (1.0 + v_los_pillar / C)
-                
-                lambda_grid = lambda_grid_dict[line_key]
-                lambda_min = lambda_grid[0]
-                lambda_max = lambda_grid[-1]
-                dlambda = (lambda_max - lambda_min) / (nlambda - 1)
-                
-                if lambda_obs_pillar < lambda_min or lambda_obs_pillar > lambda_max:
-                    continue
-                
-                # Get line intensity from Cloudy
-                cloudy_key = line_key
-                if line_key == 'Halpha':
-                    cloudy_key = 'Halpha'
-                elif line_key == 'Mg2':
-                    cloudy_key = 'Mg2'
-                elif line_key == 'C4':
-                    cloudy_key = 'C4'
-                
-                if cloudy_key in cloudy_interp_dict:
-                    line_intensity_pillar = float(cloudy_interp_dict[cloudy_key](log_phi_pillar, Z_target, grid=False))
-                else:
-                    line_intensity_pillar = 10.0  # Enhanced pillar emission
-                
-                # Pillar emission strength
-                sigma_r = pillar.get('sigma_r', 2.0)
-                sigma_phi = pillar.get('sigma_phi', 0.2)
-                area_pillar = 2 * np.pi * sigma_r * sigma_phi * r_pillar
-                pillar_weight = area_pillar * line_intensity_pillar * 5.0
-                
-                # Wavelength spread
-                siglambda_pillar = dlambda * 2
-                nsigma_lambda = 3
-                ilambda_min_p = max(0, int((lambda_obs_pillar - lambda_min - nsigma_lambda * siglambda_pillar) / dlambda))
-                ilambda_max_p = min(nlambda - 1, int((lambda_obs_pillar - lambda_min + nsigma_lambda * siglambda_pillar) / dlambda))
-                
-                # Add Gaussian-weighted contribution
-                gauss_lambda_norm_p = 0.0
-                for il in range(ilambda_min_p, ilambda_max_p + 1):
-                    lambda_rel = lambda_obs_pillar - lambda_grid[il]
-                    gauss = np.exp(-0.5 * (lambda_rel / siglambda_pillar)**2)
-                    gauss_lambda_norm_p += gauss
-                
-                if gauss_lambda_norm_p > 0:
-                    for ilambda in range(ilambda_min_p, ilambda_max_p + 1):
-                        lambda_rel = lambda_obs_pillar - lambda_grid[ilambda]
-                        gauss_lambda = np.exp(-0.5 * (lambda_rel / siglambda_pillar)**2) / gauss_lambda_norm_p
-                        flux_slice_dict[line_key][ilambda] += pillar_weight * gauss_lambda
-    
+
+            # Sample the pillar across ±3 sigma_phi
+            n_phi_samples = max(20, int(6 * sigma_phi_p / 0.05))
+            n_phi_samples = min(n_phi_samples, 200)
+            dphi_arr = np.linspace(-3 * sigma_phi_p, 3 * sigma_phi_p, n_phi_samples)
+            delta_dphi = dphi_arr[1] - dphi_arr[0] if n_phi_samples > 1 else 6 * sigma_phi_p
+
+            # Debug output for first pillar at selected time steps
+            if itime % 10 == 0 and pillar == disk.pillars[0]:
+                cos_phi_c = np.cos(phi_pillar_t)
+                foreshort_c = np.abs(cos_phi_c * disk.sini)
+                seeing = "shadow" if cos_phi_c * disk.sini > 0 else "illuminated"
+                print(f"  t={t:.1f}d, phi_t={np.degrees(phi_pillar_t):.1f}deg, "
+                      f"foreshort={foreshort_c:.3f}, seeing={seeing}, "
+                      f"log_phi_base={log_phi_baseline:.2f}, "
+                      f"log_phi_illum={log_phi_illuminated:.2f} (enhance={irrad_enhancement:.1f}x), "
+                      f"n_samples={n_phi_samples}")
+
+            for dphi_s in dphi_arr:
+                phi_s = phi_pillar_t + dphi_s
+                gauss_weight = np.exp(-0.5 * (dphi_s / sigma_phi_p)**2)
+
+                # Foreshortening of the radial face: |cos(φ) · sin(i)|
+                # Sign of cos(φ)·sin(i) determines which face is visible:
+                #   > 0 → observer sees outward (shadow) face
+                #   < 0 → observer sees inward (illuminated) face
+                # Use a smooth blend so the transition through quadrature
+                # (edge-on, foreshortening=0) is gradual, not a step.
+                face_dot_obs = np.cos(phi_s) * disk.sini
+                foreshortening = np.abs(face_dot_obs)
+
+                # Smooth blend: 0 = illuminated face, 1 = shadow face
+                # tanh gives a smooth sigmoid; width ~0.05 in face_dot_obs
+                blend = 0.5 * (1.0 + np.tanh(face_dot_obs / 0.05))
+                log_phi_face = (1.0 - blend) * log_phi_illuminated + blend * log_phi_shadow
+
+                # Area element: wall height × azimuthal arc × Gaussian weight
+                # The face is a vertical wall of height h_pillar (not sigma_r).
+                area_s = h_pillar_p * r_pillar * delta_dphi * gauss_weight
+
+                # LOS velocity at this azimuth
+                v_los_s = v_phi_pillar * np.sin(phi_s) * disk.sini
+
+                for line_key, lambda0 in lambda0_dict.items():
+                    lambda_obs_s = lambda0 * (1.0 + v_los_s / C)
+
+                    lambda_grid_line = lambda_grid_dict[line_key]
+                    lambda_min = lambda_grid_line[0]
+                    lambda_max = lambda_grid_line[-1]
+                    dlambda = (lambda_max - lambda_min) / (nlambda - 1)
+
+                    if lambda_obs_s < lambda_min or lambda_obs_s > lambda_max:
+                        continue
+
+                    cloudy_key = line_key
+                    if cloudy_key in cloudy_interp_dict:
+                        face_intensity = float(cloudy_interp_dict[cloudy_key](log_phi_face, Z_target, grid=False))
+                        shadow_intensity = float(cloudy_interp_dict[cloudy_key](log_phi_shadow, Z_target, grid=False))
+                        # The face replaces the view of disk cells behind
+                        # the pillar.  Those cells are always in shadow
+                        # (the shadow extends radially outward from the
+                        # pillar regardless of observer direction).
+                        replaced_intensity = shadow_intensity
+                    else:
+                        face_intensity = 10.0
+                        replaced_intensity = 0.0
+
+                    # Net contribution: face emission minus what it covers.
+                    # Far side: illuminated face − shadow ≈ large positive
+                    # Near side: shadow face − shadow ≈ 0 (no net change)
+                    delta_intensity = face_intensity - replaced_intensity
+                    pillar_weight = area_s * delta_intensity * foreshortening
+
+                    siglambda_s = dlambda
+                    nsigma_lambda = 2
+                    il_min = max(0, int((lambda_obs_s - lambda_min - nsigma_lambda * siglambda_s) / dlambda))
+                    il_max = min(nlambda - 1, int((lambda_obs_s - lambda_min + nsigma_lambda * siglambda_s) / dlambda))
+
+                    gauss_norm = 0.0
+                    for il in range(il_min, il_max + 1):
+                        gauss_norm += np.exp(-0.5 * ((lambda_obs_s - lambda_grid_line[il]) / siglambda_s)**2)
+
+                    if gauss_norm > 0:
+                        for ilambda in range(il_min, il_max + 1):
+                            gl = np.exp(-0.5 * ((lambda_obs_s - lambda_grid_line[ilambda]) / siglambda_s)**2) / gauss_norm
+                            flux_slice_dict[line_key][ilambda] += pillar_weight * gl
+
+        # Restore original pillar positions
+        for j, p in enumerate(disk.pillars):
+            p['phi'] = original_pillar_phis[j]
+
     return itime, flux_slice_dict
 
 
@@ -492,24 +642,20 @@ def compute_time_evolving_cloudy_map(disk, cloudy_interp_dict, phi_grid, lambda0
         lambda_grid = np.linspace(lambda_min, lambda_max, nlambda)
         lambda_grid_dict[line_key] = lambda_grid
     
-    # Time grid - estimate from orbital period at pillar location if not specified
+    # Time grid
     if tmax is None:
-        r_virial = disk.r0
+        r_virial_loc = disk.r0
         if len(disk.pillars) > 0:
-            # Use mean pillar radius for orbital period calculation
             pillar_radii = [pillar['r'] for pillar in disk.pillars]
             r_pillar_mean = np.mean(pillar_radii)
-            T_pillar = compute_orbital_period(r_pillar_mean, v_virial, r_virial)
-            tmax = 2.0 * T_pillar  # 2 orbital periods at mean pillar radius
-            print(f"Auto-computed tmax = {tmax:.1f} days (orbital period at mean pillar radius r={r_pillar_mean:.1f} ld = {T_pillar:.1f} days)")
+            T_orbital = compute_orbital_period(r_pillar_mean, v_virial, r_virial_loc)
         else:
-            # Fall back to outer disk radius if no pillars
-            T_outer = compute_orbital_period(disk.rout, v_virial, r_virial)
-            tmax = 2.0 * T_outer  # 2 orbital periods at outer radius
-            print(f"Auto-computed tmax = {tmax:.1f} days (orbital period at r_out = {T_outer:.1f} days, no pillars found)")
-    
-    time_grid = np.linspace(0, tmax, ntime)
-    dtime = tmax / (ntime - 1)
+            T_orbital = compute_orbital_period(disk.rout, v_virial, r_virial_loc)
+        tmax = 2.0 * T_orbital
+        print(f"Auto-computed tmax = {tmax:.1f} days (2 × T_orbital = {T_orbital:.1f} days)")
+
+    time_grid = np.linspace(0, tmax, ntime, endpoint=False)
+    dtime = tmax / ntime
     
     # Initialize flux maps for each line
     flux_map_dict = {}
@@ -668,13 +814,15 @@ def plot_time_evolving_cloudy_map(lambda_grid_dict, time_grid, flux_map_dict, la
     plt.close()
 
 
-def plot_time_evolving_residual_map(lambda_grid_dict, time_grid,
-                                    flux_with_pillars, flux_without_pillars,
-                                    lambda0_dict,
-                                    filename='velocity_time_cloudy_residual.png'):
+def plot_time_evolving_diff_map(lambda_grid_dict, time_grid,
+                                flux_with_pillars, flux_without_pillars,
+                                lambda0_dict,
+                                filename='velocity_time_cloudy_diff.png'):
     """
-    Plot the residual time-evolving velocity maps: (with pillars - without pillars).
-    
+    Plot the difference time-evolving velocity maps: (with pillars - without pillars).
+
+    This shows the contribution of pillars to the emission.
+
     Parameters:
     -----------
     lambda_grid_dict : dict
@@ -690,43 +838,43 @@ def plot_time_evolving_residual_map(lambda_grid_dict, time_grid,
     filename : str
         Output filename
     """
-    print(f"  Creating residual figure with {len(lambda_grid_dict)} panels...")
+    print(f"  Creating difference figure with {len(lambda_grid_dict)} panels...")
     n_lines = len(lambda_grid_dict)
     fig, axes = plt.subplots(n_lines, 1, figsize=(14, 5*n_lines))
-    
+
     if n_lines == 1:
         axes = [axes]
-    
+
     line_labels = {'Halpha': r'H\alpha', 'Mg2': r'MgII', 'C4': r'CIV'}
-    
+
     for idx, (line_key, lambda_grid) in enumerate(lambda_grid_dict.items()):
         ax = axes[idx]
         flux_with = flux_with_pillars[line_key]
         flux_without = flux_without_pillars[line_key]
-        
-        residual = flux_with - flux_without
-        
+
+        diff = flux_with - flux_without
+
         # Choose symmetric color scale around zero
-        vmax = np.nanmax(np.abs(residual))
+        vmax = np.nanmax(np.abs(diff))
         if not np.isfinite(vmax) or vmax == 0:
             vmax = 1.0
         vmin = -vmax
-        
-        im = ax.pcolormesh(lambda_grid, time_grid, residual, shading='auto',
+
+        im = ax.pcolormesh(lambda_grid, time_grid, diff, shading='auto',
                            cmap='seismic', vmin=vmin, vmax=vmax)
         lambda0 = lambda0_dict[line_key]
         ax.axvline(lambda0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
         ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=14)
         ax.set_ylabel(r'$\rm Time~[days]$', fontsize=14)
         line_label = line_labels.get(line_key, line_key)
-        ax.set_title(rf'$\rm {line_label}~Residual~(with - without~pillars)$', fontsize=16, pad=10)
+        ax.set_title(rf'$\rm {line_label}~(with~pillars - without~pillars)$', fontsize=16, pad=10)
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
         ax.set_ylim(time_grid[0], time_grid[-1])
         plt.colorbar(im, ax=ax, label=r'$\rm \Delta Flux$')
         ax.minorticks_on()
         ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
         ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
+
         # Add velocity axis on top
         ax2 = ax.twiny()
         v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
@@ -742,10 +890,93 @@ def plot_time_evolving_residual_map(lambda_grid_dict, time_grid,
         ax2.minorticks_on()
         ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
         ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-    
+
     plt.tight_layout()
     plt.savefig(filename, dpi=150, bbox_inches='tight')
-    print(f"Residual time-evolving velocity maps saved to {filename}")
+    print(f"Difference time-evolving velocity maps saved to {filename}")
+    plt.close()
+
+
+def plot_time_evolving_residual_map(lambda_grid_dict, time_grid, flux_map_dict, lambda0_dict,
+                                    filename='velocity_time_cloudy_residual.png'):
+    """
+    Plot the true residual time-evolving velocity maps: flux(t) - <flux>_t.
+
+    The residual is computed by subtracting the time-averaged spectrum at each wavelength.
+    This reveals time-variable features like the barber-pole pattern from rotating pillars.
+
+    Parameters:
+    -----------
+    lambda_grid_dict : dict
+        Dictionary of wavelength grids per line
+    time_grid : array
+        Time grid (days)
+    flux_map_dict : dict
+        Dictionary of flux maps per line (ntime x nlambda)
+    lambda0_dict : dict
+        Dictionary of rest wavelengths per line
+    filename : str
+        Output filename
+    """
+    print(f"  Creating residual (time-averaged subtracted) figure with {len(lambda_grid_dict)} panels...")
+    n_lines = len(lambda_grid_dict)
+    fig, axes = plt.subplots(n_lines, 1, figsize=(14, 5*n_lines))
+
+    if n_lines == 1:
+        axes = [axes]
+
+    line_labels = {'Halpha': r'H\alpha', 'Mg2': r'MgII', 'C4': r'CIV'}
+
+    for idx, (line_key, lambda_grid) in enumerate(lambda_grid_dict.items()):
+        ax = axes[idx]
+        flux_map = flux_map_dict[line_key]  # Shape: (ntime, nlambda)
+
+        # Compute time-averaged spectrum at each wavelength
+        time_avg = np.mean(flux_map, axis=0)  # Shape: (nlambda,)
+
+        # Compute residual: flux(t, lambda) - <flux(lambda)>_t
+        residual = flux_map - time_avg[np.newaxis, :]  # Broadcasting: (ntime, nlambda)
+
+        # Choose symmetric color scale around zero
+        vmax = np.nanmax(np.abs(residual))
+        if not np.isfinite(vmax) or vmax == 0:
+            vmax = 1.0
+        vmin = -vmax
+
+        im = ax.pcolormesh(lambda_grid, time_grid, residual, shading='auto',
+                           cmap='seismic', vmin=vmin, vmax=vmax)
+        lambda0 = lambda0_dict[line_key]
+        ax.axvline(lambda0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
+        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=14)
+        ax.set_ylabel(r'$\rm Time~[days]$', fontsize=14)
+        line_label = line_labels.get(line_key, line_key)
+        ax.set_title(rf'$\rm {line_label}~Residual~(F(t,\lambda) - \langle F(\lambda) \rangle_t)$', fontsize=16, pad=10)
+        ax.set_xlim(lambda_grid[0], lambda_grid[-1])
+        ax.set_ylim(time_grid[0], time_grid[-1])
+        plt.colorbar(im, ax=ax, label=r'$\rm Residual~Flux$')
+        ax.minorticks_on()
+        ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
+        ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
+
+        # Add velocity axis on top
+        ax2 = ax.twiny()
+        v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
+        ax2.set_xlim(ax.get_xlim())
+        ax2.set_xlabel(r'$\rm Velocity~[km/s]$', labelpad=10)
+        v_min = v_km_s[0]
+        v_max = v_km_s[-1]
+        n_ticks = 5
+        v_ticks = np.linspace(v_min, v_max, n_ticks)
+        lambda_ticks = lambda0 * (1.0 + v_ticks * KM_TO_CM / C)
+        ax2.set_xticks(lambda_ticks)
+        ax2.set_xticklabels([rf'${v:.0f}$' for v in v_ticks])
+        ax2.minorticks_on()
+        ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
+        ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"Residual (time-averaged subtracted) maps saved to {filename}")
     plt.close()
 
 
@@ -939,7 +1170,54 @@ def main(config_file='config_line.yaml', use_absolute_flux=False):
     # Add pillars
     for pillar_cfg in pillars_config:
         disk.add_pillar(**pillar_cfg)
-    
+
+    # ---- Geometry visualization at t=0 ----
+    print("\n--- Geometry check at t=0 ---")
+
+    # 3D geometry plot
+    disk.plot_3d_geometry(show_light_rays=True, filename='geometry_t0_3d.png')
+    print("  Saved 3D geometry: geometry_t0_3d.png")
+
+    # Face-on ionizing flux + height map (r-phi plane)
+    # Build radial grid with refinement around each pillar so that narrow
+    # pillars (sigma_r << global grid spacing) are properly resolved.
+    nphi_plot = 360
+    r_coarse = np.linspace(disk.rin, disk.rout, 200)
+    r_refined_parts = [r_coarse]
+    for p in disk.pillars:
+        sr = max(p['sigma_r'], 0.01)
+        r_lo = max(disk.rin, p['r'] - 5*sr)
+        r_hi = min(disk.rout, p['r'] + 5*sr)
+        r_refined_parts.append(np.linspace(r_lo, r_hi, 60))
+    r_plot = np.unique(np.concatenate(r_refined_parts))
+    phi_plot = np.linspace(0, 2*np.pi, nphi_plot)
+    r_2d_plot, phi_2d_plot = np.meshgrid(r_plot, phi_plot, indexing='ij')
+
+    h_2d_plot = disk.get_height(r_2d_plot, phi_2d_plot)
+    log_phi_2d_plot = compute_ionizing_flux(disk, r_2d_plot, phi_2d_plot)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), subplot_kw={'projection': 'polar'})
+
+    ax0 = axes[0]
+    c0 = ax0.pcolormesh(phi_2d_plot, r_2d_plot, h_2d_plot, shading='auto', cmap='terrain')
+    ax0.set_title(r'$\rm Disk~Height$', pad=15)
+    fig.colorbar(c0, ax=ax0, pad=0.1)
+    for p in disk.pillars:
+        ax0.plot(p['phi'], p['r'], 'r*', markersize=5)
+
+    ax1 = axes[1]
+    c1 = ax1.pcolormesh(phi_2d_plot, r_2d_plot, log_phi_2d_plot, shading='auto', cmap='inferno')
+    ax1.set_title(r'$\rm Ionizing~Flux$', pad=15)
+    fig.colorbar(c1, ax=ax1, pad=0.1)
+    for p in disk.pillars:
+        ax1.plot(p['phi'], p['r'], 'c*', markersize=5)
+
+    plt.tight_layout()
+    plt.savefig('geometry_t0_faceon.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("  Saved face-on map: geometry_t0_faceon.png")
+    print("--- End geometry check ---\n")
+
     # Load Cloudy models
     if use_absolute_flux:
         cloudy_file = '/Users/jiamuh/c23.01/my_models/loc_metal_flux/strong_LOC_varym_N25_v100_lineflux_LineList_BLR_Fe2_flux.txt'
@@ -974,11 +1252,28 @@ def main(config_file='config_line.yaml', use_absolute_flux=False):
     nlambda = int(comp_params.get('nlambda', 200))
     ntime = int(comp_params.get('ntime', 50))  # Default: 50 steps
     tmax_config = comp_params.get('tmax', None)
-    tmax = float(tmax_config) if tmax_config is not None else 3000.0  # Default: 3000 days
+    tmax = float(tmax_config) if tmax_config is not None else None
     n_cores = comp_params.get('n_cores', None)  # None = auto-detect
     if n_cores is not None:
         n_cores = int(n_cores)
-    
+
+    # Round tmax to integer orbital periods for exact periodicity
+    if len(disk.pillars) > 0:
+        pillar_radii = [p['r'] for p in disk.pillars]
+        r_pillar_mean = np.mean(pillar_radii)
+        T_orbital = compute_orbital_period(r_pillar_mean, v_virial, disk.r0)
+        if tmax is not None:
+            n_orbits = max(1, round(tmax / T_orbital))
+            tmax_orig = tmax
+            tmax = n_orbits * T_orbital
+            print(f"Adjusted tmax: {tmax_orig:.1f} → {tmax:.1f} days "
+                  f"({n_orbits} × T_orbital={T_orbital:.1f}d at r={r_pillar_mean:.1f})")
+        else:
+            tmax = 2.0 * T_orbital
+            print(f"Auto tmax = {tmax:.1f} days (2 × T_orbital={T_orbital:.1f}d)")
+    elif tmax is None:
+        tmax = 3000.0
+
     print(f"\nComputing time-evolving velocity maps with Cloudy models:")
     print(f"  Lines: {list(lambda0_dict.keys())}")
     print(f"  Rest wavelengths: {lambda0_dict}")
@@ -1014,13 +1309,22 @@ def main(config_file='config_line.yaml', use_absolute_flux=False):
         normalize_output=False
     )
     
-    # Plot residual maps (with - without pillars)
+    # Plot difference maps (with pillars - without pillars)
+    diff_filename = plot_params.get('velocity_time_cloudy_diff_filename',
+                                    'velocity_time_cloudy_diff.png')
+    plot_time_evolving_diff_map(
+        lambda_grid_dict, time_grid,
+        flux_with_pillars, flux_without_pillars,
+        lambda0_dict,
+        filename=diff_filename
+    )
+
+    # Plot true residual maps (flux - time-averaged flux)
     residual_filename = plot_params.get('velocity_time_cloudy_residual_filename',
                                         'velocity_time_cloudy_residual.png')
     plot_time_evolving_residual_map(
         lambda_grid_dict, time_grid,
-        flux_with_pillars, flux_without_pillars,
-        lambda0_dict,
+        flux_with_pillars, lambda0_dict,
         filename=residual_filename
     )
     print("Plotting complete.")

@@ -6,6 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an AGN accretion disk modeling toolkit that computes time delay spectra and spectral energy distributions (SEDs) for accretion disks with Gaussian pillar bumps. The code models lamp-post irradiated bowl-shaped accretion discs for studying continuum lags in active galactic nuclei.
 
+## Environment
+
+All code runs in the conda environment `pypeit`:
+```bash
+conda activate pypeit
+```
+
 ## Running the Code
 
 ```bash
@@ -73,3 +80,18 @@ Enable parallel processing: `use_parallel: true` in config or `parallel=True` in
 - Flux: mJy
 - Delays: days
 - Velocities: km/s
+
+## Known Bugs / TODO
+
+### Foreshortening Effect in Barber Pole Pattern (pillar_line_time_cloudy.py)
+**Status**: Bug - needs investigation
+
+The barber pole pattern should show asymmetry between near side and far side of the disk:
+- **Near side (φ ≈ 0°)**: Observer sees shadow side of pillar → stronger MgII (low ionization), weaker CIV
+- **Far side (φ ≈ 180°)**: Observer sees illuminated side of pillar → stronger CIV (high ionization), weaker MgII
+
+Current implementation in `_process_time_step()` computes `illumination_visibility` based on the dot product of lamp-to-pillar direction with observer direction, but the effect is not clearly visible in the output plots.
+
+**To debug**: Artificially exaggerate the `foreshortening_factor` and `line_asymmetry` parameters. The inclination is set via `cosi` in config (cosi=0.5 corresponds to i=60°, not 45°; for 45° use cosi≈0.707).
+
+**Location**: `pillar_line_time_cloudy.py`, lines ~377-476 in `_process_time_step()`

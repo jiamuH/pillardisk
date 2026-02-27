@@ -333,7 +333,17 @@ class PillarDisk:
     def _compute_shadow_mask(self, r: np.ndarray, phi: np.ndarray, h: np.ndarray) -> np.ndarray:
         """
         Compute shadow mask: 1 if point is illuminated, 0 if in shadow.
-        
+
+        Since the lamp is at (0, 0, hlamp), a ray from the lamp to any disk
+        point at (r, phi) travels radially outward at constant azimuth phi.
+        At intermediate radius r_p, the ray height is:
+            z_ray = hlamp + (r_p / r) * (h_disk - hlamp)
+
+        A pillar at (r_p, phi_p) shadows the disk point if the pillar height
+        at (r_p, phi) exceeds z_ray.  The pillar height profile at its own
+        radius (dr=0) is just the azimuthal Gaussian:
+            h_pillar(phi) = h_base(r_p) + height * exp(-0.5*((phi-phi_p)/sigma_phi)^2)
+
         Parameters:
         -----------
         r : array
@@ -342,132 +352,61 @@ class PillarDisk:
             Azimuthal positions (radians), 2D
         h : array
             Heights at (r, phi), 2D
-        
+
         Returns:
         --------
         shadow_mask : array
             Mask: 1.0 = illuminated, 0.0 = in shadow (2D, same shape as r)
         """
         shadow_mask = np.ones_like(r)
-        
+
         if len(self.pillars) == 0:
             return shadow_mask
-        
-        # Lamp position: (0, 0, hlamp)
-        lamp_x = 0.0
-        lamp_y = 0.0
-        lamp_z = self.hlamp
-        
-        # Convert to Cartesian coordinates
-        x = r * np.cos(phi)
-        y = r * np.sin(phi)
-        z = h
-        
+
         for pillar in self.pillars:
-            # Pillar position
+            if not pillar['modify_height']:
+                continue
+
             r_p = pillar['r']
             phi_p = pillar['phi']
-            h_p = self.get_height(np.array([r_p]), np.array([phi_p]))[0, 0]
-            
-            x_p = r_p * np.cos(phi_p)
-            y_p = r_p * np.sin(phi_p)
-            z_p = h_p
-            
-            # Vector from lamp to disk point
-            dx_lamp = x - lamp_x
-            dy_lamp = y - lamp_y
-            dz_lamp = z - lamp_z
-            dlamp = np.sqrt(dx_lamp**2 + dy_lamp**2 + dz_lamp**2)
-            
-            # Vector from lamp to pillar
-            dx_pillar = x_p - lamp_x
-            dy_pillar = y_p - lamp_y
-            dz_pillar = z_p - lamp_z
-            dlamp_pillar = np.sqrt(dx_pillar**2 + dy_pillar**2 + dz_pillar**2)
-            
-            # Check if disk point is behind pillar (further from lamp than pillar)
-            # Only consider points that are at larger radius than pillar
-            behind_pillar = (r > r_p) & (dlamp > dlamp_pillar)
-            
-            if not np.any(behind_pillar):
+
+            # Only points beyond the pillar radius can be shadowed
+            behind = r > r_p
+            if not np.any(behind):
                 continue
-            
-            # For points behind pillar, check if line from lamp to disk point passes through pillar
-            # Parameterize line: P(t) = lamp + t * (disk_point - lamp), t in [0, 1]
-            # We want to find if the ray intersects the pillar region
-            
-            # Vector along ray (from lamp to disk point)
-            vx = dx_lamp[behind_pillar]
-            vy = dy_lamp[behind_pillar]
-            vz = dz_lamp[behind_pillar]
-            
-            # Vector from lamp to pillar
-            vpx = dx_pillar
-            vpy = dy_pillar
-            vpz = dz_pillar
-            
-            # Project pillar vector onto ray to find closest point
-            # t = dot(vp, v) / dot(v, v) gives parameter along ray
-            v_dot_v = vx**2 + vy**2 + vz**2
-            vp_dot_v = vpx * vx + vpy * vy + vpz * vz
-            
-            # Avoid division by zero
-            t_proj = np.zeros_like(v_dot_v)
-            mask_nonzero = v_dot_v > 1e-10
-            t_proj[mask_nonzero] = vp_dot_v[mask_nonzero] / v_dot_v[mask_nonzero]
-            
-            # Only consider rays that pass between lamp and disk point (0 < t < 1)
-            # and are close to the pillar position along the ray
-            t_valid = (t_proj > 0) & (t_proj < 1)
-            
-            if not np.any(t_valid):
-                continue
-            
-            # Closest point on ray to pillar (for valid rays)
-            x_closest = lamp_x + t_proj * vx
-            y_closest = lamp_y + t_proj * vy
-            z_closest = lamp_z + t_proj * vz
-            
-            # Distance from closest point to pillar center
-            dx_closest = x_closest - x_p
-            dy_closest = y_closest - y_p
-            dz_closest = z_closest - z_p
-            d_closest = np.sqrt(dx_closest**2 + dy_closest**2 + dz_closest**2)
-            
-            # Convert to cylindrical coordinates for Gaussian shadow
-            r_closest = np.sqrt(x_closest**2 + y_closest**2)
-            phi_closest = np.arctan2(y_closest, x_closest)
-            
-            # Distance from pillar center in (r, phi) space
-            dr_shadow = r_closest - r_p
-            dphi_shadow = phi_closest - phi_p
-            dphi_shadow = np.mod(dphi_shadow + np.pi, 2*np.pi) - np.pi
-            
-            # Shadow size increases with distance from pillar
-            # For a point at distance d from lamp, shadow size scales as sigma * (d / d_pillar)
-            distance_factor = dlamp[behind_pillar] / (dlamp_pillar + 1e-10)
-            sigma_r_shadow = pillar['sigma_r'] * distance_factor
-            sigma_phi_shadow = pillar['sigma_phi'] * distance_factor
-            
-            # Gaussian shadow profile in (r, phi) space
-            shadow_gauss_rphi = np.exp(-0.5 * ((dr_shadow / sigma_r_shadow)**2 + 
-                                              (dphi_shadow / sigma_phi_shadow)**2))
-            
-            # Vertical shadow: how close does the ray pass to the pillar center?
-            # Use pillar sigma_r as a proxy for vertical extent
-            vertical_shadow = np.exp(-0.5 * (d_closest / (pillar['sigma_r'] * 0.5))**2)
-            
-            # Combined shadow strength: ray passes through pillar if both conditions are met
-            # Only apply shadow if ray actually passes through pillar region (t_valid)
-            shadow_strength = np.zeros_like(shadow_mask[behind_pillar])
-            shadow_strength[t_valid] = shadow_gauss_rphi[t_valid] * vertical_shadow[t_valid]
-            
-            # Update shadow mask: reduce illumination in shadow region
-            shadow_mask[behind_pillar] *= (1.0 - shadow_strength)
-        
-        # Ensure mask is between 0 and 1
+
+            # Ray height at r_p for each disk point at (r, phi, h):
+            #   z_ray = hlamp + (r_p / r) * (h - hlamp)
+            # This is the height of the line-of-sight from the lamp at the
+            # radial position of the pillar.
+            z_ray = np.where(behind,
+                             self.hlamp + (r_p / r) * (h - self.hlamp),
+                             np.inf)
+
+            # Pillar height at (r_p, phi_disk).  At r = r_p the radial
+            # Gaussian term is 1, so only the azimuthal profile matters.
+            dphi = phi - phi_p
+            dphi = np.mod(dphi + np.pi, 2*np.pi) - np.pi
+            gauss_phi = np.exp(-0.5 * (dphi / pillar['sigma_phi'])**2)
+
+            h_base_rp = np.interp(r_p, self.r, self.h_base)
+            h_pillar_at_phi = h_base_rp + pillar['height'] * gauss_phi
+
+            # Shadow: where pillar is taller than the ray
+            shadowed = behind & (h_pillar_at_phi > z_ray)
+
+            # Smooth shadow strength: proportional to how far the ray
+            # dips below the pillar top, normalised by the pillar height.
+            # 0 = ray just grazes pillar top, 1 = ray well below.
+            excess = np.where(shadowed,
+                              (h_pillar_at_phi - z_ray) / (pillar['height'] + 1e-10),
+                              0.0)
+            shadow_strength = np.clip(excess, 0.0, 1.0)
+
+            shadow_mask *= (1.0 - shadow_strength)
+
         shadow_mask = np.clip(shadow_mask, 0.0, 1.0)
-        
+
         return shadow_mask
     
     def get_temperature(self, r: np.ndarray, phi: np.ndarray, compute_shadows: bool = True) -> np.ndarray:

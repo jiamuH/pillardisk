@@ -1174,9 +1174,40 @@ def main(config_file='config_line.yaml', use_absolute_flux=False):
     # ---- Geometry visualization at t=0 ----
     print("\n--- Geometry check at t=0 ---")
 
-    # 3D geometry plot
-    disk.plot_3d_geometry(show_light_rays=True, filename='geometry_t0_3d.png')
-    print("  Saved 3D geometry: geometry_t0_3d.png")
+    # 3D geometry plots at different orbital phases for debugging foreshortening
+    # The observer is FIXED (looking from +x direction at inclination i)
+    # We show the pillar at different azimuthal positions (simulating rotation)
+    # - near: φ=0 (pillar between observer and lamp) → observer sees shadow side
+    # - quad1: φ=π/2 (pillar at +y) → observer sees pillar from side
+    # - far: φ=π (pillar behind lamp from observer) → observer sees illuminated side
+    # - quad2: φ=3π/2 (pillar at -y) → observer sees pillar from other side
+
+    # Save original pillar positions
+    original_pillars = [p.copy() for p in disk.pillars]
+
+    orbital_phases = [
+        (0.0, 'phi0_near'),           # φ=0: near side (shadow visible)
+        (np.pi/2, 'phi90_quad1'),     # φ=π/2: quadrature 1
+        (np.pi, 'phi180_far'),        # φ=π: far side (illuminated visible)
+        (3*np.pi/2, 'phi270_quad2'),  # φ=3π/2: quadrature 2
+    ]
+
+    for phi_offset, label in orbital_phases:
+        # Temporarily move all pillars to the new azimuthal position
+        for i, p in enumerate(disk.pillars):
+            p['phi'] = phi_offset + (original_pillars[i]['phi'] - original_pillars[0]['phi'])
+
+        filename_3d = f'geometry_{label}.png'
+        disk.plot_3d_geometry(show_light_rays=False, color_by='flux', filename=filename_3d)
+
+    # Restore original pillar positions
+    for i, p in enumerate(disk.pillars):
+        p['phi'] = original_pillars[i]['phi']
+
+    print(f"  Saved 3D geometry snapshots at different orbital phases:")
+    print(f"    phi0_near: pillar at φ=0, observer sees shadow side")
+    print(f"    phi180_far: pillar at φ=π, observer sees illuminated side")
+    print(f"    phi90_quad1, phi270_quad2: pillar at quadratures")
 
     # Face-on ionizing flux + height map (r-phi plane)
     # Build radial grid with refinement around each pillar so that narrow
@@ -1201,16 +1232,18 @@ def main(config_file='config_line.yaml', use_absolute_flux=False):
     ax0 = axes[0]
     c0 = ax0.pcolormesh(phi_2d_plot, r_2d_plot, h_2d_plot, shading='auto', cmap='terrain')
     ax0.set_title(r'$\rm Disk~Height$', pad=15)
-    fig.colorbar(c0, ax=ax0, pad=0.1)
+    cbar0 = fig.colorbar(c0, ax=ax0, pad=0.1)
+    cbar0.set_label(r'$h~\rm [ld]$')
     for p in disk.pillars:
-        ax0.plot(p['phi'], p['r'], 'r*', markersize=5)
+        ax0.plot(p['phi'], p['r'], 'ro', markersize=4, markerfacecolor='none', markeredgewidth=1.5)
 
     ax1 = axes[1]
     c1 = ax1.pcolormesh(phi_2d_plot, r_2d_plot, log_phi_2d_plot, shading='auto', cmap='inferno')
     ax1.set_title(r'$\rm Ionizing~Flux$', pad=15)
-    fig.colorbar(c1, ax=ax1, pad=0.1)
+    cbar1 = fig.colorbar(c1, ax=ax1, pad=0.1)
+    cbar1.set_label(r'$\log\Phi~\rm [photons~s^{-1}~cm^{-2}]$')
     for p in disk.pillars:
-        ax1.plot(p['phi'], p['r'], 'c*', markersize=5)
+        ax1.plot(p['phi'], p['r'], 'co', markersize=4, markerfacecolor='none', markeredgewidth=1.5)
 
     plt.tight_layout()
     plt.savefig('geometry_t0_faceon.png', dpi=150, bbox_inches='tight')

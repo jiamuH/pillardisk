@@ -1055,12 +1055,17 @@ class PillarDisk:
         self.pillars = saved_pillars
         return result
     
-    def plot_3d_geometry(self, n_phi_plot: int = 180, n_r_plot: int = 200, 
+    def plot_3d_geometry(self, n_phi_plot: int = 180, n_r_plot: int = 200,
                          show_light_rays: bool = True, show_shadows: bool = True,
-                         filename: str = 'pillar_disk_3d.png'):
+                         color_by: str = 'shadow', filename: str = 'pillar_disk_3d.png'):
         """
         Create a 3D visualization of the disk geometry with pillars and light rays.
-        
+
+        The viewing angle is set to match the actual observer inclination:
+        - Observer is at direction (sin(i), 0, cos(i)) in the x-z plane
+        - Camera elevation = 90° - inclination
+        - Camera azimuth = 0° (looking from +x direction)
+
         Parameters:
         -----------
         n_phi_plot : int
@@ -1071,6 +1076,10 @@ class PillarDisk:
             Whether to show light rays from lamp to disk
         show_shadows : bool
             Whether to show shadow regions (illuminated regions in cyan, shadows in dark gray)
+        color_by : str
+            How to color the disk surface:
+            - 'shadow': cyan for illuminated, gray for shadow (default)
+            - 'flux' or 'temperature': color by ionizing flux (log Φ)
         filename : str
             Output filename for the plot
         """
@@ -1114,20 +1123,65 @@ class PillarDisk:
         
         phi_plot = np.linspace(0, 2*np.pi, n_phi_plot, endpoint=False)
         r_2d, phi_2d = np.meshgrid(r_plot, phi_plot, indexing='ij')
-        
+
         # Get height
         h_2d = self.get_height(r_2d, phi_2d)
-        
+
+        # Close the surface by appending the first column (φ=0) as the last column (φ=2π)
+        phi_2d = np.concatenate([phi_2d, phi_2d[:, :1] + 2*np.pi], axis=1)
+        r_2d = np.concatenate([r_2d, r_2d[:, :1]], axis=1)
+        h_2d = np.concatenate([h_2d, h_2d[:, :1]], axis=1)
+
         # Convert to Cartesian coordinates
         x_2d = r_2d * np.cos(phi_2d)
         y_2d = r_2d * np.sin(phi_2d)
         z_2d = h_2d
         
-        # Plot disk surface with shadow visualization if requested
-        if show_shadows and len(self.pillars) > 0:
+        # Plot disk surface with coloring based on color_by parameter
+        if color_by == 'temperature' or color_by == 'flux':
+            # Compute ionizing flux (same formula as compute_ionizing_flux in pillar_line_cloudy.py)
+            T_2d = self.get_temperature(r_2d, phi_2d, compute_shadows=True)
+            T_ref = self.tv1 * self.tirrad_tvisc_ratio
+            T_ratio = T_2d / T_ref
+            T_ratio_clipped = np.clip(T_ratio, 0.1, 10.0)
+            T_ratio_normalized = (T_ratio_clipped - 0.1) / (10.0 - 0.1)
+
+            # Map to log ionizing flux range [17, 21.5]
+            phi_min = 17.0
+            phi_max = 21.5
+            log_phi_2d = phi_min + T_ratio_normalized * (phi_max - phi_min)
+
+            # In shadows, set to minimum
+            shadow_mask = T_2d < (T_ref * 0.1)
+            log_phi_2d[shadow_mask] = phi_min
+
+            # Normalize for colormap
+            log_phi_norm = (log_phi_2d - phi_min) / (phi_max - phi_min)
+            log_phi_norm = np.clip(log_phi_norm, 0, 1)
+
+            # Use 'inferno' colormap (same as ionizing flux plot)
+            from matplotlib import cm
+            cmap = cm.inferno
+            plot_colors = cmap(log_phi_norm)
+            plot_colors[:, :, 3] = 0.8  # Set alpha
+
+            # Plot disk surface with ionizing flux coloring
+            surf = ax.plot_surface(x_2d, y_2d, z_2d, facecolors=plot_colors,
+                           edgecolor='none', shade=False, antialiased=True,
+                           linewidth=0, rstride=1, cstride=1)
+
+            # Add colorbar for ionizing flux
+            from matplotlib.colors import Normalize
+            norm = Normalize(vmin=phi_min, vmax=phi_max)
+            mappable = cm.ScalarMappable(cmap=cmap, norm=norm)
+            mappable.set_array(log_phi_2d)
+            cbar = plt.colorbar(mappable, ax=ax, shrink=0.5, pad=0.1)
+            cbar.set_label(r'$\log\Phi~\rm [photons~s^{-1}~cm^{-2}]$')
+
+        elif show_shadows and len(self.pillars) > 0:
             # Compute shadow mask
             shadow_mask = self._compute_shadow_mask(r_2d, phi_2d, h_2d)
-            
+
             # Create colormap: illuminated regions are cyan, shadowed regions are dark gray
             # Use shadow_mask to create colors
             colors = np.zeros((r_2d.shape[0], r_2d.shape[1], 4))  # RGBA
@@ -1136,33 +1190,32 @@ class PillarDisk:
             colors[:, :, 1] = 1.0  # G
             colors[:, :, 2] = 1.0  # B
             colors[:, :, 3] = 0.6 * shadow_mask + 0.2 * (1.0 - shadow_mask)  # Alpha: brighter when illuminated
-            
+
             # Shadowed regions: dark gray
             shadow_colors = np.zeros_like(colors)
             shadow_colors[:, :, 0] = 0.3  # R
             shadow_colors[:, :, 1] = 0.3  # G
             shadow_colors[:, :, 2] = 0.3  # B
             shadow_colors[:, :, 3] = 0.3  # Alpha
-            
+
             # Blend colors based on shadow mask
             plot_colors = colors * shadow_mask[:, :, np.newaxis] + shadow_colors * (1.0 - shadow_mask[:, :, np.newaxis])
-            
+
             # Plot disk surface with shadow coloring
-            ax.plot_surface(x_2d, y_2d, z_2d, facecolors=plot_colors, 
+            ax.plot_surface(x_2d, y_2d, z_2d, facecolors=plot_colors,
                            edgecolor='none', shade=True, antialiased=True,
                            linewidth=0, rstride=1, cstride=1)
         else:
             # Plot disk surface without shadow coloring
-            ax.plot_surface(x_2d, y_2d, z_2d, alpha=0.6, color='cyan', 
+            ax.plot_surface(x_2d, y_2d, z_2d, alpha=0.6, color='cyan',
                            edgecolor='none', shade=True, antialiased=True,
                            linewidth=0, rstride=1, cstride=1)
         
-        # Plot lamp post
-        ax.scatter([0], [0], [self.hlamp], color='yellow', s=200, 
-                  marker='*', label='Lamp Post', edgecolors='orange', linewidths=2)
-        
-        # Plot pillars (only show first few in legend if many pillars)
-        pillar_label_shown = False
+        # Plot lamp post (smaller, empty circle to not obscure pillars)
+        ax.scatter([0], [0], [self.hlamp], color='none', s=80,
+                  marker='o', edgecolors='orange', linewidths=2)
+
+        # Plot pillars
         for i, pillar in enumerate(self.pillars):
             r_p = float(pillar['r'])
             phi_p = float(pillar['phi'])
@@ -1173,26 +1226,18 @@ class PillarDisk:
                 h_p = float(np.asarray(h_p_arr).flat[0])
             else:
                 h_p = float(h_p_arr)
-            
+
             x_p = float(r_p * np.cos(phi_p))
             y_p = float(r_p * np.sin(phi_p))
             z_p = float(h_p)
-            
-            # Only add label for first pillar if many pillars
-            if len(self.pillars) > 10:
-                label = 'Pillars' if not pillar_label_shown else ''
-                if not pillar_label_shown:
-                    pillar_label_shown = True
-            else:
-                label = f'Pillar {i+1}'
-            
-            ax.scatter([x_p], [y_p], [z_p], color='red', s=50, 
-                      marker='o', label=label, edgecolors='darkred', linewidths=1)
-            
+
+            ax.scatter([x_p], [y_p], [z_p], color='red', s=50,
+                      marker='o', edgecolors='darkred', linewidths=1)
+
             # Draw light ray from lamp to pillar (only for first few if many)
             if show_light_rays and i < 5:
-                ax.plot([0.0, x_p], [0.0, y_p], [float(self.hlamp), z_p], 
-                       'r--', linewidth=1, alpha=0.3, label='Light Ray' if i == 0 else '')
+                ax.plot([0.0, x_p], [0.0, y_p], [float(self.hlamp), z_p],
+                       'r--', linewidth=1, alpha=0.3)
         
         # Draw light ray to Earth (viewing direction)
         # Earth is at infinity in direction (sini, 0, cosi)
@@ -1208,20 +1253,29 @@ class PillarDisk:
         ax.set_ylabel(r'$Y~\rm [ld]$', labelpad=10)
         ax.set_zlabel(r'$Z~\rm [ld]$', labelpad=10)
 
-        #ax.set_title('3D Disk Geometry with Pillars and Light Rays')
-        
+        # Turn off grid for cleaner look
+        ax.grid(False)
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+
         # Set equal aspect ratio
         max_range = self.rout
         ax.set_xlim([-max_range, max_range])
         ax.set_ylim([-max_range, max_range])
         ax.set_zlim([0, 0.2])
-        
-        # Add legend
-        ax.legend(loc='upper left')
-        
+
+        # Set viewing angle to match actual observer inclination
+        # Observer is at direction (sini, 0, cosi) - always in x-z plane
+        # For matplotlib: elev = 90 - inclination, azim = 0
+        inclination_deg = np.degrees(np.arccos(self.cosi))
+        elev = 90 - inclination_deg  # elevation from horizontal
+        azim = 0  # observer always in +x direction
+        ax.view_init(elev=elev, azim=azim)
+
         plt.tight_layout()
         plt.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"3D visualization saved to {filename}")
+        print(f"  -> {filename} (i={inclination_deg:.1f}°, elev={elev:.1f}°)")
         plt.close()
 
 

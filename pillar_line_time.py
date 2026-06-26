@@ -34,10 +34,9 @@ except ImportError:
         return iterable
 
 # Import the PillarDisk class and utilities
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from pillar_disk import PillarDisk, load_config
+    from pillardisk.pillar_disk import PillarDisk, load_config, resolve_rin
 except ImportError as e:
     print(f"Error: pillar_disk.py not found. Make sure it's in the same directory.")
     print(f"Import error: {e}")
@@ -67,6 +66,7 @@ def parse_math_expr(value):
 # Physical constants (cgs units)
 C = 2.997925e10  # speed of light (cm/s)
 G = 6.673e-8     # gravitational constant (cgs)
+M_SUN = 1.989e33 # solar mass (g)
 PC = 3.0857e18   # parsec (cm)
 DAY = 24. * 3600.  # day (s)
 ANGSTROM = 1e-8   # Angstrom (cm)
@@ -75,6 +75,14 @@ KM_TO_CM = 1e5    # km to cm conversion
 # Conversion factors
 PC_TO_LD = 1e6 * PC / (C * DAY)  # parsec to light days
 LD_TO_CM = C * DAY  # light days to cm
+
+
+def v_virial_from_mbh(M_BH_solar, r0_ld):
+    """Compute virial velocity at reference radius r0 from SMBH mass.
+    v_vir = sqrt(G * M_BH / r0). Returns km/s."""
+    M_cgs = M_BH_solar * M_SUN
+    r0_cgs = r0_ld * LD_TO_CM
+    return np.sqrt(G * M_cgs / r0_cgs) / KM_TO_CM
 
 
 def compute_angular_velocity(r, v_virial, r_virial):
@@ -492,14 +500,17 @@ def main(config_file='config_line.yaml'):
     lamp_params = config.get('lamp', {}).copy()
     obs_params = config.get('observation', {}).copy()
     
-    float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha', 
-                   'tx1', 'tirrad_tvisc_ratio', 'fcol', 'hlamp', 'dmpc', 'cosi', 'redshift']
+    float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha',
+                   'tx1', 'tirrad_tvisc_ratio', 'fcol', 'hlamp', 'dmpc', 'cosi', 'inclination', 'redshift',
+                   'M_BH', 'r_isco_rg']
     int_params = ['nr', 'nphi']
-    
+
     def convert_value(key, value):
         if value is None:
             return None
         if isinstance(value, str):
+            if value.lower() == 'auto':
+                return 'auto'
             try:
                 if key in int_params:
                     return int(float(value))
@@ -517,13 +528,22 @@ def main(config_file='config_line.yaml'):
         elif key in float_params:
             return float(value)
         return value
-    
+
     for params_dict in [disk_params, temp_params, lamp_params, obs_params]:
         for key, value in params_dict.items():
             params_dict[key] = convert_value(key, value)
-    
+
+    # Convert inclination (degrees) to cosi if provided
+    if 'inclination' in obs_params and obs_params['inclination'] is not None:
+        inclination_rad = np.radians(obs_params['inclination'])
+        obs_params['cosi'] = np.cos(inclination_rad)
+        del obs_params['inclination']
+
     disk_params = {**disk_params, **temp_params, **lamp_params, **obs_params}
-    
+
+    # Resolve rin='auto' to ISCO if needed
+    resolve_rin(disk_params)
+
     # Create disk model
     disk = PillarDisk(**disk_params)
     
@@ -666,7 +686,12 @@ def main(config_file='config_line.yaml'):
     line_params = config.get('emission_line', {})
     if line_params:
         lambda0 = float(line_params.get('lambda0', lambda0))
-        v_virial = float(line_params.get('v_virial', v_virial))
+        if 'M_BH' in line_params:
+            M_BH = float(line_params['M_BH'])
+            v_virial = v_virial_from_mbh(M_BH, disk.r0)
+            print(f"  M_BH = {M_BH:.2e} Msun → v_virial = {v_virial:.1f} km/s at r0 = {disk.r0:.1f} ld")
+        else:
+            v_virial = float(line_params.get('v_virial', v_virial))
     
     # Computation parameters
     comp_params = config.get('computation', {})

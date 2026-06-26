@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pillardisk"
+version = "0.1.0"
+description = "AGN accretion disc lag spectra and emission-line VDMs with Gaussian pillar bumps."
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+extras = ["scipy", "pandas", "tqdm"]
+
+# The project root and the package directory are the same path; tell
+# setuptools that the package "pillardisk" lives at "." rather than
+# trying auto-discovery (which would look for a pillardisk/ subdir).
+[tool.setuptools]
+packages = ["pillardisk"]
+
+[tool.setuptools.package-dir]
+pillardisk = "."

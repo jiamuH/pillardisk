@@ -10,8 +10,12 @@ The disk geometry (including pillars) is loaded from the same config file as pil
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import os
 import sys
+
+VDM_CMAP = LinearSegmentedColormap.from_list('vdm_wrb',
+                                              ['white', 'red', 'blue'])
 
 # Try to import YAML for config file
 try:
@@ -39,10 +43,9 @@ except ImportError:
 
 # Import the PillarDisk class and utilities
 # Add current directory to path to ensure we can import pillar_disk
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from pillar_disk import PillarDisk, load_config
+    from pillardisk.pillar_disk import PillarDisk, load_config, resolve_rin
 except ImportError as e:
     # Fallback if pillar_disk is not available
     print(f"Error: pillar_disk.py not found. Make sure it's in the same directory.")
@@ -73,6 +76,7 @@ def parse_math_expr(value):
 # Physical constants (cgs units)
 C = 2.997925e10  # speed of light (cm/s)
 G = 6.673e-8     # gravitational constant (cgs)
+M_SUN = 1.989e33 # solar mass (g)
 PC = 3.0857e18   # parsec (cm)
 DAY = 24. * 3600.  # day (s)
 ANGSTROM = 1e-8   # Angstrom (cm)
@@ -81,6 +85,14 @@ KM_TO_CM = 1e5    # km to cm conversion
 # Conversion factors
 PC_TO_LD = 1e6 * PC / (C * DAY)  # parsec to light days
 LD_TO_CM = C * DAY  # light days to cm
+
+
+def v_virial_from_mbh(M_BH_solar, r0_ld):
+    """Compute virial velocity at reference radius r0 from SMBH mass.
+    v_vir = sqrt(G * M_BH / r0). Returns km/s."""
+    M_cgs = M_BH_solar * M_SUN
+    r0_cgs = r0_ld * LD_TO_CM
+    return np.sqrt(G * M_cgs / r0_cgs) / KM_TO_CM
 
 
 def compute_velocity_delay_map(disk, lambda0, v_virial, nlambda=200, ntau=200, 
@@ -429,8 +441,9 @@ def plot_temperature_profile(disk, filename='temperature_profile.png'):
     plt.close()
 
 
-def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0, 
-                            psi_map_no_pillars=None, filename='velocity_delay_map.png'):
+def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
+                            psi_map_no_pillars=None, psi_per_pillar=None,
+                            filename='velocity_delay_map.png'):
     """
     Plot the velocity delay map Psi(lambda, tau).
     
@@ -450,158 +463,205 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
         Output filename
     """
     if psi_map_no_pillars is not None:
-        # Comparison plot: with and without pillars
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        
-        # Determine common color scale for both maps
-        vmin = min(np.min(psi_map[psi_map > 0]), np.min(psi_map_no_pillars[psi_map_no_pillars > 0]))
-        vmax = 2*np.max(psi_map_no_pillars)
-        
-        # Top left: With pillars
+        # Comparison plot: with and without pillars.
+        # Use an explicit 2x3 gridspec [plot, plot, cbar] with fixed
+        # width_ratios so every plot panel has identical width regardless of
+        # which panels carry a colorbar. sharex by column gives the top/bottom
+        # alignment for the wavelength axis.
+        from matplotlib.ticker import NullFormatter
+        from matplotlib import gridspec
+
+        fig = plt.figure(figsize=(15, 11))
+        gs = gridspec.GridSpec(
+            2, 3, width_ratios=[1.0, 1.0, 0.04], wspace=0.18, hspace=0.08,
+            left=0.07, right=0.96, top=0.92, bottom=0.08,
+        )
+        ax_TL = fig.add_subplot(gs[0, 0])
+        ax_TR = fig.add_subplot(gs[0, 1], sharex=ax_TL, sharey=ax_TL)
+        cax_T = fig.add_subplot(gs[0, 2])
+        ax_BL = fig.add_subplot(gs[1, 0], sharex=ax_TL)
+        ax_BR = fig.add_subplot(gs[1, 1], sharex=ax_TR)
+        cax_B = fig.add_subplot(gs[1, 2])
+        axes = np.array([[ax_TL, ax_TR], [ax_BL, ax_BR]])
+
+        def _title_textbox(ax, txt, dark_bg=True):
+            ax.text(0.03, 0.95, txt, transform=ax.transAxes,
+                    fontsize=22, color='black', ha='left', va='top',
+                    bbox=dict(boxstyle='round,pad=0.25',
+                              facecolor='white', alpha=0.7,
+                              edgecolor='none'))
+
+        # Velocity axis on top via twiny() with explicit ticks. twiny is
+        # more robust when the parent ax has been resized by make_axes_locatable
+        # than secondary_xaxis (whose forward/inverse callbacks can desync).
+        def _add_velocity_top_axis(ax, l0):
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim())  # match parent's wavelength range
+            v_major = np.array([-9000, -6000, -3000, 0, 3000, 6000, 9000])
+            v_minor = np.array([-7500, -4500, -1500, 1500, 4500, 7500])
+            lam_major = l0 * (1.0 + v_major * KM_TO_CM / C)
+            lam_minor = l0 * (1.0 + v_minor * KM_TO_CM / C)
+            xlo, xhi = ax.get_xlim()
+            keep_major = (lam_major >= xlo) & (lam_major <= xhi)
+            keep_minor = (lam_minor >= xlo) & (lam_minor <= xhi)
+            ax2.set_xticks(lam_major[keep_major])
+            ax2.set_xticklabels([f'${int(v)}$' for v in v_major[keep_major]])
+            ax2.set_xticks(lam_minor[keep_minor], minor=True)
+            ax2.xaxis.set_minor_formatter(NullFormatter())
+            ax2.set_xlabel(r'$v~[\rm km\,s^{-1}]$', fontsize=24, labelpad=8)
+            ax2.tick_params(axis='x', which='major', length=8, width=1.5,
+                            direction='in', labelsize=20, top=True,
+                            bottom=False, labeltop=True, labelbottom=False)
+            ax2.tick_params(axis='x', which='minor', length=5, width=1,
+                            direction='in', top=True, bottom=False)
+            return ax2
+
+        # Normalise to probability densities psi = Psi / int int Psi dlambda dtau
+        # so the panels are dimensionless and consistent with the multi-line
+        # VDM figures.
+        dl = np.mean(np.diff(lambda_grid))
+        dt = np.mean(np.diff(tau_grid))
+        norm_with = float(np.sum(psi_map[psi_map > 0])) * dl * dt
+        norm_without = float(np.sum(psi_map_no_pillars[psi_map_no_pillars > 0])) * dl * dt
+        if not np.isfinite(norm_with) or norm_with == 0:
+            norm_with = 1.0
+        if not np.isfinite(norm_without) or norm_without == 0:
+            norm_without = 1.0
+        psi_with = psi_map / norm_with
+        psi_without = psi_map_no_pillars / norm_without
+
+        vmax_psi = 0.9 * max(float(np.nanmax(psi_with)),
+                             float(np.nanmax(psi_without)))
+
+        # Top left: With pillars (psi). No colorbar here; the cax column
+        # in the gridspec keeps every left-column panel the same width.
         ax = axes[0, 0]
-        psi_plot = psi_map.copy()
-        psi_plot[psi_plot <= 0] = np.nan
-        im1 = ax.pcolormesh(lambda_grid, tau_grid, psi_map, shading='auto', cmap='rainbow', vmin=vmin, vmax=vmax)
-        ax.axvline(lambda0, color='red', linestyle='--', linewidth=2)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$')
-        ax.set_ylabel(r'$\rm Delay~[days]$')
-        ax.set_title(r'$\rm With~Pillars~\Psi(\lambda, \tau)$', pad=10)
+        im1 = ax.pcolormesh(lambda_grid, tau_grid, psi_with, shading='auto',
+                            cmap=VDM_CMAP, vmin=0.0, vmax=vmax_psi)
+        ax.axvline(lambda0, color='white', linestyle='--', linewidth=1.5,
+                   alpha=0.7)
+        ax.set_ylabel(r'$\tau~[\rm days]$', fontsize=24)
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
-        ax.set_ylim(0, 125)
-        plt.colorbar(im1, ax=ax, label=r'$\rm Response~Function$')
+        ax.set_ylim(0, tau_grid[-1])
         ax.minorticks_on()
-        ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Add velocity axis on top
-        # v = c * (λ - λ0) / λ0, convert to km/s
-        ax2 = ax.twiny()
-        v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
-        ax2.set_xlim(ax.get_xlim())
-        ax2.set_xlabel(r'$\rm Velocity~[km/s]$', labelpad=10)
-        # Set velocity ticks at reasonable intervals
-        v_min = v_km_s[0]
-        v_max = v_km_s[-1]
-        n_ticks = 5
-        v_ticks = np.linspace(v_min, v_max, n_ticks)
-        # Convert velocity ticks back to wavelength for positioning
-        lambda_ticks = lambda0 * (1.0 + v_ticks * KM_TO_CM / C)
-        ax2.set_xticks(lambda_ticks)
-        ax2.set_xticklabels([rf'${v:.0f}$' for v in v_ticks])
-        ax2.minorticks_on()
-        ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Top right: Without pillars
+        ax.tick_params(top=False, right=True, axis='both', which='major',
+                       length=8, width=1.5, direction='in', labelsize=20)
+        ax.tick_params(top=False, right=True, axis='both', which='minor',
+                       length=5, width=1, direction='in')
+        # Keep tick numbers; only the axis text label is suppressed (no
+        # set_xlabel) since the bottom row carries the wavelength label.
+        _add_velocity_top_axis(ax, lambda0)  # velocity axis on top
+        _title_textbox(ax, r'$\rm (a)~With~Pillars$', dark_bg=True)
+
+        # Top right: Without pillars (psi). Colorbar lives in cax_T,
+        # shared color scale with top-left via vmax_psi.
         ax = axes[0, 1]
-        psi_plot_no = psi_map_no_pillars.copy()
-        psi_plot_no[psi_plot_no <= 0] = np.nan
-        im2 = ax.pcolormesh(lambda_grid, tau_grid, psi_map_no_pillars, shading='auto', cmap='rainbow', vmin=vmin, vmax=vmax)
-        ax.axvline(lambda0, color='red', linestyle='--', linewidth=2)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$')
-        ax.set_ylabel(r'$\rm Delay~[days]$')
-        ax.set_title(r'$\rm Without~Pillars~\Psi(\lambda, \tau)$', pad=10)
+        im2 = ax.pcolormesh(lambda_grid, tau_grid, psi_without, shading='auto',
+                            cmap=VDM_CMAP, vmin=0.0, vmax=vmax_psi)
+        ax.axvline(lambda0, color='white', linestyle='--', linewidth=1.5,
+                   alpha=0.7)
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
-        ax.set_ylim(0, 125)
-        plt.colorbar(im2, ax=ax, label=r'$\rm Response~Function$')
+        ax.set_ylim(0, tau_grid[-1])
         ax.minorticks_on()
-        ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Add velocity axis on top
-        ax2 = ax.twiny()
-        v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
-        ax2.set_xlim(ax.get_xlim())
-        ax2.set_xlabel(r'$\rm Velocity~[km/s]$', labelpad=10)
-        # Set velocity ticks at reasonable intervals
-        v_min = v_km_s[0]
-        v_max = v_km_s[-1]
-        n_ticks = 5
-        v_ticks = np.linspace(v_min, v_max, n_ticks)
-        # Convert velocity ticks back to wavelength for positioning
-        lambda_ticks = lambda0 * (1.0 + v_ticks * KM_TO_CM / C)
-        ax2.set_xticks(lambda_ticks)
-        ax2.set_xticklabels([rf'${v:.0f}$' for v in v_ticks])
-        ax2.minorticks_on()
-        ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Bottom left: Mean delay with pillars
+        ax.tick_params(top=False, right=True, axis='both', which='major',
+                       length=8, width=1.5, direction='in', labelsize=20)
+        ax.tick_params(top=False, right=True, axis='both', which='minor',
+                       length=5, width=1, direction='in')
+        # Keep tick numbers; axis text labels are suppressed via no
+        # set_xlabel / no set_ylabel since the outer panels carry them.
+        _add_velocity_top_axis(ax, lambda0)
+        _title_textbox(ax, r'$\rm (b)~Without~Pillars$', dark_bg=True)
+        cb_T = fig.colorbar(im2, cax=cax_T, extend='neither')
+        cb_T.set_label(r'$\psi(\lambda,\tau)$', fontsize=19)
+        cb_T.ax.tick_params(labelsize=16)
+
+        # Bottom left: Mean delay <tau>(lambda)
         ax = axes[1, 0]
         tau_mean = np.zeros(len(lambda_grid))
         for i in range(len(lambda_grid)):
-            mask = psi_map[:, i] > 0
-            if np.any(mask):
+            if np.any(psi_map[:, i] > 0):
                 tau_mean[i] = np.sum(psi_map[:, i] * tau_grid) / np.sum(psi_map[:, i])
-        ax.plot(lambda_grid, tau_mean, 'b-', linewidth=2, label=r'$\rm with~pillars$')
         tau_mean_no = np.zeros(len(lambda_grid))
         for i in range(len(lambda_grid)):
-            mask = psi_map_no_pillars[:, i] > 0
-            if np.any(mask):
+            if np.any(psi_map_no_pillars[:, i] > 0):
                 tau_mean_no[i] = np.sum(psi_map_no_pillars[:, i] * tau_grid) / np.sum(psi_map_no_pillars[:, i])
-        ax.plot(lambda_grid, tau_mean_no, 'r--', linewidth=2, label=r'$\rm without~pillars$')
-        ax.axvline(lambda0, color='red', linestyle=':', linewidth=1, alpha=0.5)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$')
-        ax.set_ylabel(r'$\rm Mean~Delay~[days]$')
+
+        ax.plot(lambda_grid, tau_mean, color='dodgerblue',
+                linewidth=5, alpha=0.85, label=r'$\rm with~pillar$')
+        ax.plot(lambda_grid, tau_mean_no, color='orangered',
+                linewidth=5, alpha=0.85, linestyle='--',
+                label=r'$\rm without~pillar$')
+
+        # Per-pillar contributions only if more than one pillar.
+        if psi_per_pillar is not None and len(psi_per_pillar) > 1:
+            colors_pp = ['green', 'purple', 'cyan', 'magenta', 'brown']
+            for ip, psi_pp in enumerate(psi_per_pillar):
+                tau_mean_pp = np.zeros(len(lambda_grid))
+                for i in range(len(lambda_grid)):
+                    if np.any(psi_pp[:, i] > 0):
+                        tau_mean_pp[i] = (np.sum(psi_pp[:, i] * tau_grid)
+                                          / np.sum(psi_pp[:, i]))
+                c = colors_pp[ip % len(colors_pp)]
+                ax.plot(lambda_grid, tau_mean_pp, '-', color=c,
+                        linewidth=3, alpha=0.7,
+                        label=rf'$\rm pillar~{ip+1}$')
+        ax.axvline(lambda0, color='black', linestyle=':', linewidth=1,
+                   alpha=0.5)
+        ax.set_xlabel(r'$\lambda~[\rm \AA]$', fontsize=24)
+        ax.set_ylabel(r'$\langle\tau\rangle~[\rm days]$', fontsize=24)
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
-        ax.set_ylim(0, 125)
-        ax.legend()
+        all_tau = np.concatenate([tau_mean[tau_mean > 0],
+                                  tau_mean_no[tau_mean_no > 0]])
+        if len(all_tau) > 0:
+            ax.set_ylim(0, 1.3 * np.max(all_tau))
+        ax.legend(fontsize=20, loc='lower center', ncol=2,
+                  facecolor='white', edgecolor='none', framealpha=0.7)
         ax.minorticks_on()
-        ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Add velocity axis on top
-        ax2 = ax.twiny()
-        v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
-        ax2.set_xlim(ax.get_xlim())
-        ax2.set_xlabel(r'$\rm Velocity~[km/s]$', labelpad=10)
-        # Set velocity ticks at reasonable intervals
-        v_min = v_km_s[0]
-        v_max = v_km_s[-1]
-        n_ticks = 5
-        v_ticks = np.linspace(v_min, v_max, n_ticks)
-        # Convert velocity ticks back to wavelength for positioning
-        lambda_ticks = lambda0 * (1.0 + v_ticks * KM_TO_CM / C)
-        ax2.set_xticks(lambda_ticks)
-        ax2.set_xticklabels([rf'${v:.0f}$' for v in v_ticks])
-        ax2.minorticks_on()
-        ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Bottom right: Difference map
+        ax.tick_params(top=True, right=True, axis='both', which='major',
+                       length=8, width=1.5, direction='in', labelsize=20)
+        ax.tick_params(top=True, right=True, axis='both', which='minor',
+                       length=5, width=1, direction='in')
+        _title_textbox(ax, r'$\rm (c)~Mean~Delay~\langle\tau\rangle(\lambda)$',
+                       dark_bg=False)
+
+        # Bottom right: log-ratio of absolute Psi (with vs without).
+        # Uses log10(Psi_with / Psi_without) = log10 Psi_with - log10 Psi_without,
+        # masked where the without-pillar baseline is zero.
         ax = axes[1, 1]
-        diff_map = psi_map - psi_map_no_pillars
-        diff_plot = diff_map.copy()
-        diff_plot[diff_plot == 0] = np.nan
-        im3 = ax.pcolormesh(lambda_grid, tau_grid, diff_map, shading='auto', cmap='RdBu_r')
-        ax.axvline(lambda0, color='black', linestyle='--', linewidth=2)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$')
-        ax.set_ylabel(r'$\rm Delay~[days]$')
-        ax.set_title(r'$\rm Difference~\Psi_{\rm with} - \Psi_{\rm without}$')
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_with = np.log10(np.where(psi_map > 0, psi_map, np.nan))
+            log_without = np.log10(np.where(psi_map_no_pillars > 0,
+                                            psi_map_no_pillars, np.nan))
+        dlog_psi = log_with - log_without
+        # Restrict colour scale to where the baseline exists.
+        baseline_mask = psi_map_no_pillars > 0
+        vals = dlog_psi[baseline_mask & np.isfinite(dlog_psi)]
+        vmax_log = float(np.nanmax(np.abs(vals))) if vals.size else 1.0
+        if not np.isfinite(vmax_log) or vmax_log == 0:
+            vmax_log = 1.0
+        # Cap to avoid one outlier dominating the scale.
+        vmax_log = min(vmax_log, 2.0)
+        im3 = ax.pcolormesh(lambda_grid, tau_grid, dlog_psi, shading='auto',
+                            cmap='RdBu', vmin=-vmax_log, vmax=vmax_log)
+        ax.axvline(lambda0, color='black', linestyle='--', linewidth=1.5,
+                   alpha=0.7)
+        ax.set_xlabel(r'$\lambda~[\rm \AA]$', fontsize=24)
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
-        ax.set_ylim(0, 125)
-        plt.colorbar(im3, ax=ax, label=r'$\rm \Delta Response~Function$')
+        ax.set_ylim(0, tau_grid[-1])
         ax.minorticks_on()
-        ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-        
-        # Add velocity axis on top
-        ax2 = ax.twiny()
-        v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
-        ax2.set_xlim(ax.get_xlim())
-        ax2.set_xlabel(r'$\rm Velocity~[km/s]$', labelpad=10)
-        # Set velocity ticks at reasonable intervals
-        v_min = v_km_s[0]
-        v_max = v_km_s[-1]
-        n_ticks = 5
-        v_ticks = np.linspace(v_min, v_max, n_ticks)
-        # Convert velocity ticks back to wavelength for positioning
-        lambda_ticks = lambda0 * (1.0 + v_ticks * KM_TO_CM / C)
-        ax2.set_xticks(lambda_ticks)
-        ax2.set_xticklabels([rf'${v:.0f}$' for v in v_ticks])
-        ax2.minorticks_on()
-        ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
-        ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
+        ax.tick_params(top=True, right=True, axis='both', which='major',
+                       length=8, width=1.5, direction='in', labelsize=20)
+        ax.tick_params(top=True, right=True, axis='both', which='minor',
+                       length=5, width=1, direction='in')
+        # Keep tick numbers on the inner edge; only the y-axis text label
+        # is suppressed (no set_ylabel) since the left column carries it.
+        _title_textbox(ax,
+                       r'$\rm (d)~\Delta\log\Psi='
+                       r'\log_{10}(\Psi_{\rm with}/\Psi_{\rm without})$',
+                       dark_bg=False)
+        cb_B = fig.colorbar(im3, cax=cax_B, extend='neither')
+        cb_B.set_label(r'$\Delta\log\Psi(\lambda,\tau)$', fontsize=19)
+        cb_B.ax.tick_params(labelsize=16)
     else:
         # Single plot: only with pillars
         fig, axes = plt.subplots(2, 1, figsize=(12, 10))
@@ -611,14 +671,14 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
         # Use log scale for better visualization
         psi_plot = psi_map.copy()
         psi_plot[psi_plot <= 0] = np.nan
-        im = ax.pcolormesh(lambda_grid, tau_grid, psi_map, shading='auto', cmap='rainbow')
+        im = ax.pcolormesh(lambda_grid, tau_grid, psi_map, shading='auto', cmap=VDM_CMAP)
         ax.axvline(lambda0, color='red', linestyle='--', linewidth=2)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$')
-        ax.set_ylabel(r'$\rm Delay~[days]$')
+        ax.set_xlabel(r'$\lambda~\rm [\AA]$')
+        ax.set_ylabel(r'$\tau~\rm [days]$')
         ax.set_title(r'$\rm Velocity~Delay~Map~\Psi(\lambda, \tau)$')
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
-        ax.set_ylim(0, 125)
-        plt.colorbar(im, ax=ax, label=r'$\rm Response~Function$')
+        ax.set_ylim(0, tau_grid[-1])
+        plt.colorbar(im, ax=ax, label=r'$\Psi(\lambda,\tau)$')
         ax.minorticks_on()
         ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
         ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
@@ -627,16 +687,16 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
         ax2 = ax.twiny()
         v_km_s = (C / KM_TO_CM) * (lambda_grid - lambda0) / lambda0  # km/s
         ax2.set_xlim(ax.get_xlim())
-        ax2.set_xlabel(r'$\rm Velocity~[km/s]$', labelpad=10)
-        # Set velocity ticks at reasonable intervals
+        ax2.set_xlabel(r'$v~\rm [km\,s^{-1}]$', labelpad=10)
+        # Set velocity ticks at round integer intervals
         v_min = v_km_s[0]
         v_max = v_km_s[-1]
-        n_ticks = 5
-        v_ticks = np.linspace(v_min, v_max, n_ticks)
-        # Convert velocity ticks back to wavelength for positioning
+        step = 3000
+        v_ticks = np.arange(np.ceil(v_min / step) * step,
+                            np.floor(v_max / step) * step + 1, step)
         lambda_ticks = lambda0 * (1.0 + v_ticks * KM_TO_CM / C)
         ax2.set_xticks(lambda_ticks)
-        ax2.set_xticklabels([rf'${v:.0f}$' for v in v_ticks])
+        ax2.set_xticklabels([rf'${int(v)}$' for v in v_ticks])
         ax2.minorticks_on()
         ax2.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
         ax2.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
@@ -651,15 +711,21 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
         
         ax.plot(lambda_grid, tau_mean, 'b-', linewidth=2)
         ax.axvline(lambda0, color='red', linestyle='--', linewidth=2)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$')
-        ax.set_ylabel(r'$\rm Mean~Delay~[days]$')
+        ax.set_xlabel(r'$\lambda~\rm [\AA]$')
+        ax.set_ylabel(r'$\langle\tau\rangle~\rm [days]$')
         ax.set_xlim(lambda_grid[0], lambda_grid[-1])
-        ax.set_ylim(0, 125)
+        if np.any(tau_mean > 0):
+            ax.set_ylim(0, 1.3 * np.max(tau_mean))
+        else:
+            ax.set_ylim(0, tau_grid[-1])
         ax.minorticks_on()
         ax.tick_params(top=True, right=True, axis='both', which='major', length=8, width=1.5, direction='in')
         ax.tick_params(top=True, right=True, axis='both', which='minor', length=4, width=1, direction='in')
-    
-    plt.tight_layout()
+
+    if psi_map_no_pillars is None:
+        # Single-panel branch (no with/without comparison).
+        plt.tight_layout()
+    # The 2x3 gridspec for the comparison branch handles its own spacing.
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     print(f"Velocity delay map saved to {filename}")
     plt.close()
@@ -688,14 +754,17 @@ def main(config_file='config_line.yaml'):
     obs_params = config.get('observation', {}).copy()
     
     # Convert parameters (same as in pillar_disk.py)
-    float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha', 
-                   'tx1', 'tirrad_tvisc_ratio', 'fcol', 'hlamp', 'dmpc', 'cosi', 'redshift']
+    float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha',
+                   'tx1', 'tirrad_tvisc_ratio', 'fcol', 'hlamp', 'dmpc', 'cosi', 'inclination', 'redshift',
+                   'M_BH', 'r_isco_rg', 'f_trans']
     int_params = ['nr', 'nphi']
-    
+
     def convert_value(key, value):
         if value is None:
             return None
         if isinstance(value, str):
+            if value.lower() == 'auto':
+                return 'auto'
             try:
                 if key in int_params:
                     return int(float(value))
@@ -713,13 +782,22 @@ def main(config_file='config_line.yaml'):
         elif key in float_params:
             return float(value)
         return value
-    
+
     for params_dict in [disk_params, temp_params, lamp_params, obs_params]:
         for key, value in params_dict.items():
             params_dict[key] = convert_value(key, value)
-    
+
+    # Convert inclination (degrees) to cosi if provided
+    if 'inclination' in obs_params and obs_params['inclination'] is not None:
+        inclination_rad = np.radians(obs_params['inclination'])
+        obs_params['cosi'] = np.cos(inclination_rad)
+        del obs_params['inclination']
+
     disk_params = {**disk_params, **temp_params, **lamp_params, **obs_params}
-    
+
+    # Resolve rin='auto' to ISCO if needed
+    resolve_rin(disk_params)
+
     # Create disk model
     disk = PillarDisk(**disk_params)
     
@@ -886,13 +964,19 @@ def main(config_file='config_line.yaml'):
     
     # Emission line parameters (can be added to config later)
     lambda0 = 4861.0  # Hβ rest wavelength (Angstroms) - can be changed
-    v_virial = 1000.0  # Virial velocity (km/s)
-    
+    v_virial = 1000.0  # Virial velocity (km/s) - default fallback
+
     # Check if line parameters are in config
     line_params = config.get('emission_line', {})
     if line_params:
         lambda0 = float(line_params.get('lambda0', lambda0))
-        v_virial = float(line_params.get('v_virial', v_virial))
+        # M_BH takes priority: compute v_virial from SMBH mass
+        if 'M_BH' in line_params:
+            M_BH = float(line_params['M_BH'])
+            v_virial = v_virial_from_mbh(M_BH, disk.r0)
+            print(f"  M_BH = {M_BH:.2e} Msun → v_virial = {v_virial:.1f} km/s at r0 = {disk.r0:.1f} ld")
+        else:
+            v_virial = float(line_params.get('v_virial', v_virial))
     
     # Computation parameters
     comp_params = config.get('computation', {})

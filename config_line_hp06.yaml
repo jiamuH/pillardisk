@@ -6,7 +6,7 @@
 disk:
   rin: auto             # Inner radius (light days). Set to 'auto' to compute from M_BH and r_isco_rg
   rout: 20.0            # Outer radius (light days) - NGC 5548 BLR extent (Horne+2021)
-  nr: 600               # Number of radial points
+  nr: 300               # Number of radial points
   nphi: 360             # Number of azimuthal points
   M_BH: 7.0e7           # SMBH mass (solar masses) - used to compute rin when rin='auto'
   r_isco_rg: 2          # ISCO radius in units of r_g (6=Schwarzschild, 1-6 for Kerr)
@@ -27,7 +27,7 @@ lamp:
   tx1: 1e3             # Irradiation temperature at r0 (K) (deprecated, use tirrad_tvisc_ratio instead)
   flux_method: direct  # 'scale_temp' (legacy T-rescaling) or 'direct' (geometric lamp + Wien tail)
   log_phi_inner: 25.0  # Target log10(Phi) at r_in for Q calibration (clipped to Cloudy grid max=21)
-  no_fluxfloor: false  # If true, shadow cells below Cloudy grid get zero emissivity; if false, clip to grid floor log Phi=15
+  no_fluxfloor: true   # If true, shadow cells below Cloudy grid get zero emissivity (no clipping to 17)
   transparent: true    # If true, pillars transmit a fraction f_trans of lamp flux
   f_trans: 0.3        # Transmission fraction through pillar (0=opaque, 1=fully transparent)
   f_turb_line: 0.0    # Turbulent broadening: sigma_v = f_turb * v_Kep(r). 0=Keplerian only, 0.5=Gaussian-like
@@ -76,7 +76,7 @@ pillars:
   sig_r: 5.0             # Standard deviation of radial position (light days)
   rmin: 2.0               # Minimum radius allowed for random pillars (light days)
   # phi is uniformly distributed from 0 to 2*pi (no parameters needed)
-  h_pillar: 0.04          # Height of pillars (light days) - can be single value or list
+  h_pillar: 0.6           # Height of pillars (light days) - can be single value or list  [tall-pillar test, fiducial = 0.04]
   sigma_r_pillar: 0.1     # Radial width of each pillar (light days) - can be single value or list
   sigma_phi_pillar: 0.05   # Azimuthal width of each pillar (radians) - can be single value or list
   modify_height_pillar: true   # Whether to modify disk height
@@ -117,6 +117,6 @@ plotting:
   plot_3d_geometry: true    # Whether to plot 3D disk geometry
   plot3d_filename: pillar_line_3d.png  # Output filename for 3D plot
   show_light_rays: true      # Whether to show light rays in 3D plot
-  n_phi_plot: 720           # Number of azimuthal points for 3D plot
-  n_r_plot: 400             # Number of radial points for 3D plot
+  n_phi_plot: 360           # Number of azimuthal points for 3D plot
+  n_r_plot: 200             # Number of radial points for 3D plot
 

@@ -34,10 +34,9 @@ except ImportError:
         return iterable
 
 # Import the PillarDisk class and utilities
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from pillar_disk import PillarDisk, load_config
+    from pillardisk.pillar_disk import PillarDisk, load_config, resolve_rin
 except ImportError as e:
     print(f"Error: pillar_disk.py not found. Make sure it's in the same directory.")
     print(f"Import error: {e}")
@@ -75,17 +74,27 @@ PC_TO_LD = 1e6 * PC / (C * DAY)  # parsec to light days
 LD_TO_CM = C * DAY  # light days to cm
 
 
-def load_cloudy_models(model_file, Z_target=1.0):
+def load_cloudy_models(model_file, Z_target=1.0, extension_file=None):
     """
     Load Cloudy model data and create interpolation functions for solar metallicity (Z=1).
-    
+
     Parameters:
     -----------
     model_file : str
-        Path to Cloudy model data file
+        Path to the main Cloudy model data file (covers log phi in [17, 21]).
     Z_target : float
-        Target metallicity (default: 1.0 for solar)
-    
+        Target metallicity (default: 1.0 for solar).
+    extension_file : str or None
+        Optional path to a low-phi extension Cloudy file covering log phi
+        in [15, 16.5] with Z = Z_sun only. When supplied, its rows are
+        spliced onto the front of the main grid so the resulting grid
+        spans log phi in [15, 21]. If None, the loader falls back to the
+        previous log-linear extrapolation between 16 and the main-file
+        floor (default 17). Because the extension is Z = Z_sun only,
+        non-solar Z columns at the extended phi values are populated
+        with the same Z_sun value (this is fine for analyses that only
+        use Z = Z_sun).
+
     Returns:
     --------
     interp_dict : dict
@@ -96,12 +105,11 @@ def load_cloudy_models(model_file, Z_target=1.0):
         Metallicity grid
     """
     print(f"Loading Cloudy models from {model_file}...")
-    
+
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Cloudy model file not found: {model_file}")
-    
-    # Grid definitions (from line_ratio_breathing_effect.py)
-    Z_grid = np.arange(1, 15.5, 0.5)          # 29 metallicity values
+
+    # Grid definitions — phi and n are fixed; Z varies by model file
     phi_grid = np.arange(17, 21.5, 0.5)       # 9 φ values
     n_grid = np.arange(9, 12.5, 0.5)          # 7 n values
     
@@ -126,9 +134,18 @@ def load_cloudy_models(model_file, Z_target=1.0):
         'inci1215': 'Inci 1215.00A',
     }
     
-    # Load data
-    df = pd.read_csv(model_file, sep='\t', header=0, comment='#')
-    assert len(df) == len(Z_grid) * len(phi_grid) * len(n_grid), "Row count mismatch!"
+    # Load data — handle both '#lineslist' and 'lineslist' headers
+    with open(model_file) as fh:
+        header_line = fh.readline().lstrip('#').strip()
+    col_names = header_line.split('\t')
+    df = pd.read_csv(model_file, sep='\t', names=col_names, comment='#', skiprows=0)
+    # Keep only 'iteration 1' rows (drop GRID_DELIMIT separators)
+    df = df[df.iloc[:, 0] == 'iteration 1'].reset_index(drop=True)
+    # Auto-detect Z grid size from row count
+    n_Z = len(df) // (len(phi_grid) * len(n_grid))
+    Z_grid = np.arange(1, 1 + n_Z * 0.5, 0.5)
+    expected = len(Z_grid) * len(phi_grid) * len(n_grid)
+    assert len(df) == expected, f"Row count mismatch: got {len(df)}, expected {expected} (Z:{n_Z}, phi:{len(phi_grid)}, n:{len(n_grid)})"
     
     # Initialize 3D arrays: shape = (len(n), len(phi), len(Z))
     shape = (len(n_grid), len(phi_grid), len(Z_grid))
@@ -162,77 +179,110 @@ def load_cloudy_models(model_file, Z_target=1.0):
         # Extract column at Z=Z_idx: shape (len(phi),)
         line_intensities[key] = collapsed_data[key][:, Z_idx]
     
-    # Create 1D interpolation functions over phi (for Z=1)
+    # ----- Extend the grid down to log phi = 15 -----
+    # Preferred: splice in a real low-phi Cloudy extension file (Z = Z_sun only).
+    # Fallback: log-linear extrapolation between 16.0 and the first main-grid
+    # point (used when no extension file is given).
+    if extension_file is not None:
+        if not os.path.exists(extension_file):
+            raise FileNotFoundError(f"Cloudy extension file not found: {extension_file}")
+        print(f"Loading low-phi extension from {extension_file}...")
+
+        # Extension grid: phi in [15, 16.5] step 0.5 (4 values); Z = Z_sun only
+        phi_grid_extlow = np.arange(15.0, 17.0, 0.5)
+        n_Z_ext = 1
+
+        with open(extension_file) as fh_ext:
+            header_line_ext = fh_ext.readline().lstrip('#').strip()
+        col_names_ext = header_line_ext.split('\t')
+        df_ext = pd.read_csv(extension_file, sep='\t', names=col_names_ext, comment='#', skiprows=0)
+        df_ext = df_ext[df_ext.iloc[:, 0] == 'iteration 1'].reset_index(drop=True)
+        expected_ext = n_Z_ext * len(phi_grid_extlow) * len(n_grid)
+        assert len(df_ext) == expected_ext, (
+            f"Extension row count mismatch: got {len(df_ext)}, expected {expected_ext} "
+            f"(phi:{len(phi_grid_extlow)}, n:{len(n_grid)}, Z:{n_Z_ext})"
+        )
+
+        # Pack into 3D array (n_density, n_phi_ext, 1) following the same
+        # iteration order as the main file: outermost = phi, then n, then Z.
+        ext_shape = (len(n_grid), len(phi_grid_extlow), n_Z_ext)
+        ext_intensity = {key: np.zeros(ext_shape) for key in line_names}
+        for j_phi, _ in enumerate(phi_grid_extlow):
+            for i_n, _ in enumerate(n_grid):
+                index = j_phi * len(n_grid) + i_n
+                start = index * n_Z_ext
+                df_slice = df_ext.iloc[start:start + n_Z_ext]
+                for key, colname in line_names.items():
+                    ext_intensity[key][i_n, j_phi, :] = df_slice[colname].values
+
+        # Average over density (same as main file)
+        ext_collapsed = {key: np.mean(ext_intensity[key], axis=0)  # shape (n_phi_ext, 1)
+                          for key in line_names}
+
+        # Splice: prepend extension to main grid. The extension has only
+        # the Z = Z_sun column, so for the existing Z grid (which has
+        # multiple Z values) we replicate the Z_sun value across all
+        # columns. This is fine because the paper only ever queries
+        # Z = 1; non-solar Z below log phi = 17 is undefined.
+        extended_data = {}
+        for key in line_names:
+            ext_block = ext_collapsed[key]  # (n_phi_ext, 1)
+            ext_replicated = np.tile(ext_block, (1, len(Z_grid)))  # (n_phi_ext, n_Z)
+            extended_data[key] = np.vstack([ext_replicated, collapsed_data[key]])
+        phi_grid_ext = np.concatenate([phi_grid_extlow, phi_grid])
+        print(f"Spliced extension: phi grid now {phi_grid_ext[0]:.1f} -> {phi_grid_ext[-1]:.1f} "
+              f"({len(phi_grid_ext)} values; ext Z = Z_sun replicated to all Z columns)")
+    else:
+        # Fallback: log-linear extrapolation between 16.0 and phi_grid[0]
+        phi_extrap = np.arange(16.0, phi_grid[0], 0.5)  # [16.0, 16.5]
+        if len(phi_extrap) > 0:
+            extended_data = {}
+            for key in line_names:
+                vals = collapsed_data[key]  # shape: (len(phi), len(Z))
+                v0 = vals[0, :]  # at phi_grid[0]
+                v1 = vals[1, :]  # at phi_grid[1]
+                safe_v0 = np.maximum(v0, 1e-30)
+                safe_v1 = np.maximum(v1, 1e-30)
+                log_slope = (np.log10(safe_v1) - np.log10(safe_v0)) / (phi_grid[1] - phi_grid[0])
+                extrap_rows = []
+                for phi_e in phi_extrap:
+                    dphi = phi_e - phi_grid[0]
+                    log_extrap = np.log10(safe_v0) + log_slope * dphi
+                    extrap_rows.append(np.maximum(10.0**log_extrap, 0.0))
+                extended_data[key] = np.vstack(extrap_rows + [vals])  # prepend
+            phi_grid_ext = np.concatenate([phi_extrap, phi_grid])
+            print(f"Extended Cloudy grid: phi {phi_grid[0]:.1f} -> {phi_grid_ext[0]:.1f} (log-linear extrapolation)")
+        else:
+            extended_data = collapsed_data
+            phi_grid_ext = phi_grid
+
+    # Create interpolation functions over extended phi grid
     interp_dict = {}
     for key in line_names:
-        interp_dict[key] = RectBivariateSpline(phi_grid, Z_grid, collapsed_data[key], kx=2, ky=2)
-    
+        interp_dict[key] = RectBivariateSpline(phi_grid_ext, Z_grid, extended_data[key], kx=2, ky=2)
+
     print(f"Loaded Cloudy models: {list(line_names.keys())}")
-    print(f"  phi range: {phi_grid[0]:.1f} to {phi_grid[-1]:.1f} (log)")
+    print(f"  phi range: {phi_grid_ext[0]:.1f} to {phi_grid_ext[-1]:.1f} (log)")
     print(f"  Z range: {Z_grid[0]:.1f} to {Z_grid[-1]:.1f}")
-    
-    return interp_dict, phi_grid, Z_grid
+
+    # Debug table (verbose only)
+    if os.environ.get('PILLAR_DEBUG'):
+        print(f"\n  [DEBUG] Line emissivity vs log_phi at Z={Z_actual:.1f}:")
+        print(f"  log_phi  |   CIV    |   MgII   |  Halpha")
+        print(f"  ---------|----------|----------|----------")
+        for i, phi_val in enumerate(phi_grid):
+            c4_val = collapsed_data['C4'][i, Z_idx]
+            mg2_val = collapsed_data['Mg2'][i, Z_idx]
+            ha_val = collapsed_data['Halpha'][i, Z_idx]
+            print(f"    {phi_val:.1f}   | {c4_val:8.2e} | {mg2_val:8.2e} | {ha_val:8.2e}")
+        print()
+
+    return interp_dict, phi_grid_ext, Z_grid
 
 
 def compute_ionizing_flux(disk, r, phi):
-    """
-    Compute ionizing flux at disk positions.
-    
-    The ionizing flux is proportional to the irradiation temperature.
-    Highest flux is at illuminated pillars, lowest in shadows.
-    
-    Parameters:
-    -----------
-    disk : PillarDisk
-        Disk model
-    r : array
-        Radial positions (light days), 2D
-    phi : array
-        Azimuthal positions (radians), 2D
-    
-    Returns:
-    --------
-    log_phi : array
-        Log ionizing flux (2D, same shape as r)
-    """
-    # Get temperature (with shadows)
-    T_2d = disk.get_temperature(r, phi, compute_shadows=True)
-    
-    # Get base irradiation temperature (without pillars, for normalization)
-    # This gives us the baseline flux
-    T_base_2d = disk.get_temperature(r, phi, compute_shadows=False)
-    
-    # Ionizing flux is proportional to T^4 (Stefan-Boltzmann)
-    # But we want to map to Cloudy's phi grid (log phi from 17 to 21.5)
-    # Use the ratio of T to reference temperature to scale flux
-    
-    # Reference: at r0, T_irrad = tv1 * tirrad_tvisc_ratio
-    T_ref = disk.tv1 * disk.tirrad_tvisc_ratio
-    
-    # Normalize by reference temperature
-    T_ratio = T_2d / T_ref
-    
-    # Map to log phi range [17, 21.5]
-    # Use T^4 scaling for flux, then map to log space
-    # phi ∝ T^4, so log phi = log phi_min + 4 * log(T/T_min)
-    # But we want to map T_ratio to the phi grid range
-    
-    # Simple mapping: log_phi = phi_min + (phi_max - phi_min) * (T_ratio^4 - T_min^4) / (T_max^4 - T_min^4)
-    # But T_ratio can be < 1 in shadows, so we need to handle that
-    
-    # Better: map T_ratio to [0, 1], then scale to [phi_min, phi_max]
-    T_ratio_clipped = np.clip(T_ratio, 0.1, 10.0)  # Clip to reasonable range
-    T_ratio_normalized = (T_ratio_clipped - 0.1) / (10.0 - 0.1)  # Normalize to [0, 1]
-    
-    phi_min = 17.0
-    phi_max = 21.5
-    log_phi = phi_min + T_ratio_normalized * (phi_max - phi_min)
-    
-    # In shadows, T is very low, so set log_phi to minimum
-    shadow_mask = T_2d < (T_ref * 0.1)
-    log_phi[shadow_mask] = phi_min
-    
-    return log_phi
+    """Thin wrapper around PillarDisk.compute_log_ionizing_flux for back-compat."""
+    return disk.compute_log_ionizing_flux(r, phi)
 
 
 def compute_line_intensity_map(disk, cloudy_interp_dict, phi_grid, Z_target=1.0, 
@@ -285,10 +335,13 @@ def compute_line_intensity_map(disk, cloudy_interp_dict, phi_grid, Z_target=1.0,
         # Interpolate at (log_phi, Z=1.0)
         # grid=False returns scalar for each point
         intensity_2d = np.zeros_like(log_phi_2d)
+        no_fluxfloor = getattr(disk, 'no_fluxfloor', False)
         for ir in range(n_r_plot):
             for iphi in range(n_phi_plot):
                 log_phi_val = log_phi_2d[ir, iphi]
-                # Clip to grid range
+                if no_fluxfloor and log_phi_val < 15.0:
+                    intensity_2d[ir, iphi] = 0.0
+                    continue
                 log_phi_val = np.clip(log_phi_val, phi_grid[0], phi_grid[-1])
                 intensity_2d[ir, iphi] = float(interp_func(log_phi_val, Z_target, grid=False))
         intensity_map[key] = intensity_2d
@@ -317,7 +370,7 @@ def compute_line_intensity_map(disk, cloudy_interp_dict, phi_grid, Z_target=1.0,
     return r_plot, phi_plot, intensity_map, ew_map, log_phi_2d
 
 
-def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_grid, use_absolute_flux=True, filename='line_intensity_rgb.png'):
+def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_grid, use_absolute_flux=True, filename='line_intensity_rgb.png', rgb_sat_mode='shared', composite_intensity_map=None, composite_brightness='none', composite_sat_boost=1.0, composite_brightness_gamma=1.0, composite_brightness_floor=0.0, composite_brightness_boost=1.0, composite_brightness_phi_min=16.0, composite_brightness_phi_max=21.0, composite_brightness_add=0.0, pillar_rmin=None):
     """
     Plot RGB map of line intensities: R=Halpha, G=MgII, B=CIV.
     
@@ -353,10 +406,19 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
         print("Error: CIV not found in Cloudy models.")
         return
     
-    # Use correct lines for RGB
+    # Use correct lines for RGB.
+    # `intensity_map` drives the per-line panels. `composite_intensity_map`
+    # (if given) drives the RGB composite — used to mix Hβ-normalized
+    # per-line panels with an absolute-flux composite in a single figure.
     R = intensity_map['Halpha']  # Red channel: Halpha
     G = intensity_map['Mg2']     # Green channel: MgII
     B = intensity_map['C4']      # Blue channel: CIV
+    if composite_intensity_map is not None:
+        R_comp = composite_intensity_map['Halpha']
+        G_comp = composite_intensity_map['Mg2']
+        B_comp = composite_intensity_map['C4']
+    else:
+        R_comp, G_comp, B_comp = R, G, B
     
     # Compute log scale values for plotting (absolute values, not normalized)
     # For RGB display, we still need normalized values [0,1]
@@ -373,22 +435,101 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
         log_max = np.log10(channel_max + 1e-10 * channel_min)
         return log_channel, log_min, log_max
     
-    def normalize_channel_log(channel):
-        """Normalize channel to [0,1] for RGB display using log scale."""
-        log_channel, log_min, log_max = compute_log_values(channel)
-        if np.isnan(log_min):
-            return np.zeros_like(channel)
-        if log_max > log_min:
-            normalized = (log_channel - log_min) / (log_max - log_min)
-            normalized = np.clip(normalized, 0, 1)
+    # Shared color range used by the per-channel panels.
+    if use_absolute_flux and composite_intensity_map is None:
+        all_log = np.concatenate([
+            compute_log_values(R)[0].ravel(),
+            compute_log_values(G)[0].ravel(),
+            compute_log_values(B)[0].ravel(),
+        ])
+        all_log = all_log[np.isfinite(all_log)]
+        VMIN_SHARED = float(np.floor(np.nanpercentile(all_log, 2)))
+        VMAX_SHARED = float(np.ceil(np.nanpercentile(all_log, 98)))
+    else:
+        # Per-line panels are F/F_Hβ (either because use_absolute_flux=False,
+        # or because we're in hybrid mode where intensity_map is normalized
+        # and only composite_intensity_map is absolute).
+        VMIN_SHARED = -0.2
+        VMAX_SHARED = 1.0
+
+    def _channel_range(channel, mode, fallback_vmin, fallback_vmax):
+        log_c = compute_log_values(channel)[0]
+        finite = log_c[np.isfinite(log_c)]
+        if finite.size == 0:
+            return fallback_vmin, fallback_vmax
+        if mode == 'percentile':
+            return float(np.nanpercentile(finite, 2)), float(np.nanpercentile(finite, 98))
+        elif mode == 'minmax':
+            return float(np.min(finite)), float(np.max(finite))
         else:
-            normalized = np.zeros_like(channel)
-        return normalized
-    
-    # For RGB display (normalized, inverted so high values = bright colors)
-    R_norm = 1.0 - normalize_channel_log(R)  # Invert: high flux = bright
-    G_norm = 1.0 - normalize_channel_log(G)  # Invert: high flux = bright
-    B_norm = 1.0 - normalize_channel_log(B)  # Invert: high flux = bright
+            return fallback_vmin, fallback_vmax
+
+    def get_clipped_range(log_channel):
+        """Return the shared (vmin, vmax) used for the per-channel panels."""
+        return VMIN_SHARED, VMAX_SHARED
+
+    def _normalize_with_range(channel, vmin, vmax):
+        log_channel, log_min, log_max = compute_log_values(channel)
+        if np.isnan(log_min) or vmax <= vmin:
+            return np.zeros_like(channel)
+        return np.clip((log_channel - vmin) / (vmax - vmin), 0, 1)
+
+    def normalize_channel_log(channel):
+        """Normalize channel to [0,1] for RGB display using the shared
+        log10 range so the three RGB planes are directly comparable."""
+        return _normalize_with_range(channel, VMIN_SHARED, VMAX_SHARED)
+
+    # --- RGB composite normalization ---
+    # The composite uses `R_comp/G_comp/B_comp` (absolute flux in hybrid
+    # mode, otherwise the same as R/G/B). When rgb_sat_mode != 'shared',
+    # each channel is normalized over its own dynamic range so each color
+    # saturates independently.
+    if composite_intensity_map is not None or use_absolute_flux:
+        comp_all_log = np.concatenate([
+            compute_log_values(R_comp)[0].ravel(),
+            compute_log_values(G_comp)[0].ravel(),
+            compute_log_values(B_comp)[0].ravel(),
+        ])
+        comp_all_log = comp_all_log[np.isfinite(comp_all_log)]
+        VMIN_COMP_SHARED = float(np.floor(np.nanpercentile(comp_all_log, 2)))
+        VMAX_COMP_SHARED = float(np.ceil(np.nanpercentile(comp_all_log, 98)))
+    else:
+        VMIN_COMP_SHARED, VMAX_COMP_SHARED = VMIN_SHARED, VMAX_SHARED
+
+    if rgb_sat_mode in ('percentile', 'minmax'):
+        Rv = _channel_range(R_comp, rgb_sat_mode, VMIN_COMP_SHARED, VMAX_COMP_SHARED)
+        Gv = _channel_range(G_comp, rgb_sat_mode, VMIN_COMP_SHARED, VMAX_COMP_SHARED)
+        Bv = _channel_range(B_comp, rgb_sat_mode, VMIN_COMP_SHARED, VMAX_COMP_SHARED)
+        R_norm = _normalize_with_range(R_comp, Rv[0], Rv[1])
+        G_norm = _normalize_with_range(G_comp, Gv[0], Gv[1])
+        B_norm = _normalize_with_range(B_comp, Bv[0], Bv[1])
+    else:
+        R_norm = _normalize_with_range(R_comp, VMIN_COMP_SHARED, VMAX_COMP_SHARED)
+        G_norm = _normalize_with_range(G_comp, VMIN_COMP_SHARED, VMAX_COMP_SHARED)
+        B_norm = _normalize_with_range(B_comp, VMIN_COMP_SHARED, VMAX_COMP_SHARED)
+
+    # Optional brightness weighting via HSV: keep the hue and saturation
+    # of the F/F_Hβ-derived color (the differential-response info), and
+    # set the V (value/brightness) channel from a separate mask such as
+    # log Φ. Simply multiplying R/G/B by brightness preserves the ratios
+    # mathematically but compresses chroma toward black in dim regions,
+    # which hides the color contrast visually.
+    brightness_mask = None
+    if composite_brightness == 'phi':
+        # V = (logΦ − phi_min) / (phi_max − phi_min), clipped to [0, 1].
+        # Then optional gamma, then floor lift + boost.
+        phi_min_v = float(composite_brightness_phi_min)
+        phi_max_v = float(composite_brightness_phi_max)
+        brightness_mask = np.clip((log_phi_2d - phi_min_v) / (phi_max_v - phi_min_v), 0, 1)
+        if composite_brightness_gamma != 1.0:
+            brightness_mask = brightness_mask ** float(composite_brightness_gamma)
+        floor = float(composite_brightness_floor)
+        if floor > 0:
+            brightness_mask = floor + (1.0 - floor) * brightness_mask
+        if composite_brightness_boost != 1.0:
+            brightness_mask = np.clip(brightness_mask * float(composite_brightness_boost), 0, 1)
+        if composite_brightness_add != 0.0:
+            brightness_mask = np.clip(brightness_mask + float(composite_brightness_add), 0, 1)
     
     # For plotting absolute values (log scale)
     R_log, R_log_min, R_log_max = compute_log_values(R)
@@ -400,6 +541,19 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
     rgb_image[:, :, 0] = R_norm  # Red
     rgb_image[:, :, 1] = G_norm  # Green
     rgb_image[:, :, 2] = B_norm  # Blue
+
+    # If a brightness mask was supplied, replace the V (value) channel of
+    # the RGB-as-HSV so hue + saturation (the color contrast) survive
+    # while brightness encodes the supplied scalar (e.g. log Φ). Optional
+    # composite_sat_boost (>1) inflates the S channel for more vivid hues.
+    if brightness_mask is not None or composite_sat_boost != 1.0:
+        from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
+        hsv = rgb_to_hsv(np.clip(rgb_image, 0, 1))
+        if composite_sat_boost != 1.0:
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * composite_sat_boost, 0, 1)
+        if brightness_mask is not None:
+            hsv[:, :, 2] = brightness_mask
+        rgb_image = hsv_to_rgb(hsv)
     
     # Convert to Cartesian coordinates (x-y plane) for plotting
     # Create meshgrid in polar coordinates, then convert to Cartesian
@@ -411,9 +565,13 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
     x_min, x_max = X.min(), X.max()
     y_min, y_max = Y.min(), Y.max()
     
-    # Clip log_phi to minimum of model grid (17.0)
-    phi_min_grid = phi_grid[0]  # Should be 17.0
+    # For Cloudy interpolation, clip to grid range; for plotting, use actual data range
+    phi_min_grid = phi_grid[0]  # Cloudy grid minimum (17.0)
     log_phi_2d_clipped = np.clip(log_phi_2d, phi_min_grid, None)
+    # Dynamic colorbar range: exclude unphysical pillar-wall values (log_phi < 0)
+    finite_phi = log_phi_2d[np.isfinite(log_phi_2d) & (log_phi_2d > 0)]
+    phi_plot_min = np.floor(np.min(finite_phi) * 2) / 2
+    phi_plot_max = np.ceil(np.max(finite_phi) * 2) / 2
     
     # Prepare interpolation grid (used for both plots)
     x_flat = X.flatten()
@@ -422,58 +580,70 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
     y_reg = np.linspace(y_min, y_max, len(r_plot))
     X_reg, Y_reg = np.meshgrid(x_reg, y_reg)
     
-    # Colorbar labels based on use_absolute_flux
-    # When use_absolute_flux=False, Cloudy output already has F_Hbeta=1, so F_Halpha/F_Hbeta = F_Halpha
-    if use_absolute_flux:
+    # Colorbar labels based on what the per-line panels actually show.
+    # In hybrid mode the per-line panels use F/F_Hβ even when the composite
+    # uses absolute flux.
+    per_line_is_absolute = use_absolute_flux and (composite_intensity_map is None)
+    if per_line_is_absolute:
+        # Cloudy "save line list absolute" → erg s^-1 cm^-2 at the cloud surface
         label_R = r'$\rm \log(F_{H\alpha})$'
         label_G = r'$\rm \log(F_{MgII})$'
         label_B = r'$\rm \log(F_{CIV})$'
     else:
-        # When normalized, F_Hbeta=1, so F_Halpha/F_Hbeta = F_Halpha (actual value)
-        label_R = r'$\rm \log(F_{H\alpha})$'
-        label_G = r'$\rm \log(F_{MgII})$'
-        label_B = r'$\rm \log(F_{CIV})$'
+        # Cloudy normalized output: F_Hbeta = 1, so each line flux is F/F_Hbeta
+        label_R = r'$\rm \log(F_{H\alpha}/F_{H\beta})$'
+        label_G = r'$\rm \log(F_{MgII}/F_{H\beta})$'
+        label_B = r'$\rm \log(F_{CIV}/F_{H\beta})$'
     
     # Separate into three plots:
     # 1. Ionizing flux (separate plot)
     # 2. RGB + 3 channels in x-y plane
     # 3. RGB + 3 channels in r-phi plane
     
+    # Per-block enable flag: set _PLOT_EXTRAS=True to re-enable the
+    # ionizing-flux, r-phi, logF-logphi, and EW figures. While iterating
+    # on the xy RGB composite we keep them off to save plotting time.
+    _PLOT_EXTRAS = False
+
     # ====================================================
     # Plot 1: Ionizing flux (separate plot)
     # ====================================================
-    fig_phi, axes_phi = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Left: x-y plane
-    ax = axes_phi[0]
-    log_phi_flat_clipped = log_phi_2d_clipped.flatten()
-    log_phi_reg = griddata((x_flat, y_flat), log_phi_flat_clipped, (X_reg, Y_reg), method='linear', fill_value=phi_min_grid)
-    im_phi_xy = ax.contourf(X_reg, Y_reg, log_phi_reg, levels=50, cmap='viridis', extend='both', vmin=phi_min_grid)
-    ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
-    ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
-    ax.set_title(r'$\rm Log~Ionizing~Flux~\log\phi~(x-y~plane)$', fontsize=14)
-    plt.colorbar(im_phi_xy, ax=ax, label=r'$\rm \log\phi$')
-    ax.set_aspect('equal')
-    
-    # Right: r-phi plane
-    ax = axes_phi[1]
-    im_phi_rphi = ax.imshow(log_phi_2d_clipped, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                           aspect='auto', origin='lower', interpolation='bilinear', cmap='viridis', vmin=phi_min_grid)
-    ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
-    ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
-    ax.set_title(r'$\rm Log~Ionizing~Flux~\log\phi~(r-\phi~plane)$', fontsize=14)
-    plt.colorbar(im_phi_rphi, ax=ax, label=r'$\rm \log\phi$')
-    
-    plt.tight_layout()
-    filename_phi = filename.replace('.png', '_ionizing_flux.png')
-    plt.savefig(filename_phi, dpi=150, bbox_inches='tight')
-    print(f"Ionizing flux map saved to {filename_phi}")
-    plt.close()
+    if _PLOT_EXTRAS:
+        fig_phi, axes_phi = plt.subplots(1, 2, figsize=(14, 6))
+
+        # Left: x-y plane
+        ax = axes_phi[0]
+        log_phi_flat = log_phi_2d.flatten()
+        log_phi_reg = griddata((x_flat, y_flat), log_phi_flat, (X_reg, Y_reg), method='linear', fill_value=phi_plot_min)
+        im_phi_xy = ax.contourf(X_reg, Y_reg, log_phi_reg, levels=50, cmap='viridis', extend='neither',
+                                vmin=phi_plot_min, vmax=phi_plot_max)
+        ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
+        ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
+        ax.set_title(r'$\rm Log~Ionizing~Flux~\log\phi~(x-y~plane)$', fontsize=14)
+        plt.colorbar(im_phi_xy, ax=ax, label=r'$\rm \log\phi$', shrink=0.8, aspect=20)
+        ax.set_aspect('equal')
+
+        # Right: r-phi plane
+        ax = axes_phi[1]
+        im_phi_rphi = ax.imshow(log_phi_2d, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]],
+                               aspect='auto', origin='lower', interpolation='bilinear', cmap='viridis',
+                               vmin=phi_plot_min, vmax=phi_plot_max)
+        ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
+        ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
+        ax.set_title(r'$\rm Log~Ionizing~Flux~\log\phi~(r-\phi~plane)$', fontsize=14)
+        plt.colorbar(im_phi_rphi, ax=ax, label=r'$\rm \log\phi$', shrink=0.8, aspect=20)
+
+        plt.tight_layout()
+        filename_phi = filename.replace('.png', '_ionizing_flux.png')
+        plt.savefig(filename_phi, dpi=150, bbox_inches='tight')
+        print(f"Ionizing flux map saved to {filename_phi}")
+        plt.close()
     
     # ====================================================
     # Plot 2: RGB + 3 channels in x-y plane
     # ====================================================
-    fig1, axes1 = plt.subplots(2, 2, figsize=(14, 14))
+    fig1, axes1 = plt.subplots(2, 2, figsize=(14, 13),
+                                gridspec_kw={'hspace': -0.05, 'wspace': 0.35})
     
     # Interpolate RGB image to regular grid
     rgb_r_flat = rgb_image[:, :, 0].flatten()
@@ -489,54 +659,116 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
     rgb_image_reg[:, :, 1] = np.clip(rgb_g_reg, 0, 1)
     rgb_image_reg[:, :, 2] = np.clip(rgb_b_reg, 0, 1)
     
-    # Top left: RGB composite in x-y plane
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from matplotlib.ticker import AutoLocator
+
+    TITLE_FS = 22
+    TICK_FS = 16
+    CBAR_LABEL_FS = 20
+    SUPLABEL_FS = 22
+
+    def _attach_cax(ax, im, label):
+        """Attach a colorbar matched to ax height; return the cax."""
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.1)
+        if im is None:
+            cax.set_visible(False)
+            return cax
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.set_label(label, fontsize=CBAR_LABEL_FS)
+        cbar.ax.tick_params(labelsize=TICK_FS)
+        # Override the default contour-level ticks (which give ugly fractional
+        # numbers) with matplotlib's standard auto-locator → clean values
+        # like 0, 0.2, 0.4, 0.6, 0.8, 1.0.
+        cbar.locator = AutoLocator()
+        cbar.update_ticks()
+        return cax
+
+    def _style_panel(ax, title, hide_xticks=False, hide_yticks=False):
+        ax.set_title(title, fontsize=TITLE_FS, pad=8)
+        ax.tick_params(direction='in', which='major', length=8, width=1.5,
+                       labelsize=TICK_FS, top=True, right=True)
+        ax.tick_params(direction='in', which='minor', length=5, width=1.0,
+                       top=True, right=True)
+        ax.minorticks_on()
+        if hide_xticks:
+            ax.tick_params(labelbottom=False)
+        if hide_yticks:
+            ax.tick_params(labelleft=False)
+        ax.set_aspect('equal')
+
+    # Per-channel color ranges (shared, set by VMIN_SHARED/VMAX_SHARED)
+    R_vmin, R_vmax = get_clipped_range(R_log)
+    G_vmin, G_vmax = get_clipped_range(G_log)
+    B_vmin, B_vmax = get_clipped_range(B_log)
+
+    # Top left: RGB composite (invisible cax keeps the panel size matched)
     ax = axes1[0, 0]
-    ax.imshow(rgb_image_reg, extent=[x_min, x_max, y_min, y_max], 
+    ax.imshow(rgb_image_reg, extent=[x_min, x_max, y_min, y_max],
               origin='lower', aspect='equal', interpolation='bilinear')
-    ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
-    ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
-    ax.set_title(r'$\rm RGB~Line~Intensity~Map~(R=H\alpha,~G=MgII,~B=CIV)$', fontsize=14)
-    ax.set_aspect('equal')
-    
-    # Top right: Red channel (Halpha) in x-y plane - log scale absolute values (inverted colormap)
+    _style_panel(ax, r'$\rm RGB~(R=H\alpha,~G=MgII,~B=CIV)$', hide_xticks=True)
+    # White ticks for the RGB composite so they remain visible over the
+    # dark composite background.
+    ax.tick_params(which='both', color='white')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('white')
+    # Dashed white circle marking the minimum allowed pillar radius.
+    if pillar_rmin is not None:
+        from matplotlib.patches import Circle
+        ax.add_patch(Circle((0, 0), float(pillar_rmin),
+                            fill=False, edgecolor='white',
+                            linestyle='--', linewidth=1.5))
+    _attach_cax(ax, None, None)
+
+    # Top right: Halpha (shares y axis with RGB → hide y-tick labels)
     ax = axes1[0, 1]
     R_log_flat = R_log.flatten()
     R_log_reg = griddata((x_flat, y_flat), R_log_flat, (X_reg, Y_reg), method='linear', fill_value=np.nan)
-    im1 = ax.contourf(X_reg, Y_reg, R_log_reg, levels=50, cmap='Reds_r', extend='both')
-    ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
-    ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
-    ax.set_title(r'$\rm Red~Channel~(H\alpha)$', fontsize=14)
-    plt.colorbar(im1, ax=ax, label=label_R)
-    ax.set_aspect('equal')
-    
-    # Bottom left: Green channel (MgII) in x-y plane - log scale absolute values (inverted colormap)
+    im1 = ax.contourf(X_reg, Y_reg, np.clip(R_log_reg, R_vmin, R_vmax),
+                      levels=np.linspace(R_vmin, R_vmax, 50),
+                      cmap='Reds', extend='neither',
+                      vmin=R_vmin, vmax=R_vmax)
+    _style_panel(ax, r'$\rm H\alpha$', hide_xticks=True, hide_yticks=True)
+    _attach_cax(ax, im1, label_R)
+
+    # Bottom left: MgII
     ax = axes1[1, 0]
     G_log_flat = G_log.flatten()
     G_log_reg = griddata((x_flat, y_flat), G_log_flat, (X_reg, Y_reg), method='linear', fill_value=np.nan)
-    im2 = ax.contourf(X_reg, Y_reg, G_log_reg, levels=50, cmap='Greens_r', extend='both')
-    ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
-    ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
-    ax.set_title(r'$\rm Green~Channel~(MgII)$', fontsize=14)
-    plt.colorbar(im2, ax=ax, label=label_G)
-    ax.set_aspect('equal')
-    
-    # Bottom right: Blue channel (CIV) in x-y plane - log scale absolute values (inverted colormap)
+    im2 = ax.contourf(X_reg, Y_reg, np.clip(G_log_reg, G_vmin, G_vmax),
+                      levels=np.linspace(G_vmin, G_vmax, 50),
+                      cmap='Greens', extend='neither',
+                      vmin=G_vmin, vmax=G_vmax)
+    _style_panel(ax, r'$\rm MgII$')
+    _attach_cax(ax, im2, label_G)
+
+    # Bottom right: CIV (shares y axis with MgII → hide y-tick labels)
     ax = axes1[1, 1]
     B_log_flat = B_log.flatten()
     B_log_reg = griddata((x_flat, y_flat), B_log_flat, (X_reg, Y_reg), method='linear', fill_value=np.nan)
-    im3 = ax.contourf(X_reg, Y_reg, B_log_reg, levels=50, cmap='Blues_r', extend='both')
-    ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
-    ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
-    ax.set_title(r'$\rm Blue~Channel~(CIV)$', fontsize=14)
-    plt.colorbar(im3, ax=ax, label=label_B)
-    ax.set_aspect('equal')
-    
-    plt.tight_layout()
+    im3 = ax.contourf(X_reg, Y_reg, np.clip(B_log_reg, B_vmin, B_vmax),
+                      levels=np.linspace(B_vmin, B_vmax, 50),
+                      cmap='Blues', extend='neither',
+                      vmin=B_vmin, vmax=B_vmax)
+    _style_panel(ax, r'$\rm CIV$', hide_yticks=True)
+    _attach_cax(ax, im3, label_B)
+
+    # Shared X / Y labels at the figure edges; bring the X label up close
+    # to the bottom panels to reduce vertical whitespace. Skip tight_layout
+    # — it overrides the negative gridspec hspace.
+    fig1.supxlabel(r'$\rm X~[light~days]$', fontsize=SUPLABEL_FS, y=0.10)
+    fig1.supylabel(r'$\rm Y~[light~days]$', fontsize=SUPLABEL_FS, x=0.06)
     filename_xy = filename.replace('.png', '_xy.png')
-    plt.savefig(filename_xy, dpi=150, bbox_inches='tight')
+    plt.savefig(filename_xy, dpi=200, bbox_inches='tight')
     print(f"RGB line intensity map (x-y plane) saved to {filename_xy}")
     plt.close()
-    
+
+    # Skip the remaining plots (r-phi RGB, logF-logphi, EW xy, EW r-phi)
+    # while iterating on the xy composite. Flip _PLOT_EXTRAS=True above to
+    # re-enable them all.
+    if not _PLOT_EXTRAS:
+        return
+
     # ====================================================
     # Plot 3: RGB + 3 channels in r-phi plane
     # ====================================================
@@ -553,29 +785,29 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
     # Top right: Red channel r-phi - log scale absolute values (inverted colormap)
     ax = axes2[0, 1]
     im1b = ax.imshow(R_log, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                     aspect='auto', origin='lower', cmap='Reds_r', interpolation='bilinear')
+                     aspect='auto', origin='lower', cmap='Reds', interpolation='bilinear')
     ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
     ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
     ax.set_title(r'$\rm Red~Channel~(H\alpha)$', fontsize=14)
-    plt.colorbar(im1b, ax=ax, label=label_R)
+    plt.colorbar(im1b, ax=ax, label=label_R, shrink=0.8, aspect=20)
     
     # Bottom left: Green channel r-phi - log scale absolute values (inverted colormap)
     ax = axes2[1, 0]
     im2b = ax.imshow(G_log, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                     aspect='auto', origin='lower', cmap='Greens_r', interpolation='bilinear')
+                     aspect='auto', origin='lower', cmap='Greens', interpolation='bilinear')
     ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
     ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
     ax.set_title(r'$\rm Green~Channel~(MgII)$', fontsize=14)
-    plt.colorbar(im2b, ax=ax, label=label_G)
+    plt.colorbar(im2b, ax=ax, label=label_G, shrink=0.8, aspect=20)
     
     # Bottom right: Blue channel r-phi - log scale absolute values (inverted colormap)
     ax = axes2[1, 1]
     im3b = ax.imshow(B_log, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                     aspect='auto', origin='lower', cmap='Blues_r', interpolation='bilinear')
+                     aspect='auto', origin='lower', cmap='Blues', interpolation='bilinear')
     ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
     ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
     ax.set_title(r'$\rm Blue~Channel~(CIV)$', fontsize=14)
-    plt.colorbar(im3b, ax=ax, label=label_B)
+    plt.colorbar(im3b, ax=ax, label=label_B, shrink=0.8, aspect=20)
     
     plt.tight_layout()
     filename_rphi = filename.replace('.png', '_rphi.png')
@@ -629,29 +861,29 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
     
     # Top right: Halpha (logF - logφ)
     ax = axes_logf[0, 1]
-    im_R_diff = ax.contourf(X_reg, Y_reg, R_diff_reg, levels=50, cmap='Reds_r', extend='both')
+    im_R_diff = ax.contourf(X_reg, Y_reg, R_diff_reg, levels=50, cmap='Reds', extend='neither')
     ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
     ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
     ax.set_title(r'$\rm \log(F_{H\alpha}) - \log\phi$', fontsize=14)
-    plt.colorbar(im_R_diff, ax=ax, label=r'$\rm \log(F_{H\alpha}) - \log\phi$')
+    plt.colorbar(im_R_diff, ax=ax, label=r'$\rm \log(F_{H\alpha}) - \log\phi$', shrink=0.8, aspect=20)
     ax.set_aspect('equal')
     
     # Bottom left: MgII (logF - logφ)
     ax = axes_logf[1, 0]
-    im_G_diff = ax.contourf(X_reg, Y_reg, G_diff_reg, levels=50, cmap='Greens_r', extend='both')
+    im_G_diff = ax.contourf(X_reg, Y_reg, G_diff_reg, levels=50, cmap='Greens', extend='neither')
     ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
     ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
     ax.set_title(r'$\rm \log(F_{MgII}) - \log\phi$', fontsize=14)
-    plt.colorbar(im_G_diff, ax=ax, label=r'$\rm \log(F_{MgII}) - \log\phi$')
+    plt.colorbar(im_G_diff, ax=ax, label=r'$\rm \log(F_{MgII}) - \log\phi$', shrink=0.8, aspect=20)
     ax.set_aspect('equal')
     
     # Bottom right: CIV (logF - logφ)
     ax = axes_logf[1, 1]
-    im_B_diff = ax.contourf(X_reg, Y_reg, B_diff_reg, levels=50, cmap='Blues_r', extend='both')
+    im_B_diff = ax.contourf(X_reg, Y_reg, B_diff_reg, levels=50, cmap='Blues', extend='neither')
     ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
     ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
     ax.set_title(r'$\rm \log(F_{CIV}) - \log\phi$', fontsize=14)
-    plt.colorbar(im_B_diff, ax=ax, label=r'$\rm \log(F_{CIV}) - \log\phi$')
+    plt.colorbar(im_B_diff, ax=ax, label=r'$\rm \log(F_{CIV}) - \log\phi$', shrink=0.8, aspect=20)
     ax.set_aspect('equal')
     
     plt.tight_layout()
@@ -674,10 +906,10 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
             ew_G_log, ew_G_log_min, ew_G_log_max = compute_log_values(ew_map['Mg2'])
             ew_B_log, ew_B_log_min, ew_B_log_max = compute_log_values(ew_map['C4'])
             
-            # Normalize for RGB display (invert so high EW = bright colors)
-            ew_R_norm = 1.0 - normalize_channel_log(ew_map['Halpha'])  # Invert normalization
-            ew_G_norm = 1.0 - normalize_channel_log(ew_map['Mg2'])  # Invert normalization
-            ew_B_norm = 1.0 - normalize_channel_log(ew_map['C4'])  # Invert normalization
+            # Normalize for RGB display: high EW = deep/saturated color
+            ew_R_norm = normalize_channel_log(ew_map['Halpha'])
+            ew_G_norm = normalize_channel_log(ew_map['Mg2'])
+            ew_B_norm = normalize_channel_log(ew_map['C4'])
             
             # Create RGB EW image
             ew_rgb_image = np.zeros((len(r_plot), len(phi_plot), 3))
@@ -716,33 +948,33 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
             ax = axes_ew_xy[0, 1]
             ew_R_log_flat = ew_R_log.flatten()
             ew_R_log_reg = griddata((x_flat, y_flat), ew_R_log_flat, (X_reg, Y_reg), method='linear', fill_value=np.nan)
-            im_ew_R = ax.contourf(X_reg, Y_reg, ew_R_log_reg, levels=50, cmap='Reds_r', extend='both')
+            im_ew_R = ax.contourf(X_reg, Y_reg, ew_R_log_reg, levels=50, cmap='Reds', extend='neither')
             ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
             ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
             ax.set_title(r'$\rm EW(H\alpha)$', fontsize=14)
-            plt.colorbar(im_ew_R, ax=ax, label=r'$\rm \log(EW)$')
+            plt.colorbar(im_ew_R, ax=ax, label=r'$\rm \log(EW)$', shrink=0.8, aspect=20)
             ax.set_aspect('equal')
             
             # Bottom left: MgII EW in x-y plane (inverted colormap)
             ax = axes_ew_xy[1, 0]
             ew_G_log_flat = ew_G_log.flatten()
             ew_G_log_reg = griddata((x_flat, y_flat), ew_G_log_flat, (X_reg, Y_reg), method='linear', fill_value=np.nan)
-            im_ew_G = ax.contourf(X_reg, Y_reg, ew_G_log_reg, levels=50, cmap='Greens_r', extend='both')
+            im_ew_G = ax.contourf(X_reg, Y_reg, ew_G_log_reg, levels=50, cmap='Greens', extend='neither')
             ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
             ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
             ax.set_title(r'$\rm EW(MgII)$', fontsize=14)
-            plt.colorbar(im_ew_G, ax=ax, label=r'$\rm \log(EW)$')
+            plt.colorbar(im_ew_G, ax=ax, label=r'$\rm \log(EW)$', shrink=0.8, aspect=20)
             ax.set_aspect('equal')
             
             # Bottom right: CIV EW in x-y plane (inverted colormap)
             ax = axes_ew_xy[1, 1]
             ew_B_log_flat = ew_B_log.flatten()
             ew_B_log_reg = griddata((x_flat, y_flat), ew_B_log_flat, (X_reg, Y_reg), method='linear', fill_value=np.nan)
-            im_ew_B = ax.contourf(X_reg, Y_reg, ew_B_log_reg, levels=50, cmap='Blues_r', extend='both')
+            im_ew_B = ax.contourf(X_reg, Y_reg, ew_B_log_reg, levels=50, cmap='Blues', extend='neither')
             ax.set_xlabel(r'$\rm X~[light~days]$', fontsize=14)
             ax.set_ylabel(r'$\rm Y~[light~days]$', fontsize=14)
             ax.set_title(r'$\rm EW(CIV)$', fontsize=14)
-            plt.colorbar(im_ew_B, ax=ax, label=r'$\rm \log(EW)$')
+            plt.colorbar(im_ew_B, ax=ax, label=r'$\rm \log(EW)$', shrink=0.8, aspect=20)
             ax.set_aspect('equal')
             
             plt.tight_layout()
@@ -767,29 +999,29 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
             # Top right: Halpha EW in r-phi plane (inverted colormap)
             ax = axes_ew_rphi[0, 1]
             im_ew_R_rphi = ax.imshow(ew_R_log, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                                    aspect='auto', origin='lower', interpolation='bilinear', cmap='Reds_r')
+                                    aspect='auto', origin='lower', interpolation='bilinear', cmap='Reds')
             ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
             ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
             ax.set_title(r'$\rm EW(H\alpha)$', fontsize=14)
-            plt.colorbar(im_ew_R_rphi, ax=ax, label=r'$\rm \log(EW)$')
+            plt.colorbar(im_ew_R_rphi, ax=ax, label=r'$\rm \log(EW)$', shrink=0.8, aspect=20)
             
             # Bottom left: MgII EW in r-phi plane (inverted colormap)
             ax = axes_ew_rphi[1, 0]
             im_ew_G_rphi = ax.imshow(ew_G_log, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                                    aspect='auto', origin='lower', interpolation='bilinear', cmap='Greens_r')
+                                    aspect='auto', origin='lower', interpolation='bilinear', cmap='Greens')
             ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
             ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
             ax.set_title(r'$\rm EW(MgII)$', fontsize=14)
-            plt.colorbar(im_ew_G_rphi, ax=ax, label=r'$\rm \log(EW)$')
+            plt.colorbar(im_ew_G_rphi, ax=ax, label=r'$\rm \log(EW)$', shrink=0.8, aspect=20)
             
             # Bottom right: CIV EW in r-phi plane (inverted colormap)
             ax = axes_ew_rphi[1, 1]
             im_ew_B_rphi = ax.imshow(ew_B_log, extent=[phi_plot[0], phi_plot[-1], r_plot[0], r_plot[-1]], 
-                                    aspect='auto', origin='lower', interpolation='bilinear', cmap='Blues_r')
+                                    aspect='auto', origin='lower', interpolation='bilinear', cmap='Blues')
             ax.set_xlabel(r'$\rm Azimuthal~Angle~\phi~[rad]$', fontsize=14)
             ax.set_ylabel(r'$\rm Radius~[light~days]$', fontsize=14)
             ax.set_title(r'$\rm EW(CIV)$', fontsize=14)
-            plt.colorbar(im_ew_B_rphi, ax=ax, label=r'$\rm \log(EW)$')
+            plt.colorbar(im_ew_B_rphi, ax=ax, label=r'$\rm \log(EW)$', shrink=0.8, aspect=20)
             
             plt.tight_layout()
             filename_ew_rphi = filename.replace('.png', '_EW_rphi.png')
@@ -800,43 +1032,63 @@ def plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_g
             print(f"Warning: Not all RGB EW lines available. Found: {available_ew_lines}")
 
 
-def main(config_file='config_line.yaml', cloudy_file=None, use_absolute_flux=True):
+def main(config_file='config_line.yaml', cloudy_file=None,
+         cloudy_extension_file=None, use_absolute_flux=True,
+         rgb_sat_mode='shared', hybrid_composite=False,
+         composite_brightness='none', composite_sat_boost=1.0,
+         composite_brightness_gamma=1.0,
+         composite_brightness_floor=0.0, composite_brightness_boost=1.0,
+         composite_brightness_phi_min=16.0, composite_brightness_phi_max=21.0,
+         composite_brightness_add=0.0,
+         draw_pillar_rmin=True):
     """
     Main function to compute and plot RGB line intensity map.
-    
+
     Parameters:
     -----------
     config_file : str
         Path to configuration YAML file
     cloudy_file : str
         Path to Cloudy model data file. If None, use default path based on use_absolute_flux
+    cloudy_extension_file : str or None
+        Optional path to a low-phi (log Phi in [15, 16.5], Z = Z_sun)
+        Cloudy extension file that gets spliced onto the main grid.
+        Only meaningful when use_absolute_flux=True (the absolute-flux
+        grid is the only one with a matching extension file). Default
+        (None at the call) auto-fills with the standard extension file
+        living next to the main absolute-flux file.
     use_absolute_flux : bool
         If True, use absolute line flux models.
         If False, use flux normalized by Hbeta.
     """
     # Load configuration
     config = load_config(config_file)
-    
+
     if config is None:
         print("Error: Could not load config file. Using defaults.")
         return
-    
+
     # Default Cloudy file path based on use_absolute_flux
     if cloudy_file is None:
         if use_absolute_flux:
             basepath = '/Users/jiamuh/c23.01/my_models/loc_metal_flux'
             cloudy_file = os.path.join(basepath, 'strong_LOC_varym_N25_v100_lineflux_LineList_BLR_Fe2_flux.txt')
+            if cloudy_extension_file is None:
+                cloudy_extension_file = os.path.join(
+                    basepath,
+                    'strong_LOC_varym_N25_v100_lineflux_extlow_LineList_BLR_Fe2_flux.txt')
         else:
             basepath = '/Users/jiamuh/c23.01/my_models/loc_metal'
             cloudy_file = os.path.join(basepath, 'strong_LOC_varym_N25_LineList_BLR_Fe2.txt')
-    
+
     if not os.path.exists(cloudy_file):
         print(f"Error: Cloudy model file not found: {cloudy_file}")
         print("Please specify the path to the Cloudy model file.")
         return
-    
-    # Load Cloudy models (Z=1, solar metallicity)
-    cloudy_interp_dict, phi_grid, Z_grid = load_cloudy_models(cloudy_file, Z_target=1.0)
+
+    # Load Cloudy models (Z=1, solar metallicity), optionally with low-phi extension
+    cloudy_interp_dict, phi_grid, Z_grid = load_cloudy_models(
+        cloudy_file, Z_target=1.0, extension_file=cloudy_extension_file)
     
     # Extract disk parameters (same as pillar_line.py)
     disk_params = config.get('disk', {}).copy()
@@ -844,14 +1096,17 @@ def main(config_file='config_line.yaml', cloudy_file=None, use_absolute_flux=Tru
     lamp_params = config.get('lamp', {}).copy()
     obs_params = config.get('observation', {}).copy()
     
-    float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha', 
-                   'tx1', 'tirrad_tvisc_ratio', 'fcol', 'hlamp', 'dmpc', 'cosi', 'redshift']
+    float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha',
+                   'tx1', 'tirrad_tvisc_ratio', 'fcol', 'hlamp', 'dmpc', 'cosi', 'inclination', 'redshift',
+                   'M_BH', 'r_isco_rg', 'f_trans']
     int_params = ['nr', 'nphi']
-    
+
     def convert_value(key, value):
         if value is None:
             return None
         if isinstance(value, str):
+            if value.lower() == 'auto':
+                return 'auto'
             try:
                 if key in int_params:
                     return int(float(value))
@@ -869,13 +1124,22 @@ def main(config_file='config_line.yaml', cloudy_file=None, use_absolute_flux=Tru
         elif key in float_params:
             return float(value)
         return value
-    
+
     for params_dict in [disk_params, temp_params, lamp_params, obs_params]:
         for key, value in params_dict.items():
             params_dict[key] = convert_value(key, value)
-    
+
+    # Convert inclination (degrees) to cosi if provided
+    if 'inclination' in obs_params and obs_params['inclination'] is not None:
+        inclination_rad = np.radians(obs_params['inclination'])
+        obs_params['cosi'] = np.cos(inclination_rad)
+        del obs_params['inclination']
+
     disk_params = {**disk_params, **temp_params, **lamp_params, **obs_params}
-    
+
+    # Resolve rin='auto' to ISCO if needed
+    resolve_rin(disk_params)
+
     # Create disk model
     disk = PillarDisk(**disk_params)
     
@@ -923,6 +1187,7 @@ def main(config_file='config_line.yaml', cloudy_file=None, use_absolute_flux=Tru
         modify_temp_pillar_list = expand_list(modify_temp_pillar_list, N_pillar, True)
         temp_factor_pillar_list = expand_list(temp_factor_pillar_list, N_pillar, 1.5)
         
+        np.random.seed(42)
         r_pillar_random = np.random.normal(r_mean, sig_r, N_pillar)
         rmin_eff = max(disk.rin, rmin) if rmin is not None else disk.rin
         r_pillar_random = np.clip(r_pillar_random, rmin_eff, disk.rout)
@@ -1021,10 +1286,43 @@ def main(config_file='config_line.yaml', cloudy_file=None, use_absolute_flux=Tru
     r_plot, phi_plot, intensity_map, ew_map, log_phi_2d = compute_line_intensity_map(
         disk, cloudy_interp_dict, phi_grid, Z_target=1.0,
         n_r_plot=n_r_plot, n_phi_plot=n_phi_plot)
-    
-    # Plot RGB map
-    filename = plot_params.get('line_intensity_rgb_filename', 'line_intensity_rgb.png')
-    plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_grid, use_absolute_flux=use_absolute_flux, filename=filename)
+
+    # In hybrid_composite mode, load the OTHER cloudy grid so the RGB
+    # composite uses absolute flux while the per-line panels stay on
+    # F/F_Hβ (or vice versa). Detect the partner grid from the absolute
+    # vs normalized basepath.
+    composite_intensity_map = None
+    if hybrid_composite:
+        if use_absolute_flux:
+            partner_basepath = '/Users/jiamuh/c23.01/my_models/loc_metal'
+            partner_file = os.path.join(partner_basepath, 'strong_LOC_varym_N25_LineList_BLR_Fe2.txt')
+            partner_ext = None
+        else:
+            partner_basepath = '/Users/jiamuh/c23.01/my_models/loc_metal_flux'
+            partner_file = os.path.join(partner_basepath, 'strong_LOC_varym_N25_v100_lineflux_LineList_BLR_Fe2_flux.txt')
+            partner_ext = os.path.join(partner_basepath,
+                                       'strong_LOC_varym_N25_v100_lineflux_extlow_LineList_BLR_Fe2_flux.txt')
+        if os.path.exists(partner_file):
+            partner_interp, partner_phi_grid, _ = load_cloudy_models(
+                partner_file, Z_target=1.0, extension_file=partner_ext)
+            _, _, composite_intensity_map, _, _ = compute_line_intensity_map(
+                disk, partner_interp, partner_phi_grid, Z_target=1.0,
+                n_r_plot=n_r_plot, n_phi_plot=n_phi_plot)
+        else:
+            print(f"Warning: hybrid_composite requested but partner grid not found: {partner_file}")
+
+    # Plot RGB map; save under plots/ rather than the project root.
+    filename = plot_params.get('line_intensity_rgb_filename',
+                               'plots/line_intensity_rgb.png')
+    out_dir = os.path.dirname(filename)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    pillar_rmin_arg = None
+    if draw_pillar_rmin:
+        _rmin_cfg = config.get('pillars', {}).get('rmin', None)
+        if _rmin_cfg is not None:
+            pillar_rmin_arg = float(_rmin_cfg)
+    plot_rgb_line_map(r_plot, phi_plot, intensity_map, ew_map, log_phi_2d, phi_grid, use_absolute_flux=use_absolute_flux, filename=filename, rgb_sat_mode=rgb_sat_mode, composite_intensity_map=composite_intensity_map, composite_brightness=composite_brightness, composite_sat_boost=composite_sat_boost, composite_brightness_gamma=composite_brightness_gamma, composite_brightness_floor=composite_brightness_floor, composite_brightness_boost=composite_brightness_boost, composite_brightness_phi_min=composite_brightness_phi_min, composite_brightness_phi_max=composite_brightness_phi_max, composite_brightness_add=composite_brightness_add, pillar_rmin=pillar_rmin_arg)
     
     print("\nSummary:")
     print(f"Radial range: {r_plot[0]:.2f} to {r_plot[-1]:.2f} light days")

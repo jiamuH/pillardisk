@@ -86,6 +86,21 @@ def load_config(config_file='config.yaml'):
     
     return config
 
+
+def resolve_rin(disk_params):
+    """Compute rin from M_BH and r_isco_rg if rin='auto', then clean up extra keys."""
+    rin_val = disk_params.get('rin', 0.1)
+    if isinstance(rin_val, str) and rin_val.lower() == 'auto':
+        M_BH = float(disk_params.get('M_BH', 7e7))
+        r_isco_rg = float(disk_params.get('r_isco_rg', 6))
+        G = 6.674e-11; M_sun = 1.989e30; c = 2.998e8; ld = c * 86400.0
+        r_g = G * M_BH * M_sun / c**2 / ld  # light days
+        disk_params['rin'] = r_isco_rg * r_g
+        print(f"  r_g = {r_g:.5f} ld, r_ISCO = {r_isco_rg} r_g = {disk_params['rin']:.4f} ld")
+    disk_params.pop('M_BH', None)
+    disk_params.pop('r_isco_rg', None)
+
+
 # Physical constants (cgs units)
 C = 2.997925e10  # speed of light (cm/s)
 H = 6.6262e-27   # Planck constant (erg s)
@@ -105,7 +120,7 @@ class PillarDisk:
     Accretion disk with Gaussian pillar bumps for AGN continuum modeling.
     """
     
-    def __init__(self, 
+    def __init__(self,
                  rin: float = 0.1,      # inner radius (light days)
                  rout: float = 100.0,   # outer radius (light days)
                  nr: int = 300,         # number of radial points
@@ -121,7 +136,13 @@ class PillarDisk:
                  dmpc: float = 100.0,   # distance (Mpc)
                  cosi: float = 0.5,      # cos(inclination), 1=face-on
                  fcol: float = 1.0,     # color temperature factor Tcol = fcol * Teff
-                 redshift: float = 0.0): # redshift
+                 redshift: float = 0.0, # redshift
+                 flux_method: str = 'scale_temp',  # 'scale_temp' or 'direct'
+                 log_phi_inner: float = 24.0,  # target log10(Phi) at r_in for Q calibration
+                 no_fluxfloor: bool = False,  # if True, shadow cells below Cloudy grid get zero emissivity
+                 transparent: bool = False,  # if True, pillars transmit a fraction f_trans of lamp flux
+                 f_trans: float = 0.0,       # transmission fraction (0=opaque, 1=fully transparent)
+                 f_turb_line: float = 0.0):  # turbulent broadening: sigma_v = f_turb * v_Kep(r)
         """
         Initialize the disk model.
         """
@@ -142,7 +163,13 @@ class PillarDisk:
         self.sini = np.sqrt(1.0 - cosi**2)
         self.fcol = fcol
         self.redshift = redshift
-        
+        self.flux_method = flux_method
+        self.log_phi_inner = log_phi_inner
+        self.no_fluxfloor = no_fluxfloor
+        self.transparent = transparent
+        self.f_trans = f_trans if transparent else 0.0
+        self.f_turb_line = f_turb_line
+
         # Distance in light days
         self.d = dmpc * PC_TO_LD
         
@@ -160,7 +187,11 @@ class PillarDisk:
             'h1': h1, 'r0': r0, 'beta': beta,
             'tv1': tv1, 'alpha': alpha,
             'hlamp': hlamp, 'tx1': tx1, 'tirrad_tvisc_ratio': tirrad_tvisc_ratio,
-            'dmpc': dmpc, 'cosi': cosi, 'fcol': fcol, 'redshift': redshift
+            'dmpc': dmpc, 'cosi': cosi, 'fcol': fcol, 'redshift': redshift,
+            'flux_method': flux_method, 'log_phi_inner': log_phi_inner,
+            'no_fluxfloor': no_fluxfloor,
+            'transparent': transparent, 'f_trans': f_trans,
+            'f_turb_line': f_turb_line
         }
         
         # Set up radial and azimuthal grids
@@ -319,9 +350,12 @@ class PillarDisk:
             # Wrap azimuthal difference to [-pi, pi]
             dphi = np.mod(dphi + np.pi, 2*np.pi) - np.pi
             
-            # Gaussian bump
-            gauss = np.exp(-0.5 * ((dr / pillar['sigma_r'])**2 + 
-                                  (dphi / pillar['sigma_phi'])**2))
+            # Gaussian bump with periodic azimuthal wrapping (sum over images)
+            sig_phi = pillar['sigma_phi']
+            gauss_phi = (np.exp(-0.5 * (dphi / sig_phi)**2)
+                       + np.exp(-0.5 * ((dphi - 2*np.pi) / sig_phi)**2)
+                       + np.exp(-0.5 * ((dphi + 2*np.pi) / sig_phi)**2))
+            gauss = np.exp(-0.5 * (dr / pillar['sigma_r'])**2) * gauss_phi
             
             if pillar['modify_height']:
                 # Add height directly (in light days) weighted by Gaussian
@@ -387,23 +421,25 @@ class PillarDisk:
             # Gaussian term is 1, so only the azimuthal profile matters.
             dphi = phi - phi_p
             dphi = np.mod(dphi + np.pi, 2*np.pi) - np.pi
-            gauss_phi = np.exp(-0.5 * (dphi / pillar['sigma_phi'])**2)
+            sig_phi = pillar['sigma_phi']
+            gauss_phi = (np.exp(-0.5 * (dphi / sig_phi)**2)
+                       + np.exp(-0.5 * ((dphi - 2*np.pi) / sig_phi)**2)
+                       + np.exp(-0.5 * ((dphi + 2*np.pi) / sig_phi)**2))
 
             h_base_rp = np.interp(r_p, self.r, self.h_base)
             h_pillar_at_phi = h_base_rp + pillar['height'] * gauss_phi
 
-            # Shadow: where pillar is taller than the ray
-            shadowed = behind & (h_pillar_at_phi > z_ray)
+            # Shadow: where pillar is taller than the ray → fully opaque.
+            # Use a steep sigmoid for a thin penumbra at the boundary
+            # (scale ~ 1% of pillar height) for numerical smoothness.
+            delta = h_pillar_at_phi - z_ray  # >0 means ray is blocked
+            penumbra_scale = 0.01 * pillar['height'] + 1e-10
+            shadow_strength = np.where(behind,
+                                       np.clip(delta / penumbra_scale, 0.0, 1.0),
+                                       0.0)
 
-            # Smooth shadow strength: proportional to how far the ray
-            # dips below the pillar top, normalised by the pillar height.
-            # 0 = ray just grazes pillar top, 1 = ray well below.
-            excess = np.where(shadowed,
-                              (h_pillar_at_phi - z_ray) / (pillar['height'] + 1e-10),
-                              0.0)
-            shadow_strength = np.clip(excess, 0.0, 1.0)
-
-            shadow_mask *= (1.0 - shadow_strength)
+            # For transparent pillars, shadow floors at f_trans instead of 0
+            shadow_mask *= (1.0 - shadow_strength * (1.0 - self.f_trans))
 
         shadow_mask = np.clip(shadow_mask, 0.0, 1.0)
 
@@ -441,117 +477,81 @@ class PillarDisk:
             # Try to broadcast
             r_2d, phi_2d = np.broadcast_arrays(r, phi)
         
-        # Get heights
+        # Get heights (includes pillar bumps)
         h_2d = self.get_height(r_2d, phi_2d)
-        
+
         # Base viscous temperature (axisymmetric): T_visc ∝ r^(-3/4)
         tv_2d = np.interp(r_2d.flatten(), self.r, self.tv_base).reshape(r_2d.shape)
-        
-        # Base irradiation temperature (axisymmetric): T_irrad ∝ r^(-3/4)
-        tx_2d = np.interp(r_2d.flatten(), self.r, self.tx_base).reshape(r_2d.shape)
-        
-        # Compute shadow mask if requested
-        if compute_shadows and len(self.pillars) > 0:
-            shadow_mask = self._compute_shadow_mask(r_2d, phi_2d, h_2d)
-            # In shadow: T_irrad = 0 (only viscous temperature)
-            # Outside shadow: use full temperature (viscous + irradiation)
-            tx_2d = tx_2d * shadow_mask
-        
-        # Base effective temperature: T^4 = Tv^4 + Tx^4
-        T = (tv_2d**4 + tx_2d**4)**0.25
-        
-        # Add pillar temperature enhancements
-        # Temperature enhancement is computed based on the angle between lamp post and surface normal
-        # Steeper faces facing the lamp post receive more irradiation
-        for pillar in self.pillars:
-            if pillar['modify_temp']:
-                # Distance from pillar center
+
+        # ── Irradiation from lamp geometry: T_irr^4 ∝ cos(θ) / d² ──
+        # Compute for ALL disk elements (flat disk + pillar slopes alike).
+        # Lamp position
+        x_2d = r_2d * np.cos(phi_2d)
+        y_2d = r_2d * np.sin(phi_2d)
+        z_2d = h_2d
+
+        # Vector from surface to lamp
+        dx = -x_2d
+        dy = -y_2d
+        dz = self.hlamp - z_2d
+        d2 = dx**2 + dy**2 + dz**2  # distance squared
+        d = np.sqrt(d2)
+
+        # Unit lamp direction (from surface toward lamp)
+        lamp_x = dx / (d + 1e-10)
+        lamp_y = dy / (d + 1e-10)
+        lamp_z = dz / (d + 1e-10)
+
+        # Surface normal including azimuthal gradient (pillar walls)
+        nx, ny, nz = self._surface_normal(r_2d, phi_2d, h_2d)
+
+        # cos(θ_inc) = dot(lamp_dir, normal)
+        cos_theta = lamp_x * nx + lamp_y * ny + lamp_z * nz
+        cos_theta = np.clip(cos_theta, 0.0, 1.0)
+
+        # Irradiation flux ∝ cos(θ) / d²
+        F_irr = cos_theta / (d2 + 1e-10)
+
+        # Normalise so that T_irr at (r0, flat disk) matches tx_base(r0).
+        # Reference: flat disk at r0, h≈0 → d0² = r0² + hlamp², cos θ0 = hlamp/d0.
+        d0 = np.sqrt(self.r0**2 + self.hlamp**2)
+        cos_theta0 = self.hlamp / d0
+        F_irr_ref = cos_theta0 / d0**2
+        tx_r0 = np.interp(self.r0, self.r, self.tx_base)
+
+        # T_irr^4 = tx_r0^4 × (F_irr / F_irr_ref)
+        tx_2d = tx_r0 * (F_irr / (F_irr_ref + 1e-30))**0.25
+
+        # Apply temp_factor boost on pillar illuminated faces
+        # (multiplicative on top of the geometric cos_theta enhancement)
+        if len(self.pillars) > 0:
+            h_base_2d = np.interp(r_2d.flatten(), self.r, self.h_base).reshape(r_2d.shape)
+            for pillar in self.pillars:
+                if not pillar.get('modify_temp', False):
+                    continue
+                tf = pillar.get('temp_factor', 1.0)
+                if tf == 1.0:
+                    continue
                 dr = r_2d - pillar['r']
                 dphi = phi_2d - pillar['phi']
-                # Wrap azimuthal difference to [-pi, pi]
                 dphi = np.mod(dphi + np.pi, 2*np.pi) - np.pi
-                
-                # Gaussian bump
-                gauss = np.exp(-0.5 * ((dr / pillar['sigma_r'])**2 + 
-                                      (dphi / pillar['sigma_phi'])**2))
-                
-                # Compute local surface normal and lamp direction
-                # Temperature enhancement is based on the angle between lamp post and surface normal
-                # Steeper faces facing the lamp post receive more direct irradiation
-                # (like mountains receiving more sunlight at sunrise/sunset)
-                
-                # Lamp position
-                lamp_x = 0.0
-                lamp_y = 0.0
-                lamp_z = self.hlamp
-                
-                # Surface point position
-                x = r_2d * np.cos(phi_2d)
-                y = r_2d * np.sin(phi_2d)
-                z = h_2d
-                
-                # Vector from lamp to surface point
-                dx_lamp = x - lamp_x
-                dy_lamp = y - lamp_y
-                dz_lamp = z - lamp_z
-                dlamp = np.sqrt(dx_lamp**2 + dy_lamp**2 + dz_lamp**2)
-                
-                # Unit vector toward lamp (from surface point)
-                lamp_dir_x = -dx_lamp / (dlamp + 1e-10)
-                lamp_dir_y = -dy_lamp / (dlamp + 1e-10)
-                lamp_dir_z = -dz_lamp / (dlamp + 1e-10)
-                
-                # Compute surface normal vector
-                # Normal depends on local slope: n = (-dh/dr * cos(phi), -dh/dr * sin(phi), 1) / sqrt(1 + (dh/dr)^2)
-                # Compute dh/dr numerically using gradient
-                dr_grid = np.gradient(r_2d, axis=0)
-                dh_grid = np.gradient(h_2d, axis=0)
-                dh_dr = np.zeros_like(h_2d)
-                mask = np.abs(dr_grid) > 1e-10
-                dh_dr[mask] = dh_grid[mask] / dr_grid[mask]
-                
-                # Surface normal vector (pointing upward)
-                norm_factor = np.sqrt(1.0 + dh_dr**2)
-                norm_x = -dh_dr * np.cos(phi_2d) / (norm_factor + 1e-10)
-                norm_y = -dh_dr * np.sin(phi_2d) / (norm_factor + 1e-10)
-                norm_z = 1.0 / (norm_factor + 1e-10)
-                
-                # Cosine of angle between lamp direction and surface normal
-                # cos(angle) = dot(lamp_dir, norm)
-                # This measures how directly the face is illuminated
-                cos_angle = lamp_dir_x * norm_x + lamp_dir_y * norm_y + lamp_dir_z * norm_z
-                
-                # Only consider faces facing the lamp (cos_angle > 0)
-                # Clamp to [0, 1] for faces facing the lamp
-                cos_angle = np.clip(cos_angle, 0.0, 1.0)
-                
-                # Temperature enhancement: computed purely from geometry (angle-dependent)
-                # Enhancement depends on:
-                # 1. How directly the face is illuminated (cos_angle)
-                # 2. How steep the face is (measured by |dh/dr|)
-                # 
-                # Steeper faces facing the lamp receive more direct irradiation
-                # Enhancement factor scales with cos_angle and steepness
-                
-                # Steepness factor: normalized by typical disk scale height
-                # Use r0 as reference scale
-                typical_slope = self.h1 / self.r0  # Typical disk slope
-                steepness = np.abs(dh_dr) / (typical_slope + 1e-10)
-                # Normalize steepness: 1 for typical disk, >1 for steeper
-                # Cap steepness to avoid extreme values
-                steepness_factor = np.clip(steepness / 5.0, 0.0, 2.0)  # Cap at 5x typical slope, max factor of 2
-                
-                # Enhancement: computed from geometry and scaled by pillar temp_factor
-                # Maximum enhancement occurs for steep faces directly facing lamp
-                # enhancement_factor = base_enhancement * cos_angle * steepness_factor * temp_factor
-                base_enhancement = 2.0  # geometry baseline
-                temp_factor_scale = pillar.get('temp_factor', 1.0)
-                enhancement_factor = base_enhancement * cos_angle * steepness_factor * temp_factor_scale
-                
-                # Apply enhancement with Gaussian weighting
-                T_enhance = enhancement_factor * gauss
-                T = T * (1.0 + T_enhance)
-        
+                sig_phi = pillar['sigma_phi']
+                gauss = (np.exp(-0.5 * (dr / pillar['sigma_r'])**2)
+                       * (np.exp(-0.5 * (dphi / sig_phi)**2)
+                        + np.exp(-0.5 * ((dphi - 2*np.pi) / sig_phi)**2)
+                        + np.exp(-0.5 * ((dphi + 2*np.pi) / sig_phi)**2)))
+                # Boost factor smoothly weighted by pillar profile
+                boost = 1.0 + (tf - 1.0) * gauss
+                tx_2d = tx_2d * boost
+
+        # Apply shadow mask
+        if compute_shadows and len(self.pillars) > 0:
+            shadow_mask = self._compute_shadow_mask(r_2d, phi_2d, h_2d)
+            tx_2d = tx_2d * shadow_mask
+
+        # Effective temperature: T_e^4 = T_v^4 + T_irr^4
+        T = (tv_2d**4 + tx_2d**4)**0.25
+
         return T
     
     def get_temperature_profile(self, compute_shadows: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1055,9 +1055,184 @@ class PillarDisk:
         self.pillars = saved_pillars
         return result
     
+    def compute_log_ionizing_flux(self, r, phi):
+        """Compute log ionizing photon flux.
+
+        Two methods available (set via ``self.flux_method``):
+
+        * ``'scale_temp'`` (legacy) -- rescale T_e / T_ref linearly to
+          [17, 21.5].
+        * ``'direct'`` -- geometric lamp flux + viscous blackbody Wien
+          tail above 1 Ryd, clipped to the Cloudy grid [17, 21].
+
+        Parameters
+        ----------
+        r, phi : array-like
+            Radial (light-days) and azimuthal (radians) grids, same shape.
+
+        Returns
+        -------
+        log_phi : ndarray
+            log10 ionizing flux.
+        """
+        if self.flux_method == 'direct':
+            return self._compute_direct_ionizing_flux(r, phi)
+        else:
+            return self._compute_scale_temp_ionizing_flux(r, phi)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _surface_normal(r_2d, phi_2d, h_2d):
+        """Compute outward surface normal for z = h(r, phi).
+
+        Uses both radial (dh/dr) and azimuthal (dh/dphi) gradients so that
+        pillar walls are correctly oriented.
+
+        Tangent vectors on the surface:
+            e_r   = (cos phi, sin phi, dh/dr)
+            e_phi = (-r sin phi, r cos phi, dh/dphi)
+        Normal = e_r x e_phi (unnormalised):
+            n_x = sin(phi) dh/dphi - r cos(phi) dh/dr
+            n_y = -r sin(phi) dh/dr - cos(phi) dh/dphi
+            n_z = r
+
+        Returns unit normal (nx, ny, nz).
+        """
+        # Radial gradient dh/dr (axis 0 = r)
+        dr_grid = np.gradient(r_2d, axis=0)
+        dh_r_grid = np.gradient(h_2d, axis=0)
+        dh_dr = np.zeros_like(h_2d)
+        ok_r = np.abs(dr_grid) > 1e-10
+        dh_dr[ok_r] = dh_r_grid[ok_r] / dr_grid[ok_r]
+
+        # Azimuthal gradient dh/dphi (axis 1 = phi)
+        dphi_grid = np.gradient(phi_2d, axis=1)
+        dh_p_grid = np.gradient(h_2d, axis=1)
+        dh_dphi = np.zeros_like(h_2d)
+        ok_p = np.abs(dphi_grid) > 1e-10
+        dh_dphi[ok_p] = dh_p_grid[ok_p] / dphi_grid[ok_p]
+
+        # Cross product
+        nx_raw = np.sin(phi_2d) * dh_dphi - r_2d * np.cos(phi_2d) * dh_dr
+        ny_raw = -r_2d * np.sin(phi_2d) * dh_dr - np.cos(phi_2d) * dh_dphi
+        nz_raw = r_2d
+
+        mag = np.sqrt(nx_raw**2 + ny_raw**2 + nz_raw**2) + 1e-30
+        return nx_raw / mag, ny_raw / mag, nz_raw / mag
+
+    # ------------------------------------------------------------------
+    def _compute_scale_temp_ionizing_flux(self, r, phi):
+        """Legacy method: linear rescaling of T_e/T_ref to [17, 21.5]."""
+        T_2d = self.get_temperature(r, phi, compute_shadows=True)
+        T_ref = self.tv1 * self.tirrad_tvisc_ratio
+        T_ratio = np.clip(T_2d / T_ref, 0.1, 10.0)
+        T_ratio_normalized = (T_ratio - 0.1) / (10.0 - 0.1)
+        phi_min, phi_max = 17.0, 21.5
+        return phi_min + T_ratio_normalized * (phi_max - phi_min)
+
+    # ------------------------------------------------------------------
+    def _compute_direct_ionizing_flux(self, r, phi):
+        """Direct geometric lamp flux + viscous blackbody ionizing flux.
+
+        Phi_total = S(r,phi) * Q * cos(theta) / (4 pi d^2) + Phi_visc(r)
+
+        Q is calibrated so that Phi(r_in) = 10^log_phi_inner on the
+        illuminated flat disk.  The result is clipped to [17, 21].
+        """
+        r = np.asarray(r, dtype=float)
+        phi = np.asarray(phi, dtype=float)
+        if r.ndim == 1 and phi.ndim == 1:
+            r_2d, phi_2d = np.meshgrid(r, phi, indexing='ij')
+        elif r.ndim == 2 and phi.ndim == 2:
+            r_2d, phi_2d = r, phi
+        else:
+            r_2d, phi_2d = np.broadcast_arrays(r, phi)
+
+        h_2d = self.get_height(r_2d, phi_2d)
+
+        # ---- Lamp geometry ----
+        x_2d = r_2d * np.cos(phi_2d)
+        y_2d = r_2d * np.sin(phi_2d)
+        z_2d = h_2d
+
+        dx = -x_2d
+        dy = -y_2d
+        dz = self.hlamp - z_2d
+        d2 = dx**2 + dy**2 + dz**2
+        d = np.sqrt(d2)
+
+        lamp_x = dx / (d + 1e-30)
+        lamp_y = dy / (d + 1e-30)
+        lamp_z = dz / (d + 1e-30)
+
+        # Surface normal including azimuthal gradient (pillar walls)
+        nx, ny, nz = self._surface_normal(r_2d, phi_2d, h_2d)
+
+        cos_theta_raw = lamp_x * nx + lamp_y * ny + lamp_z * nz
+        if self.f_trans > 0:
+            # For transparent pillars, the pillar wall still receives transmitted
+            # lamp flux. Floor at f_trans * cos_theta_flat, where cos_theta_flat
+            # is what a flat disk element at that radius would see from the lamp
+            # (using base disk height, not pillar-modified height).
+            h_base = np.interp(r_2d.flatten(), self.r, self.h_base).reshape(r_2d.shape)
+            d_flat = np.sqrt(r_2d**2 + (self.hlamp - h_base)**2)
+            cos_theta_flat = (self.hlamp - h_base) / (d_flat + 1e-30)
+            cos_theta_flat = np.clip(cos_theta_flat, 0.0, 1.0)
+            cos_theta = np.maximum(cos_theta_raw, self.f_trans * cos_theta_flat)
+        else:
+            cos_theta = np.clip(cos_theta_raw, 0.0, 1.0)
+
+        # ---- Calibrate Q at inner edge (flat disk) ----
+        d_in = np.sqrt(self.rin**2 + self.hlamp**2)
+        cos_theta_in = self.hlamp / d_in
+        Q = 10.0**self.log_phi_inner * 4.0 * np.pi * d_in**2 / cos_theta_in
+
+        # ---- Lamp flux ----
+        Phi_lamp = Q * cos_theta / (4.0 * np.pi * d2)
+
+        # Shadow mask
+        if len(self.pillars) > 0:
+            shadow_mask = self._compute_shadow_mask(r_2d, phi_2d, h_2d)
+            Phi_lamp = Phi_lamp * shadow_mask
+
+        # ---- Viscous blackbody ionizing flux (Wien tail above 1 Ryd) ----
+        # Phi_visc = integral of B_nu(T) / (h*nu) dnu from nu_0 to inf
+        # Wien-tail leading order:
+        #   Phi_visc ≈ (2*pi*nu_0^2/c^2) * (k*T/h) * exp(-h*nu_0/(k*T))
+        h_planck = 6.626e-27   # erg s
+        k_B = 1.381e-16        # erg/K
+        c_cgs = 2.998e10       # cm/s
+        nu_0 = 13.6 * 1.602e-12 / h_planck  # 1 Ryd frequency (Hz)
+
+        # Viscous temperature only (no irradiation)
+        T_visc = np.interp(r_2d.flatten(), self.r, self.tv_base).reshape(r_2d.shape)
+
+        A = 2.0 * np.pi * nu_0**2 / c_cgs**2 * (k_B / h_planck)
+        x = h_planck * nu_0 / (k_B * np.maximum(T_visc, 100.0))
+        # For numerical safety clip x; when x > 500 the exp is negligible
+        x = np.clip(x, 0.0, 500.0)
+        Phi_visc = A * T_visc * np.exp(-x)
+
+        # ---- Total ----
+        Phi_total = Phi_lamp + Phi_visc
+
+        # Floor to avoid log10(0)
+        Phi_total = np.maximum(Phi_total, 1e-30)
+        log_phi = np.log10(Phi_total)
+
+        # Clip upper bound to Cloudy grid max
+        log_phi = np.clip(log_phi, None, 21.0)
+        if not self.no_fluxfloor:
+            # Clip lower bound to Cloudy grid min (legacy: shadows get min emissivity)
+            log_phi = np.clip(log_phi, 17.0, None)
+        return log_phi
+
     def plot_3d_geometry(self, n_phi_plot: int = 180, n_r_plot: int = 200,
                          show_light_rays: bool = True, show_shadows: bool = True,
-                         color_by: str = 'shadow', filename: str = 'pillar_disk_3d.png'):
+                         show_pillar_markers: bool = True,
+                         show_colorbar: bool = True,
+                         color_by: str = 'shadow', filename: str = 'pillar_disk_3d.png',
+                         title: str = None):
         """
         Create a 3D visualization of the disk geometry with pillars and light rays.
 
@@ -1115,9 +1290,12 @@ class PillarDisk:
                 all_r = np.concatenate([r_plot, extra_r_points])
                 all_r = np.unique(np.sort(all_r))
                 # Limit to reasonable number
-                if len(all_r) > n_r_plot * 2:
-                    # Downsample while keeping pillar regions
-                    indices = np.linspace(0, len(all_r)-1, n_r_plot * 2, dtype=int)
+                if len(all_r) > n_r_plot * 4:
+                    # Downsample while keeping pillar regions. Cap raised
+                    # from x2 to x4 because narrow pillars (sigma_r ~ 0.1
+                    # ld) need finer adaptive refinement than the legacy
+                    # cap allowed.
+                    indices = np.linspace(0, len(all_r)-1, n_r_plot * 4, dtype=int)
                     all_r = all_r[indices]
                 r_plot = all_r
         
@@ -1139,44 +1317,102 @@ class PillarDisk:
         
         # Plot disk surface with coloring based on color_by parameter
         if color_by == 'temperature' or color_by == 'flux':
-            # Compute ionizing flux (same formula as compute_ionizing_flux in pillar_line_cloudy.py)
-            T_2d = self.get_temperature(r_2d, phi_2d, compute_shadows=True)
-            T_ref = self.tv1 * self.tirrad_tvisc_ratio
-            T_ratio = T_2d / T_ref
-            T_ratio_clipped = np.clip(T_ratio, 0.1, 10.0)
-            T_ratio_normalized = (T_ratio_clipped - 0.1) / (10.0 - 0.1)
+            log_phi_2d = self.compute_log_ionizing_flux(r_2d, phi_2d)
+            finite = log_phi_2d[np.isfinite(log_phi_2d) & (log_phi_2d > 0)]
+            phi_min = min(16.0, np.floor(np.min(finite) * 2) / 2)
+            phi_max = np.ceil(np.max(finite) * 2) / 2
 
-            # Map to log ionizing flux range [17, 21.5]
-            phi_min = 17.0
-            phi_max = 21.5
-            log_phi_2d = phi_min + T_ratio_normalized * (phi_max - phi_min)
+            # For pillar regions, apply view-dependent shading
+            h_base = self.h1 * (r_2d / self.r0) ** self.beta
+            pillar_mask = (h_2d - h_base) > 0.001
 
-            # In shadows, set to minimum
-            shadow_mask = T_2d < (T_ref * 0.1)
-            log_phi_2d[shadow_mask] = phi_min
+            # Which face does observer see?
+            # face_dot_obs > 0: shadow side (near), face_dot_obs < 0: illuminated side (far)
+            face_dot_obs = np.cos(phi_2d) * self.sini
+            blend = 0.5 * (1.0 + np.tanh(face_dot_obs / 0.3))
+
+            # Get the shadow flux from the disk shadow region (use minimum in shadowed areas)
+            shadow_mask = self._compute_shadow_mask(r_2d, phi_2d, h_2d)
+            # Where shadow_mask < 0.5, the disk is shadowed - find typical flux there
+            shadowed_flux = np.where(shadow_mask < 0.5, log_phi_2d, phi_max)
+            shadow_level = np.min(shadowed_flux)  # Darkest shadow on disk
+
+            # Pillar shadow side should match disk shadow
+            log_phi_view = np.where(pillar_mask,
+                                    (1.0 - blend) * log_phi_2d + blend * shadow_level,
+                                    log_phi_2d)
 
             # Normalize for colormap
-            log_phi_norm = (log_phi_2d - phi_min) / (phi_max - phi_min)
+            log_phi_norm = (log_phi_view - phi_min) / (phi_max - phi_min)
             log_phi_norm = np.clip(log_phi_norm, 0, 1)
 
-            # Use 'inferno' colormap (same as ionizing flux plot)
+            # Use 'inferno' colormap
             from matplotlib import cm
             cmap = cm.inferno
             plot_colors = cmap(log_phi_norm)
-            plot_colors[:, :, 3] = 0.8  # Set alpha
+            plot_colors[:, :, 3] = 1.0  # Fully opaque
 
-            # Plot disk surface with ionizing flux coloring
+            # Hard back-face mask: any disc cell whose outward (concave-
+            # side) normal points away from the observer is showing its
+            # convex underside, which is never illuminated by the lamp.
+            # Override its colour to pure black.
+            #
+            # We compute the normal in the *rendered* (display) frame, not
+            # the physical frame: matplotlib auto-stretches the Z axis to
+            # fill the same screen height as X/Y (here Z spans ~0.2 ld vs
+            # X/Y spans 40 ld -> ~200x stretch), so the bowl that is
+            # geometrically nearly flat (dh/dr ~ 0.025 at the rim) looks
+            # like a deep cup on screen. A back-face mask computed in
+            # physical coords would not fire on the bowl at all. We rescale
+            # dh/dr and dh/dphi by the visual Z-stretch factor so the
+            # mask matches what the viewer actually sees.
+            r_vec = r_2d[:, 0]
+            phi_vec = phi_2d[0, :]
+            dh_dr = np.gradient(h_2d, r_vec, axis=0)
+            dh_dphi = np.gradient(h_2d, phi_vec, axis=1)
+            # z_stretch = full geometric ratio (X-span / Z-span ~ 200 for
+            # the fiducial bowl) so the back-face mask matches what
+            # matplotlib actually renders on screen (Z auto-stretched to
+            # fill the same display height as X/Y). Smaller values let
+            # too much of the visible underside escape the mask.
+            x_range = 2.0 * float(self.rout)
+            z_range = max(0.1, float(np.max(h_2d)) * 1.2)
+            z_stretch = x_range / z_range
+            dh_dr_vis = dh_dr * z_stretch
+            dh_dphi_vis = dh_dphi * z_stretch
+            cos_phi = np.cos(phi_2d)
+            sin_phi = np.sin(phi_2d)
+            dh_dx = dh_dr_vis * cos_phi - (dh_dphi_vis / r_2d) * sin_phi
+            dh_dy = dh_dr_vis * sin_phi + (dh_dphi_vis / r_2d) * cos_phi
+            n_x = -dh_dx
+            n_y = -dh_dy
+            n_z = np.ones_like(h_2d)
+            n_norm = np.sqrt(n_x**2 + n_y**2 + n_z**2)
+            n_x /= n_norm; n_y /= n_norm; n_z /= n_norm
+            n_dot_o = n_x * float(self.sini) + n_z * float(self.cosi)
+            back_mask = n_dot_o < 0
+            plot_colors[back_mask, :3] = 0.0
+
+            # Plot disk surface with ionizing flux coloring.
+            # rstride/cstride=1 so every (r, phi) cell is rendered;
+            # otherwise narrow pillars (sigma_phi ~ 0.05 rad) sub-sample
+            # below the surface-mesh resolution and look like jagged
+            # squares.
             surf = ax.plot_surface(x_2d, y_2d, z_2d, facecolors=plot_colors,
-                           edgecolor='none', shade=False, antialiased=True,
-                           linewidth=0, rstride=1, cstride=1)
+                           shade=False, antialiased=True,
+                           rstride=1, cstride=1)
 
-            # Add colorbar for ionizing flux
-            from matplotlib.colors import Normalize
-            norm = Normalize(vmin=phi_min, vmax=phi_max)
-            mappable = cm.ScalarMappable(cmap=cmap, norm=norm)
-            mappable.set_array(log_phi_2d)
-            cbar = plt.colorbar(mappable, ax=ax, shrink=0.5, pad=0.1)
-            cbar.set_label(r'$\log\Phi~\rm [photons~s^{-1}~cm^{-2}]$')
+            # Add colorbar for ionizing flux (optional; the paper uses a
+            # standalone horizontal cbar PNG generated separately so
+            # each 3D panel can render without the right-side margin).
+            if show_colorbar:
+                from matplotlib.colors import Normalize
+                norm = Normalize(vmin=phi_min, vmax=phi_max)
+                mappable = cm.ScalarMappable(cmap=cmap, norm=norm)
+                mappable.set_array(log_phi_view)
+                cbar = plt.colorbar(mappable, ax=ax, shrink=0.5, pad=0.1,
+                                    anchor=(0.5, 0.0))
+                cbar.set_label(r'$\log\Phi~\rm [photons~cm^{-2}~s^{-1}]$')
 
         elif show_shadows and len(self.pillars) > 0:
             # Compute shadow mask
@@ -1211,10 +1447,6 @@ class PillarDisk:
                            edgecolor='none', shade=True, antialiased=True,
                            linewidth=0, rstride=1, cstride=1)
         
-        # Plot lamp post (smaller, empty circle to not obscure pillars)
-        ax.scatter([0], [0], [self.hlamp], color='none', s=80,
-                  marker='o', edgecolors='orange', linewidths=2)
-
         # Plot pillars
         for i, pillar in enumerate(self.pillars):
             r_p = float(pillar['r'])
@@ -1231,14 +1463,21 @@ class PillarDisk:
             y_p = float(r_p * np.sin(phi_p))
             z_p = float(h_p)
 
-            ax.scatter([x_p], [y_p], [z_p], color='red', s=50,
-                      marker='o', edgecolors='darkred', linewidths=1)
+            # Draw pillar marker
+            if show_pillar_markers:
+                ax.scatter([x_p], [y_p], [z_p], color='red', s=50,
+                          marker='o', edgecolors='darkred', linewidths=1, zorder=5)
 
             # Draw light ray from lamp to pillar (only for first few if many)
             if show_light_rays and i < 5:
                 ax.plot([0.0, x_p], [0.0, y_p], [float(self.hlamp), z_p],
                        'r--', linewidth=1, alpha=0.3)
-        
+
+        # Plot lamp post as vertical line with star on top
+        ax.plot([0, 0], [0, 0], [0, self.hlamp], color='gold', linewidth=3)
+        ax.plot([0], [0], [self.hlamp], color='yellow', marker='*', markersize=18,
+                markeredgecolor='white', markeredgewidth=1, linestyle='none')
+
         # Draw light ray to Earth (viewing direction)
         # Earth is at infinity in direction (sini, 0, cosi)
         # Draw a long line in the viewing direction
@@ -1248,22 +1487,42 @@ class PillarDisk:
         #        [float(self.hlamp), float(self.hlamp + self.cosi * view_length)],
         #        'g--', linewidth=2, alpha=0.7, label='Viewing Direction')
         
-        # Set labels and title
-        ax.set_xlabel(r'$X~\rm [ld]$', labelpad=10)
-        ax.set_ylabel(r'$Y~\rm [ld]$', labelpad=10)
-        ax.set_zlabel(r'$Z~\rm [ld]$', labelpad=10)
+        # Set labels and title. Disable matplotlib's auto rotate_label on
+        # the z axis: by default it tries to align the label with the
+        # vertical axis as the view rotates and ends up rendering the
+        # text upside down ("[pl] Z" instead of "Z [ld]").
+        # X and Y labels: keep matplotlib's auto rotation so they tilt to
+        # follow the axis direction (matches the tick labels and the
+        # natural 3D reading orientation). Only the Z label needs the
+        # rotate-disable hack, because auto-rotation makes it upside-down
+        # at the current viewing angle (renders "Z [light days]" as
+        # "[syad thgil] Z").
+        ax.set_xlabel(r'$X~\rm [light~days]$', labelpad=10)
+        ax.set_ylabel(r'$Y~\rm [light~days]$', labelpad=10)
+        ax.zaxis.set_rotate_label(False)
+        ax.set_zlabel(r'$Z~\rm [light~days]$', labelpad=20, rotation=90)
 
-        # Turn off grid for cleaner look
+        # Turn off grid and panes for cleaner look
         ax.grid(False)
         ax.xaxis.pane.fill = False
         ax.yaxis.pane.fill = False
         ax.zaxis.pane.fill = False
+        # Hide pane edges
+        ax.xaxis.pane.set_edgecolor('none')
+        ax.yaxis.pane.set_edgecolor('none')
+        ax.zaxis.pane.set_edgecolor('none')
+        # Hide axis lines
+        ax.xaxis.line.set_color('none')
+        ax.yaxis.line.set_color('none')
+        ax.zaxis.line.set_color('none')
 
         # Set equal aspect ratio
         max_range = self.rout
         ax.set_xlim([-max_range, max_range])
         ax.set_ylim([-max_range, max_range])
-        ax.set_zlim([0, 0.2])
+        # Set zlim based on actual height range
+        z_max = max(0.1, float(np.max(z_2d)) * 1.2)
+        ax.set_zlim([0, z_max])
 
         # Set viewing angle to match actual observer inclination
         # Observer is at direction (sini, 0, cosi) - always in x-z plane
@@ -1273,8 +1532,12 @@ class PillarDisk:
         azim = 0  # observer always in +x direction
         ax.view_init(elev=elev, azim=azim)
 
+        # Add title if provided
+        if title is not None:
+            ax.set_title(title, fontsize=24, pad=20)
+
         plt.tight_layout()
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        plt.savefig(filename, dpi=200, bbox_inches='tight')
         print(f"  -> {filename} (i={inclination_deg:.1f}°, elev={elev:.1f}°)")
         plt.close()
 
@@ -1323,11 +1586,12 @@ def main(config_file='config.yaml'):
         
         # Convert string values to appropriate types
         # Float parameters
-        float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha', 
-                       'tx1', 'fcol', 'hlamp', 'dmpc', 'cosi', 'redshift']
+        float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha',
+                       'tx1', 'fcol', 'hlamp', 'dmpc', 'cosi', 'inclination', 'redshift',
+                       'M_BH', 'r_isco_rg', 'tirrad_tvisc_ratio', 'log_phi_inner', 'f_trans']
         # Integer parameters
         int_params = ['nr', 'nphi']
-        
+
         def convert_value(key, value):
             """Convert YAML value to appropriate Python type."""
             if value is None:
@@ -1354,12 +1618,22 @@ def main(config_file='config.yaml'):
             elif key in float_params:
                 return float(value)
             return value
-        
+
         # Convert all parameters
         for params_dict in [disk_params, temp_params, lamp_params, obs_params]:
             for key, value in params_dict.items():
                 params_dict[key] = convert_value(key, value)
-        
+
+        # Convert inclination (degrees) to cosi if provided
+        if 'inclination' in obs_params and obs_params['inclination'] is not None:
+            import numpy as np
+            inclination_rad = np.radians(obs_params['inclination'])
+            obs_params['cosi'] = np.cos(inclination_rad)
+            del obs_params['inclination']
+
+        # Compute rin from M_BH and r_isco_rg if rin='auto'
+        resolve_rin(disk_params)
+
         # Merge all disk parameters
         disk_params = {**disk_params, **temp_params, **lamp_params, **obs_params}
         

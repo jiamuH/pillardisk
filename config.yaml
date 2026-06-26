@@ -25,8 +25,8 @@ lamp:
 # Observation Parameters
 observation:
   dmpc: 100.0           # Distance (Mpc)
-  cosi: 0.5            # cos(inclination), 1=face-on, 0=edge-on
-  redshift: 0.0        # Redshift
+  inclination: 45.0     # Inclination angle (degrees), 0=face-on, 90=edge-on
+  redshift: 0.0         # Redshift
 
 # Pillar Parameters
 # Three modes: manual placement or random generation

@@ -154,11 +154,35 @@ def compute_tau_and_T(hlamp, h_p, sr, sp):
 
 
 def style_ax(ax):
-    ax.tick_params(direction='in', which='major', length=8, width=1.8, labelsize=13,
+    ax.tick_params(direction='in', which='major', length=8, width=1.8, labelsize=20,
                    top=True, right=True)
     ax.tick_params(direction='in', which='minor', length=5, width=1.0,
                    top=True, right=True)
     ax.minorticks_on()
+
+
+# Reference wavelength for relative lags: the HST 1367 A band, to which the
+# AGN STORM inter-band lags of NGC 5548 are referred (Fausnaugh et al. 2016).
+LAMBDA_REF = 1367.0
+# Standard thin-disc prediction tau = alpha [(lambda/lambda_ref)^(4/3) - 1],
+# alpha = 0.14 day for NGC 5548 (Fausnaugh et al. 2016, Section 5).
+ALPHA_THIN_DISC = 0.14
+STORM_LAGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'data', 'fausnaugh2016_lags.txt')
+
+
+def load_storm_lags():
+    """NGC 5548 STORM lags: band names, wavelength [A], lag [days], +err, -err."""
+    bands, rows = [], []
+    with open(STORM_LAGS_FILE) as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.split()
+            bands.append(parts[1])
+            rows.append([float(x) for x in parts[2:6]])
+    rows = np.array(rows)
+    return np.array(bands), rows[:, 0], rows[:, 1], rows[:, 2], rows[:, 3]
 
 
 def scan_colors(n, cmap='plasma'):
@@ -266,7 +290,12 @@ def load_or_compute_ripple(hlamp=0.5, ripple_params=None):
     return out
 
 
-def plot_all(data):
+def plot_all(data, plot_response_maps=True, response_map_scans=None):
+    """Make all figures from the cached scan data. With
+    ``plot_response_maps=False`` only the quick line plots (lag spectra and
+    T(r)) are made and the slow per-scan response-map figures are skipped.
+    ``response_map_scans`` (a list of scan names) restricts the response-map
+    figures to those scans."""
     wavelengths = data['wavelengths']
     r_grid = data['r_grid']
     ripple = load_or_compute_ripple(hlamp=0.5)
@@ -298,6 +327,13 @@ def plot_all(data):
     print("Saved plots/test_lag_spectrum_tau.png")
 
     # --- Plot 1b: tau(lambda) - tau(lambda_ref) ---
+    def _rel(tau):
+        """Lag relative to the reference wavelength (interpolated)."""
+        return tau - np.interp(LAMBDA_REF, wavelengths, tau)
+
+    storm_band, storm_lam, storm_lag, storm_ep, storm_em = load_storm_lags()
+    tau_thin = ALPHA_THIN_DISC * ((wavelengths / LAMBDA_REF) ** (4. / 3.) - 1.)
+
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     for idx, (scan_name, scan) in enumerate(scans.items()):
         ax = axes[idx // 2, idx % 2]
@@ -305,31 +341,46 @@ def plot_all(data):
         for i, val in enumerate(scan['values']):
             key = f"{scan_name}_{i}"
             tau = data[f'tau_{key}']
-            i_ref = np.argmin(np.abs(wavelengths - 1500.0))
-            ax.plot(wavelengths, tau - tau[i_ref], lw=3.5, alpha=0.7, color=colors[i], label=scan['labels'][i])
+            ax.plot(wavelengths, _rel(tau), lw=3.5, alpha=0.7, color=colors[i], label=scan['labels'][i])
         hlamp_val = scan['fixed'].get('hlamp', 0.5)
         tau_bowl = data[f'tau_bowl_{hlamp_val}']
-        i_ref = np.argmin(np.abs(wavelengths - 1500.0))
-        ax.plot(wavelengths, tau_bowl - tau_bowl[i_ref], '--', color='dodgerblue', lw=4, alpha=1.0,
+        ax.plot(wavelengths, _rel(tau_bowl), '--', color='dodgerblue', lw=4, alpha=1.0,
                 label=(r'$\rm bowl$' if idx == 0 else None))
         # Rippled-disc reference (axisymmetric Starkey+23-style)
         tau_rip = ripple['tau_ripple']
-        ax.plot(wavelengths, tau_rip - tau_rip[i_ref], '-', color='forestgreen', lw=3.5,
+        ax.plot(wavelengths, _rel(tau_rip), '-', color='forestgreen', lw=3.5,
                 alpha=0.5, zorder=-10,
                 label=(r'$\rm ripple$' if idx == 0 else None))
-        ax.set_title(scan['title'], fontsize=14, pad=10)
+        # Standard thin-disc prediction for NGC 5548 (Fausnaugh et al. 2016)
+        thin_line, = ax.plot(wavelengths, tau_thin, ':', color='black', lw=3.5)
+        # NGC 5548 STORM lags
+        storm_points = ax.errorbar(storm_lam, storm_lag,
+                                   yerr=[storm_em, storm_ep], fmt='o',
+                                   color='black', ms=8, lw=1.5,
+                                   capsize=3, zorder=10)
+        ax.set_title(scan['title'], fontsize=20, pad=10)
         ax.text(0.03, 0.95, rf'$\rm ({chr(ord("a") + idx)})$',
                 transform=ax.transAxes, fontsize=26, ha='left', va='top',
                 bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
                           alpha=0.85, edgecolor='black', linewidth=1.0))
         if idx % 2 == 0:
-            ax.set_ylabel(r'$\tau(\lambda) - \tau(1500\,\rm \AA)~\rm [days]$', fontsize=16)
+            ax.set_ylabel(r'$\tau(\lambda) - \tau(1367\,\rm \AA)~\rm [days]$', fontsize=24)
         else:
             ax.tick_params(labelleft=False)
         if idx >= 2:
-            ax.set_xlabel(r'$\lambda~\rm [\AA]$', fontsize=16)
-        ax.legend(fontsize=15)
+            ax.set_xlabel(r'$\lambda~\rm [\AA]$', fontsize=24)
+        # Fixed position keeps the legends clear of the panel letters, the
+        # thin-disc line and the data points.
+        main_legend = ax.legend(fontsize=17, loc='center left')
+        if idx == 0:
+            # Separate small legend for the reference line and the data.
+            ax.add_artist(main_legend)
+            ax.legend([thin_line, storm_points],
+                      [r'$\tau \propto \lambda^{4/3}$', r'$\rm NGC~5548$'],
+                      fontsize=17, loc='upper center')
         ax.set_xlim(wavelengths[0], wavelengths[-1])
+        # Common y range: the right-hand panels hide their tick labels.
+        ax.set_ylim(-0.7, 6.5)
         ax.set_xscale('log')
         style_ax(ax)
     plt.tight_layout()
@@ -379,18 +430,18 @@ def plot_all(data):
             ax.axvspan(0, r_isco_ld, color='gray', alpha=0.25, zorder=0)
             ax.set_xscale(xscale)
             ax.set_yscale('log')
-            ax.set_title(scan['title'], fontsize=14, pad=10)
+            ax.set_title(scan['title'], fontsize=20, pad=10)
             ax.text(0.03, 0.95, rf'$\rm ({chr(ord("a") + idx)})$',
                     transform=ax.transAxes, fontsize=26, ha='left', va='top',
                     bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
                               alpha=0.85, edgecolor='black', linewidth=1.0))
             if idx % 2 == 0:
-                ax.set_ylabel(r'$\langle T \rangle_\phi~\rm [K]$', fontsize=16)
+                ax.set_ylabel(r'$\langle T \rangle_\phi~\rm [K]$', fontsize=24)
             else:
                 ax.tick_params(labelleft=False)
             if idx >= 2:
-                ax.set_xlabel(r'$r~\rm [ld]$', fontsize=16)
-            ax.legend(fontsize=14, loc='lower left')
+                ax.set_xlabel(r'$r~\rm [ld]$', fontsize=24)
+            ax.legend(fontsize=16, loc='lower left')
             ax.set_xlim(*xlim)
             ax.set_ylim(1e2, 1e5)
             style_ax(ax)
@@ -402,9 +453,14 @@ def plot_all(data):
     # Pillar belt is clipped to r_min=2 ld in add_pillars; zoom to that region
     _plot_T('log', 'plots/test_lag_spectrum_T.png', xlim=(1, 22))
 
+    if not plot_response_maps:
+        return
+
     # --- Plot 3: 2D response functions per scan ---
     tau_grid = data['tau_grid']
     for scan_name, scan in scans.items():
+        if response_map_scans is not None and scan_name not in response_map_scans:
+            continue
         n_vals = len(scan['values'])
         from matplotlib.colors import PowerNorm
         from matplotlib.gridspec import GridSpec
@@ -511,7 +567,8 @@ def plot_all(data):
         ax = axes_psi[0]
         im = ax.pcolormesh(wavelengths, tau_grid, np.maximum(psi_bowl, psi_vmin),
                            shading='auto', cmap='inferno_r', norm=norm_pow)
-        ax.plot(wavelengths, tau_bowl_scan, 'k--', lw=1.5, alpha=0.8)
+        # White: the mean delay lies at small tau, on the dark end of the map.
+        ax.plot(wavelengths, tau_bowl_scan, 'w--', lw=3)
         ax.set_ylabel(r'$\tau~\rm [days]$', fontsize=30)
         ax.set_xscale('log')
         ax.set_xticklabels([])
@@ -530,7 +587,7 @@ def plot_all(data):
             ax = axes_psi[i + 1]
             im = ax.pcolormesh(wavelengths, tau_grid, np.maximum(psi, psi_vmin),
                                shading='auto', cmap='inferno_r', norm=norm_pow)
-            ax.plot(wavelengths, tau_mean, 'k--', lw=1.5, alpha=0.8)
+            ax.plot(wavelengths, tau_mean, 'w--', lw=3)
             ax.set_xscale('log')
             ax.set_xticklabels([])
             ax.set_yticklabels([])

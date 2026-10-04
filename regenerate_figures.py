@@ -17,8 +17,12 @@ import yaml
 FIGDIR_BASE = 'pillar_disc_draft/figures'
 
 
-def _run_cloudy_vdm(config_file, filename='velocity_delay_map.png'):
-    """Compute Cloudy-weighted Hα VDM (with and without pillars) and plot."""
+def _run_cloudy_vdm(config_file, filename='velocity_delay_map.png',
+                    cache_file='plots/vdm_manual_pillars_maps.npz'):
+    """Compute Cloudy-weighted Hα VDM (with and without pillars) and plot.
+
+    The computed maps are saved to ``cache_file`` so the figure can be
+    replotted without recomputing (see replot_vdm_manual_pillars.py)."""
     from pillardisk.pillar_line import main as pillar_line_main, plot_velocity_delay_map
     from pillardisk.pillar_line_time_cloudy import compute_velocity_delay_map_cloudy, load_cloudy_models
 
@@ -127,6 +131,11 @@ def _run_cloudy_vdm(config_file, filename='velocity_delay_map.png'):
         nlambda=nlambda, ntau=ntau, taumax=taumax,
         weighting='responsivity')
     disk.pillars = pillars_bak
+
+    # --- Cache the maps so the figure can be replotted without recomputing ---
+    np.savez(cache_file, lam=lam, tau=tau, psi=psi, psi_no=psi_no,
+             psi_per_pillar=np.array(psi_per_pillar), lambda0=lambda0)
+    print(f'Saved VDM arrays to {cache_file}')
 
     # --- Plot ---
     plot_velocity_delay_map(lam, tau, psi, lambda0,

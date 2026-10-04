@@ -10,8 +10,12 @@ under ``pillar_disc_draft/figures``.
 This is split out from ``regenerate_figures.py`` so the fast plots there can
 be regenerated without paying the cost of the time-evolving computation.
 
+The 100 pillars are drawn with a fixed random seed (the same as Figure 6), and
+the flux maps are cached in plots/time_evolving_maps_<1pillar|N100>.npz, so a
+rerun after a plotting change only replots.
+
 Usage:
-    python3 -m pillardisk.make_time_evolving_figures [config_line.yaml]
+    python3 -m pillardisk.make_time_evolving_figures [config_line.yaml] [--seed N] [--recompute]
 """
 
 import argparse
@@ -28,6 +32,8 @@ from pillardisk.regenerate_figures import (
 
 
 FIXED_TMAX_DAYS = 1200.0
+SEED = 1   # same as make_vdm_frame, so Figures 6 and 8 share the pillars
+CACHE_FILE = 'plots/time_evolving_maps_{}.npz'
 
 
 def _force_common_tmax(config):
@@ -104,12 +110,17 @@ def _move_outputs(figdir, suffix):
     cleanup_geometry_snapshots()
 
 
-def main(config_file='config_line.yaml'):
+def main(config_file='config_line.yaml', seed=SEED, recompute=False):
     from pillardisk.pillar_line_time_cloudy import main as time_cloudy_main
 
     figdir = _make_figdir(config_file)
     os.makedirs(figdir, exist_ok=True)
     print(f'Output directory: {figdir}')
+
+    if recompute:
+        for suffix in ('1pillar', 'N100'):
+            if os.path.exists(CACHE_FILE.format(suffix)):
+                os.unlink(CACHE_FILE.format(suffix))
 
     # ── Single-pillar variant ──────────────────────────────
     print('\n' + '=' * 50)
@@ -118,7 +129,8 @@ def main(config_file='config_line.yaml'):
 
     tmp = make_one_pillar_config(config_file)
     try:
-        time_cloudy_main(config_file=tmp)
+        time_cloudy_main(config_file=tmp, seed=seed,
+                         cache_file=CACHE_FILE.format('1pillar'))
     finally:
         os.unlink(tmp)
     _move_outputs(figdir, '1pillar')
@@ -130,7 +142,8 @@ def main(config_file='config_line.yaml'):
 
     tmp = make_many_pillars_config(config_file)
     try:
-        time_cloudy_main(config_file=tmp)
+        time_cloudy_main(config_file=tmp, seed=seed,
+                         cache_file=CACHE_FILE.format('N100'))
     finally:
         os.unlink(tmp)
     _move_outputs(figdir, 'N100')
@@ -144,5 +157,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('config', nargs='?', default='config_line.yaml',
                         help='Config YAML file (default: config_line.yaml)')
+    parser.add_argument('--seed', type=int, default=SEED,
+                        help='random seed for the 100 pillar positions')
+    parser.add_argument('--recompute', action='store_true',
+                        help='ignore the flux-map caches and recompute')
     args = parser.parse_args()
-    main(config_file=args.config)
+    main(config_file=args.config, seed=args.seed, recompute=args.recompute)

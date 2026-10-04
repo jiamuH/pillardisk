@@ -207,6 +207,21 @@ def compute_velocity_delay_map_cloudy(disk, line_key, lambda0, v_virial,
         phi_grid_min, phi_grid_max = float(phi_grid_range[0]), float(phi_grid_range[1])
     no_fluxfloor = getattr(disk, 'no_fluxfloor', False)
 
+    # Line surface flux and responsivity: natural cubic spline of log F_line
+    # through the Cloudy grid points (0.5 dex in log Phi_H), with
+    # eta = d log F / d log Phi_H from its analytic derivative, as in the
+    # paper and Fig. 3. (Evaluating the quadratic linear-flux spline directly
+    # and finite-differencing it gave an eta that oscillates with the 0.5 dex
+    # grid spacing, imprinting ring-shaped artifacts on the maps.)
+    from scipy.interpolate import CubicSpline
+    grid_logphi = np.arange(phi_grid_min, phi_grid_max + 1.0e-6, 0.5)
+    grid_flux = np.array([float(np.asarray(
+        cloudy_interp(p, Z_target, grid=False)).ravel()[0]) for p in grid_logphi])
+    log_flux_spline = CubicSpline(grid_logphi,
+                                  np.log10(np.maximum(grid_flux, 1.0e-300)),
+                                  bc_type='natural')
+    eta_spline = log_flux_spline.derivative()
+
     # Debug: check if shadow is reducing ionizing flux
     if len(disk.pillars) > 0:
         if os.environ.get('PILLAR_DEBUG'):
@@ -324,8 +339,7 @@ def compute_velocity_delay_map_cloudy(disk, line_key, lambda0, v_virial,
             # unpicklable Fortran exception across the multiprocessing
             # boundary.
             try:
-                em_val = cloudy_interp(log_phi_loc, Z_target, grid=False)
-                line_emissivity = float(np.asarray(em_val).ravel()[0])
+                line_emissivity = float(10.0 ** log_flux_spline(log_phi_loc))
             except Exception:
                 continue
 
@@ -334,26 +348,10 @@ def compute_velocity_delay_map_cloudy(disk, line_key, lambda0, v_virial,
                 continue
 
             if weighting == 'responsivity':
-                # Finite-difference responsivity:
-                # eta = d log F_line / d log Phi_H, computed via a
-                # symmetric difference on the spline around log_phi_loc.
-                # Cells touching the grid edge are clamped; cells where
-                # F_line crosses zero get eta=0.
-                dphi_fd = 0.05
-                lp_lo = max(phi_grid_min, log_phi_loc - dphi_fd)
-                lp_hi = min(phi_grid_max, log_phi_loc + dphi_fd)
-                try:
-                    f_lo_val = cloudy_interp(lp_lo, Z_target, grid=False)
-                    f_hi_val = cloudy_interp(lp_hi, Z_target, grid=False)
-                    f_lo = float(np.asarray(f_lo_val).ravel()[0])
-                    f_hi = float(np.asarray(f_hi_val).ravel()[0])
-                except Exception:
-                    f_lo, f_hi = 0.0, 0.0
-                if (np.isfinite(f_lo) and np.isfinite(f_hi)
-                        and f_lo > 0 and f_hi > 0
-                        and (lp_hi - lp_lo) > 1e-9):
-                    eta = (np.log10(f_hi) - np.log10(f_lo)) / (lp_hi - lp_lo)
-                else:
+                # Responsivity eta = d log F_line / d log Phi_H from the
+                # analytic derivative of the log-space cubic spline.
+                eta = float(eta_spline(log_phi_loc))
+                if not np.isfinite(eta):
                     eta = 0.0
                 # Linear response weight: F_line * eta is the cell's
                 # contribution to dF_line/dlog(Phi_H). Drop the global
@@ -969,7 +967,7 @@ def plot_time_evolving_cloudy_map(lambda_grid_dict, time_grid, flux_map_dict, la
         
         im = ax.pcolormesh(lambda_grid, time_grid, flux_map, shading='auto', cmap='rainbow')
         ax.axvline(lambda0, color='white', linestyle='--', linewidth=2, alpha=0.7)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=14)
+        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=17)
         ax.set_ylabel(r'$\rm Time~[days]$', fontsize=14)
         # Panel title: just the line name (no repeated "Time-Evolving Velocity Map")
         line_label = line_labels.get(line_key, line_key)
@@ -1047,7 +1045,7 @@ def plot_time_evolving_diff_map(lambda_grid_dict, time_grid,
                            cmap='seismic', vmin=vmin, vmax=vmax)
         lambda0 = lambda0_dict[line_key]
         ax.axvline(lambda0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=14)
+        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=17)
         ax.set_ylabel(r'$\rm Time~[days]$', fontsize=14)
         line_label = line_labels.get(line_key, line_key)
         ax.set_title(line_label + r'$\rm ~(with~pillars - without~pillars)$', fontsize=16, pad=10)
@@ -1124,7 +1122,7 @@ def plot_time_evolving_residual_map(lambda_grid_dict, time_grid, flux_map_dict, 
                            cmap='seismic', vmin=vmin, vmax=vmax)
         lambda0 = lambda0_dict[line_key]
         ax.axvline(lambda0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
-        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=14)
+        ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=17)
         ax.set_ylabel(r'$\rm Time~[days]$', fontsize=14)
         line_label = line_labels.get(line_key, line_key)
         ax.set_title(line_label + r'$\rm ~Residual~(F(t,\lambda) - \langle F(\lambda) \rangle_t)$', fontsize=16, pad=10)
@@ -1178,6 +1176,18 @@ def plot_time_evolving_raw_residual_combined(lambda_grid_dict, time_grid, flux_m
         return
 
     print(f"  Creating combined raw + residual figure with {n_rows*2} panels...")
+
+    # One residual colour range shared by all rows, so the lines can be
+    # compared by eye: the largest |residual| / <F> over every line.
+    vmax_res = 0.0
+    for line_key in line_order:
+        fm = flux_map_dict[line_key]
+        res = (fm - np.mean(fm, axis=0)[np.newaxis, :]) / float(np.mean(fm))
+        vmax_res = max(vmax_res, float(np.nanmax(np.abs(res))))
+    if not np.isfinite(vmax_res) or vmax_res == 0:
+        vmax_res = 1.0
+    print(f"  Shared residual colour range: +-{vmax_res:.2f}")
+
     fig, axes = plt.subplots(n_rows, 2, figsize=(15, 3.6*n_rows + 0.8))
     if n_rows == 1:
         axes = axes[np.newaxis, :]
@@ -1187,6 +1197,20 @@ def plot_time_evolving_raw_residual_combined(lambda_grid_dict, time_grid, flux_m
                    'C4':     r'$\rm C\,IV$'}
 
     from matplotlib.ticker import FixedLocator, NullFormatter
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    def add_cbar(im, ax, label):
+        # Colourbar exactly as tall as the panel, ticks inward. The panels
+        # are wide, so 3 per cent of the width matches Figure 6's colourbars.
+        cax = make_axes_locatable(ax).append_axes('right', size='3%', pad=0.12)
+        cb = fig.colorbar(im, cax=cax, extend='neither')
+        cb.set_label(label, fontsize=15)
+        cb.ax.minorticks_on()
+        cb.ax.tick_params(which='major', direction='in', length=6, width=1.2,
+                          labelsize=12)
+        cb.ax.tick_params(which='minor', direction='in', length=3, width=0.8)
+        return cb
+
     # Round velocity ticks (km/s) on the top secondary axis.
     v_ticks_major = np.array([-9000, -6000, -3000, 0, 3000, 6000, 9000])
     v_ticks_minor = np.array([-7500, -4500, -1500, 1500, 4500, 7500])
@@ -1217,10 +1241,7 @@ def plot_time_evolving_raw_residual_combined(lambda_grid_dict, time_grid, flux_m
                                     vmin=0.0, vmax=vmax_raw)
         ax_raw.axvline(lambda0, color='white', linestyle='--',
                        linewidth=1.5, alpha=0.7)
-        cb_raw = plt.colorbar(im_raw, ax=ax_raw, shrink=0.85, aspect=20,
-                              extend='neither')
-        cb_raw.set_label(r'$F\,/\,\langle F\rangle$', fontsize=15)
-        cb_raw.ax.tick_params(labelsize=12)
+        add_cbar(im_raw, ax_raw, r'$F\,/\,\langle F\rangle$')
         # Line name as in-panel text instead of title.
         ax_raw.text(0.03, 0.93, line_label,
                     transform=ax_raw.transAxes, fontsize=18,
@@ -1230,19 +1251,13 @@ def plot_time_evolving_raw_residual_combined(lambda_grid_dict, time_grid, flux_m
                               edgecolor='none'))
 
         ax_res = axes[i, 1]
-        vmax_res = float(np.nanmax(np.abs(residual_norm)))
-        if not np.isfinite(vmax_res) or vmax_res == 0:
-            vmax_res = 1.0
         im_res = ax_res.pcolormesh(lambda_grid, time_grid, residual_norm,
                                     shading='auto', cmap='seismic',
                                     vmin=-vmax_res, vmax=vmax_res)
         ax_res.axvline(lambda0, color='black', linestyle='--',
                        linewidth=1.5, alpha=0.7)
-        cb_res = plt.colorbar(im_res, ax=ax_res, shrink=0.85, aspect=20,
-                              extend='neither')
-        cb_res.set_label(r'$(F - \langle F\rangle_t)\,/\,\langle F\rangle$',
-                         fontsize=15)
-        cb_res.ax.tick_params(labelsize=12)
+        add_cbar(im_res, ax_res,
+                 r'$(F - \langle F\rangle_t)\,/\,\langle F\rangle$')
         ax_res.text(0.03, 0.93, line_label,
                     transform=ax_res.transAxes, fontsize=18,
                     color='black', ha='left', va='top',
@@ -1323,7 +1338,7 @@ def plot_time_evolving_lightcurves(lambda_grid_dict, time_grid, flux_map_dict,
         lam = lambda_grid_dict[line_key]
         flux_map = flux_map_dict[line_key]
         # Wavelength-integrated lightcurve.
-        L_t = np.trapezoid(flux_map, lam, axis=1)
+        L_t = np.trapz(flux_map, lam, axis=1)  # np.trapezoid needs numpy >= 2.0
         L_mean = float(np.mean(L_t))
         if not np.isfinite(L_mean) or L_mean == 0:
             continue
@@ -1351,7 +1366,8 @@ def plot_time_evolving_lightcurves(lambda_grid_dict, time_grid, flux_map_dict,
     plt.close()
 
 
-def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False):
+def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False,
+         seed=None, cache_file=None):
     """
     Main function to compute and plot time-evolving velocity maps with Cloudy models.
     
@@ -1361,6 +1377,12 @@ def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False
         Path to configuration YAML file
     use_absolute_flux : bool
         Whether to use absolute flux (True) or Hbeta-normalized flux (False)
+    seed : int or None
+        Random seed for the make_many pillar positions (None: not reproducible).
+    cache_file : str or None
+        npz file holding the time-evolving flux maps. If it exists and its
+        pillars match, the maps are read from it instead of recomputed;
+        otherwise they are computed and written to it.
     """
     # Load configuration
     config = load_config(config_file)
@@ -1466,10 +1488,14 @@ def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False
         modify_temp_pillar_list = expand_list(modify_temp_pillar_list, N_pillar, True)
         temp_factor_pillar_list = expand_list(temp_factor_pillar_list, N_pillar, 1.5)
         
-        r_pillar_random = np.random.normal(r_mean, sig_r, N_pillar)
+        # Same generator and call order as generate_movie_frames, so the
+        # same seed gives the same pillars in both figures.
+        rng = np.random.default_rng(seed)
+        print(f"  Random seed: {seed}")
+        r_pillar_random = rng.normal(r_mean, sig_r, N_pillar)
         rmin_eff = max(disk.rin, rmin) if rmin is not None else disk.rin
         r_pillar_random = np.clip(r_pillar_random, rmin_eff, disk.rout)
-        phi_pillar_random = np.random.uniform(0, 2*np.pi, N_pillar)
+        phi_pillar_random = rng.uniform(0, 2*np.pi, N_pillar)
         
         def convert_bool(val):
             if isinstance(val, str):
@@ -1661,6 +1687,22 @@ def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False
         print("--plot-only flag set, skipping spectral computation.")
         return
 
+    # Read the flux maps from the cache when it belongs to these pillars
+    pillar_rphi = np.array([[p['r'], p['phi']] for p in disk.pillars]).reshape(-1, 2)
+    if cache_file is not None and os.path.exists(cache_file):
+        c = np.load(cache_file)
+        if (c['pillar_rphi'].shape == pillar_rphi.shape
+                and np.allclose(c['pillar_rphi'], pillar_rphi)):
+            keys = [str(k) for k in c['line_keys']]
+            print(f"Read flux maps from cache {cache_file}")
+            _plot_time_evolving_figures(
+                config, {k: c['lam_' + k] for k in keys}, c['time'],
+                {k: c['with_' + k] for k in keys},
+                {k: c['no_' + k] for k in keys},
+                {k: float(c['lambda0_' + k]) for k in keys}, use_absolute_flux)
+            return
+        print(f"Cache {cache_file} does not match these pillars; recomputing")
+
     # Load Cloudy models
     cloudy_extension_file = None
     if use_absolute_flux:
@@ -1761,7 +1803,27 @@ def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False
     
     # Sanity check: grids should match
     # (we reuse lambda_grid_dict and time_grid for plotting)
-    
+
+    if cache_file is not None:
+        arrays = {'time': time_grid, 'pillar_rphi': pillar_rphi,
+                  'line_keys': list(lambda0_dict.keys())}
+        for k in lambda0_dict:
+            arrays['lam_' + k] = lambda_grid_dict[k]
+            arrays['with_' + k] = flux_with_pillars[k]
+            arrays['no_' + k] = flux_without_pillars[k]
+            arrays['lambda0_' + k] = lambda0_dict[k]
+        np.savez(cache_file, **arrays)
+        print(f"Saved flux maps to cache {cache_file}")
+
+    _plot_time_evolving_figures(config, lambda_grid_dict, time_grid,
+                                flux_with_pillars, flux_without_pillars,
+                                lambda0_dict, use_absolute_flux)
+
+
+def _plot_time_evolving_figures(config, lambda_grid_dict, time_grid,
+                                flux_with_pillars, flux_without_pillars,
+                                lambda0_dict, use_absolute_flux):
+    """Make every time-evolving figure from the computed (or cached) maps."""
     print("Computation complete. Creating plots...")
     # Plot main maps (with pillars). All default filenames are routed
     # through plots/ so intermediate files don't pollute the project root.
@@ -1985,7 +2047,7 @@ def _compute_vdmap_for_line_cloudy(args):
 
 def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_dir='movie_frames',
                           use_absolute_flux=True, skip_geometry=False,
-                          weighting='emissivity'):
+                          weighting='emissivity', seed=None, cache_file=None):
     """
     Generate movie frames showing velocity-delay maps and 3D geometry at each orbital phase.
 
@@ -1998,6 +2060,12 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
     ----------
     skip_geometry : bool
         If True, omit the 3D geometry panel (produces a 2-row figure).
+    seed : int or None
+        Random seed for the make_many pillar positions (None: not reproducible).
+    cache_file : str or None
+        npz file holding the baseline and first-frame maps. If it exists and
+        its pillars match, the maps are read from it instead of recomputed;
+        otherwise they are computed and written to it.
     """
     import os
     os.makedirs(output_dir, exist_ok=True)
@@ -2105,10 +2173,12 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
         sigma_r_pillar_list = expand_list(get_pillar_param('sigma_r_pillar', 2.0), N_pillar, 2.0)
         sigma_phi_pillar_list = expand_list(get_pillar_param('sigma_phi_pillar', 0.2), N_pillar, 0.2)
 
-        r_pillar_random = np.random.normal(r_mean, sig_r, N_pillar)
+        rng = np.random.default_rng(seed)
+        print(f"  Random seed: {seed}")
+        r_pillar_random = rng.normal(r_mean, sig_r, N_pillar)
         rmin_eff = max(disk.rin, rmin) if rmin is not None else disk.rin
         r_pillar_random = np.clip(r_pillar_random, rmin_eff, disk.rout)
-        phi_pillar_random = np.random.uniform(0, 2*np.pi, N_pillar)
+        phi_pillar_random = rng.uniform(0, 2*np.pi, N_pillar)
 
         for i in range(N_pillar):
             disk.add_pillar(
@@ -2231,58 +2301,83 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
         'f_turb_line': disk.f_turb_line,
     }
 
-    # ========== Compute Cloudy-weighted velocity-delay maps WITHOUT pillars (only once) ==========
-    print("\nComputing Cloudy-weighted velocity-delay maps without pillars (baseline)...")
-    saved_pillars = disk.pillars.copy()
-    disk.pillars = []
+    # Pillar positions, used to check that a map cache belongs to this run
+    pillar_rphi = np.array([[p['r'], p['phi']] for p in disk.pillars]).reshape(-1, 2)
+    cached = None
+    if cache_file is not None and os.path.exists(cache_file):
+        c = np.load(cache_file)
+        if (c['pillar_rphi'].shape == pillar_rphi.shape
+                and np.allclose(c['pillar_rphi'], pillar_rphi)
+                and str(c['weighting']) == weighting):
+            keys = [str(k) for k in c['line_keys']]
+            cached = {
+                'tau': c['tau'],
+                'lam': {k: c['lam_' + k] for k in keys},
+                'no': {k: c['no_' + k] for k in keys},
+                'with': {k: c['with_' + k] for k in keys},
+            }
+            print(f"Read maps from cache {cache_file}")
+        else:
+            print(f"Cache {cache_file} does not match these pillars; recomputing")
 
-    # Parallel computation for baseline (no pillars)
-    args_list = [(line_key, lambda0, disk_params_serial, [], v_virial, nlambda, ntau, taumax,
-                  cloudy_data_raw, phi_grid_cloudy, Z_grid_cloudy, Z_target, weighting)
-                 for line_key, lambda0 in lambda0_dict.items()]
-
-    psi_no_pillars = {}
-    lambda_grids = {}
-    tau_grid = None
-
-    with Pool(processes=min(3, cpu_count())) as pool:
-        results = pool.map(_compute_vdmap_for_line_cloudy, args_list)
-    for line_key, lambda_grid, tg, psi_map in results:
-        psi_no_pillars[line_key] = psi_map
-        lambda_grids[line_key] = lambda_grid
-        tau_grid = tg
-
-    disk.pillars = saved_pillars
+    if cached is not None:
+        tau_grid = cached['tau']
+        lambda_grids = cached['lam']
+        psi_no_pillars = cached['no']
 
     # Line labels for plot titles
     line_labels = {'Halpha': r'$\rm H\alpha$', 'Mg2': r'$\rm MgII$', 'C4': r'$\rm CIV$'}
 
-    # Compute color scale limits from first frame
-    print("\nEstimating color scale from first frame...")
+    # ========== Compute Cloudy-weighted velocity-delay maps WITHOUT pillars (only once) ==========
+    if cached is None:
+        print("\nComputing Cloudy-weighted velocity-delay maps without pillars (baseline)...")
+        saved_pillars = disk.pillars.copy()
+        disk.pillars = []
 
-    # Serialize pillars for parallel computation
-    pillars_serial = [{'r': p['r'], 'phi': p['phi'], 'height': p['height'],
-                       'sigma_r': p['sigma_r'], 'sigma_phi': p['sigma_phi']}
-                      for p in disk.pillars]
+        # Parallel computation for baseline (no pillars)
+        args_list = [(line_key, lambda0, disk_params_serial, [], v_virial, nlambda, ntau, taumax,
+                      cloudy_data_raw, phi_grid_cloudy, Z_grid_cloudy, Z_target, weighting)
+                     for line_key, lambda0 in lambda0_dict.items()]
 
-    args_list = [(line_key, lambda0, disk_params_serial, pillars_serial, v_virial, nlambda, ntau, taumax,
-                  cloudy_data_raw, phi_grid_cloudy, Z_grid_cloudy, Z_target, weighting)
-                 for line_key, lambda0 in lambda0_dict.items()]
+        psi_no_pillars = {}
+        lambda_grids = {}
+        tau_grid = None
 
-    with Pool(processes=min(3, cpu_count())) as pool:
-        results = pool.map(_compute_vdmap_for_line_cloudy, args_list)
+        with Pool(processes=min(3, cpu_count())) as pool:
+            results = pool.map(_compute_vdmap_for_line_cloudy, args_list)
+        for line_key, lambda_grid, tg, psi_map in results:
+            psi_no_pillars[line_key] = psi_map
+            lambda_grids[line_key] = lambda_grid
+            tau_grid = tg
 
-    # Compute SHARED color scales across all lines
-    psi_max_global = 0
-    diff_max_global = 0
-    for line_key, _, _, psi_map in results:
-        psi_max_global = max(psi_max_global, np.nanmax(psi_map), np.nanmax(psi_no_pillars[line_key]))
-        diff_map = psi_map - psi_no_pillars[line_key]
-        diff_max_global = max(diff_max_global, np.nanmax(np.abs(diff_map)))
+        disk.pillars = saved_pillars
 
-    psi_vmax = psi_max_global * 1.1
-    diff_vmax = diff_max_global * 1.1
-    print(f"  Shared color scales: psi_vmax={psi_vmax:.2e}, diff_vmax={diff_vmax:.2e}")
+        # Compute color scale limits from first frame
+        print("\nEstimating color scale from first frame...")
+
+        # Serialize pillars for parallel computation
+        pillars_serial = [{'r': p['r'], 'phi': p['phi'], 'height': p['height'],
+                           'sigma_r': p['sigma_r'], 'sigma_phi': p['sigma_phi']}
+                          for p in disk.pillars]
+
+        args_list = [(line_key, lambda0, disk_params_serial, pillars_serial, v_virial, nlambda, ntau, taumax,
+                      cloudy_data_raw, phi_grid_cloudy, Z_grid_cloudy, Z_target, weighting)
+                     for line_key, lambda0 in lambda0_dict.items()]
+
+        with Pool(processes=min(3, cpu_count())) as pool:
+            results = pool.map(_compute_vdmap_for_line_cloudy, args_list)
+
+        # Compute SHARED color scales across all lines
+        psi_max_global = 0
+        diff_max_global = 0
+        for line_key, _, _, psi_map in results:
+            psi_max_global = max(psi_max_global, np.nanmax(psi_map), np.nanmax(psi_no_pillars[line_key]))
+            diff_map = psi_map - psi_no_pillars[line_key]
+            diff_max_global = max(diff_max_global, np.nanmax(np.abs(diff_map)))
+
+        psi_vmax = psi_max_global * 1.1
+        diff_vmax = diff_max_global * 1.1
+        print(f"  Shared color scales: psi_vmax={psi_vmax:.2e}, diff_vmax={diff_vmax:.2e}")
 
     # ========== Generate frames ==========
     print(f"\nGenerating {n_frames} movie frames...")
@@ -2315,12 +2410,26 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
                       cloudy_data_raw, phi_grid_cloudy, Z_grid_cloudy, Z_target, weighting)
                      for line_key, lambda0 in lambda0_dict.items()]
 
-        with Pool(processes=min(3, cpu_count())) as pool:
-            results = pool.map(_compute_vdmap_for_line_cloudy, args_list)
+        if cached is not None and iframe == 0:
+            psi_with_pillars = cached['with']
+        else:
+            with Pool(processes=min(3, cpu_count())) as pool:
+                results = pool.map(_compute_vdmap_for_line_cloudy, args_list)
 
-        psi_with_pillars = {}
-        for line_key, _, _, psi_map in results:
-            psi_with_pillars[line_key] = psi_map
+            psi_with_pillars = {}
+            for line_key, _, _, psi_map in results:
+                psi_with_pillars[line_key] = psi_map
+
+            if cache_file is not None and iframe == 0:
+                keys = list(lambda0_dict.keys())
+                arrays = {'tau': tau_grid, 'pillar_rphi': pillar_rphi,
+                          'weighting': weighting, 'line_keys': keys}
+                for k in keys:
+                    arrays['lam_' + k] = lambda_grids[k]
+                    arrays['no_' + k] = psi_no_pillars[k]
+                    arrays['with_' + k] = psi_with_pillars[k]
+                np.savez(cache_file, **arrays)
+                print(f"  Saved maps to cache {cache_file}")
 
         # Compute difference maps
         psi_diff = {}
@@ -2333,7 +2442,7 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
         if skip_geometry:
             fig = plt.figure(figsize=(15, 12))
             gs = GridSpec(3, 3, figure=fig, height_ratios=[1, 1, 1],
-                          wspace=0.35, hspace=0.10,
+                          wspace=0.45, hspace=0.10,
                           top=0.94, bottom=0.07, left=0.06, right=0.94)
         else:
             fig = plt.figure(figsize=(15, 14))
@@ -2406,26 +2515,46 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
 
         from matplotlib.ticker import AutoMinorLocator
 
-        # Helper: add velocity twin axis with auto-placed round tick values
+        # Helper: velocity axis on top via twiny() (secondary_xaxis does not
+        # render inward ticks). It follows the parent's locator so it stays
+        # aligned after a colorbar divider shrinks the parent.
         def add_velocity_axis(ax_main, lambda_grid, lambda0, show_label=True):
-            lam2v = lambda lam: (C / KM_TO_CM) * (lam - lambda0) / lambda0
-            v2lam = lambda v: lambda0 * (1.0 + v * KM_TO_CM / C)
-            ax2 = ax_main.secondary_xaxis('top', functions=(lam2v, v2lam))
-            ax2.xaxis.set_major_locator(plt.MaxNLocator(nbins=5, integer=True, steps=[1, 2, 3, 5, 6, 10]))
-            ax2.tick_params(axis='both', which='major', direction='in', length=8, width=1.5, labelsize=13)
-            ax2.tick_params(axis='both', which='minor', direction='in', length=5, width=1.0)
-            ax2.xaxis.set_minor_locator(AutoMinorLocator())
+            from matplotlib.ticker import FixedLocator, MultipleLocator
+            ax2 = ax_main.twiny()
+            ax2.set_axes_locator(ax_main.get_axes_locator())
+            v_lo = (C / KM_TO_CM) * (lambda_grid[0] - lambda0) / lambda0
+            v_hi = (C / KM_TO_CM) * (lambda_grid[-1] - lambda0) / lambda0
+            ax2.set_xlim(v_lo, v_hi)
+            ax2.xaxis.set_major_locator(FixedLocator([-6000, 0, 6000]))
+            ax2.xaxis.set_minor_locator(MultipleLocator(1500))
+            ax2.tick_params(axis='x', which='major', direction='in', length=8,
+                            width=1.5, labelsize=17)
+            ax2.tick_params(axis='x', which='minor', direction='in', length=5,
+                            width=1.0)
             if show_label:
-                ax2.set_xlabel(r'$v~\rm [km\,s^{-1}]$', fontsize=14, labelpad=6)
+                ax2.set_xlabel(r'$v~\rm [km\,s^{-1}]$', fontsize=17, labelpad=6)
             else:
-                ax2.set_xlabel('')
                 ax2.tick_params(labeltop=False)
             return ax2
 
-        # Helper: style axis with inward ticks and minor ticks
+        # Helper: colorbar exactly as tall as its panel, ticks inward.
+        def add_cbar(im, ax, label):
+            from mpl_toolkits.axes_grid1 import make_axes_locatable
+            cax = make_axes_locatable(ax).append_axes('right', size='4.5%', pad=0.12)
+            cb = fig.colorbar(im, cax=cax, extend='neither')
+            cb.set_label(label, fontsize=17)
+            cb.ax.minorticks_on()
+            cb.ax.tick_params(which='major', direction='in', length=6, width=1.2,
+                              labelsize=17)
+            cb.ax.tick_params(which='minor', direction='in', length=3, width=0.8)
+            return cb
+
+        # Helper: style axis with inward ticks and minor ticks on all sides
         def style_axis(ax):
-            ax.tick_params(axis='both', which='major', direction='in', length=8, width=1.5, labelsize=13)
-            ax.tick_params(axis='both', which='minor', direction='in', length=5, width=1.0)
+            ax.tick_params(axis='both', which='major', direction='in', length=8,
+                           width=1.5, labelsize=17, top=True, right=True)
+            ax.tick_params(axis='both', which='minor', direction='in', length=5,
+                           width=1.0, top=True, right=True)
             ax.xaxis.set_minor_locator(AutoMinorLocator())
             ax.yaxis.set_minor_locator(AutoMinorLocator())
 
@@ -2468,22 +2597,22 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
             psi_map = psi_with_density[line_key]
             lambda0 = lambda0_dict[line_key]
 
-            im = ax.pcolormesh(lambda_grid, tau_grid, psi_map, shading='auto',
-                              cmap=VDM_CMAP, vmin=0, vmax=psi_vmax_fixed)
+            # Shown in units of 1e-3 per Angstrom per day.
+            im = ax.pcolormesh(lambda_grid, tau_grid, 1.0e3 * psi_map, shading='auto',
+                              cmap=VDM_CMAP, vmin=0, vmax=1.0e3 * psi_vmax_fixed)
 
             ax.axvline(lambda0, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
             # Top row: no bottom x-axis label/ticks (shared with bottom row)
             ax.set_xticklabels([])
             ax.set_xlabel('')
-            ax.set_ylabel(r'$\rm Delay~[days]$', fontsize=14)
-            ax.set_title(line_labels[line_key], fontsize=14)
+            if idx == 0:
+                ax.set_ylabel(r'$\rm Delay~[days]$', fontsize=17)
+            ax.set_title(line_labels[line_key], fontsize=17)
             ax.set_xlim(lambda_grid[0], lambda_grid[-1])
             ax.set_ylim(0, taumax)
             style_axis(ax)
 
-            cbar = plt.colorbar(im, ax=ax, pad=0.02)
-            cbar.set_label(r'$\psi~[\rm \AA^{-1}\,d^{-1}]$', fontsize=13)
-            cbar.ax.tick_params(labelsize=12, direction='in', length=5, width=1.0)
+            add_cbar(im, ax, r'$\psi~[10^{-3}\,\rm \AA^{-1}\,d^{-1}]$')
 
             add_velocity_axis(ax, lambda_grid, lambda0, show_label=True)
 
@@ -2516,14 +2645,13 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
             # Middle row: no bottom x-axis label (shared with row 3 below)
             ax.set_xticklabels([])
             ax.set_xlabel('')
-            ax.set_ylabel(r'$\rm Delay~[days]$', fontsize=14)
+            if idx == 0:
+                ax.set_ylabel(r'$\rm Delay~[days]$', fontsize=17)
             ax.set_xlim(lambda_grid[0], lambda_grid[-1])
             ax.set_ylim(0, taumax)
             style_axis(ax)
 
-            cbar = plt.colorbar(im, ax=ax, pad=0.02)
-            cbar.set_label(r'$\Delta\log\Psi$', fontsize=13)
-            cbar.ax.tick_params(labelsize=12, direction='in', length=5, width=1.0)
+            add_cbar(im, ax, r'$\Delta\log\Psi$')
 
         # ===== Row 2: Δ log(Ψ_line / Ψ_Hβ) — colour-dependent diagnostic =====
         # For each of Hα, MgII, CIV we form the change in log(line / Hβ)
@@ -2557,23 +2685,14 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
 
             ax.axvline(lambda0, color='black', linestyle='--',
                        linewidth=1.5, alpha=0.7)
-            ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=14)
-            ax.set_ylabel(r'$\rm Delay~[days]$', fontsize=14)
+            ax.set_xlabel(r'$\rm Wavelength~[\AA]$', fontsize=17)
+            if idx == 0:
+                ax.set_ylabel(r'$\rm Delay~[days]$', fontsize=17)
             ax.set_xlim(lambda_grid[0], lambda_grid[-1])
             ax.set_ylim(0, taumax)
             style_axis(ax)
 
-            cbar = plt.colorbar(im, ax=ax, pad=0.02)
-            cbar.set_label(r'$\Delta\log(\Psi/\Psi_{\rm H\beta})$', fontsize=13)
-            cbar.ax.tick_params(labelsize=12, direction='in', length=5, width=1.0)
-
-            # Mirror the existing convention: top tick marks but no labels
-            ax2 = ax.twiny()
-            ax2.set_xlim(ax.get_xlim())
-            ax2.set_xticklabels([])
-            ax2.tick_params(axis='x', which='major', direction='in', length=8, width=1.5)
-            ax2.tick_params(axis='x', which='minor', direction='in', length=5, width=1.0)
-            ax2.xaxis.set_minor_locator(AutoMinorLocator())
+            add_cbar(im, ax, r'$\Delta\log(\Psi/\Psi_{\rm H\beta})$')
 
         # Save frame
         frame_file = os.path.join(output_dir, f'frame_{iframe:04d}.png')

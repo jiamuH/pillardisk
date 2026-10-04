@@ -2,6 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## THE FIRST RULE — ASK WHEN YOU ARE NOT SURE
+
+This rule outranks every other instruction in this file and every habit you may have to "act decisively."
+
+If you are not certain what I want — about the scope, the layout, which file to touch, which variant of a parameter, which of several reasonable interpretations to take — **stop and ask one short question first**. Do not pick a "reasonable" interpretation and act. Do not start editing or running anything until I have answered.
+
+Concrete cases where this is mandatory in this project:
+
+- **Figure layout, panel counts, included files.** Words like "top-bottom layout", "1-column plot", "combined figure" are ambiguous. Ask whether I mean the *panel arrangement inside one figure*, the *page-width class* (`figure` vs `figure*`), or *which configurations to include*.
+- **Paper-text JH notes.** Many of these are personal shorthand. If the action is not unambiguous, ask before editing.
+- **Reusing a config, deck, or directory that already exists.** Confirm scope: which inputs, what is varied, the minimal version that answers the question. Do not default to whatever is already there.
+- **Anything destructive or hard to reverse** (overwriting figures, modifying shared configs, moving files into the paper directory).
+
+When asking, give 1 to 3 concrete options. Do not preamble. Wait for the answer.
+
+This rule has been the source of nearly every avoidable mistake in this project. Re-read it before each non-trivial action.
+
 ## Project Overview
 
 This is an AGN accretion disk modeling toolkit that computes time delay spectra and spectral energy distributions (SEDs) for accretion disks with Gaussian pillar bumps. The code models lamp-post irradiated bowl-shaped accretion discs for studying continuum lags in active galactic nuclei.
@@ -13,46 +30,7 @@ All code runs in the conda environment `pypeit`:
 conda activate pypeit
 ```
 
-## Running the Code
-
-```bash
-# Main disk model (uses config.yaml by default)
-python3 pillar_disk.py
-
-# With custom config file
-python3 pillar_disk.py my_config.yaml
-
-# Emission line velocity-delay map
-python3 pillar_line.py
-
-# Time-evolving emission line (rotation effects)
-python3 pillar_line_time.py
-
-# Integration with Cloudy photoionization models
-python3 pillar_line_cloudy.py
-```
-
-## Dependencies
-
-Required: `numpy`, `matplotlib`
-Optional: `pyyaml` (config files), `tqdm` (progress bars), `scipy` (for cloudy integration), `pandas` (for cloudy data)
-
 ## Architecture
-
-### Core Module: `pillar_disk.py`
-- `PillarDisk` class: Main disk model with radial/azimuthal grids
-- Key methods:
-  - `add_pillar()`: Add Gaussian bumps at (r, phi) positions
-  - `compute_sed()`: Calculate flux vs wavelength
-  - `compute_lag_spectrum()`: Calculate mean delay vs wavelength with response functions
-  - `get_height()` / `get_temperature()`: 2D geometry including pillar modifications
-  - `_compute_shadow_mask()`: Ray-tracing for pillar shadows
-- Supports parallel processing via `multiprocessing` for wavelength loops
-
-### Extended Modules
-- `pillar_line.py`: Computes velocity-delay maps Psi(lambda, tau) for emission lines with Keplerian orbits
-- `pillar_line_time.py`: Time-evolving spectra showing rotational barber-pole patterns
-- `pillar_line_cloudy.py`: Integrates Cloudy photoionization model outputs with disk geometry
 
 ### Configuration: `config.yaml`
 All parameters are YAML-configurable:

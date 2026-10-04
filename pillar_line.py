@@ -471,7 +471,9 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
         from matplotlib.ticker import NullFormatter
         from matplotlib import gridspec
 
-        fig = plt.figure(figsize=(15, 11))
+        # Compact canvas: the figure is printed one journal column wide, so a
+        # smaller canvas makes the same font sizes print larger.
+        fig = plt.figure(figsize=(10, 7.6))
         gs = gridspec.GridSpec(
             2, 3, width_ratios=[1.0, 1.0, 0.04], wspace=0.18, hspace=0.08,
             left=0.07, right=0.96, top=0.92, bottom=0.08,
@@ -497,8 +499,9 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
         def _add_velocity_top_axis(ax, l0):
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())  # match parent's wavelength range
-            v_major = np.array([-9000, -6000, -3000, 0, 3000, 6000, 9000])
-            v_minor = np.array([-7500, -4500, -1500, 1500, 4500, 7500])
+            v_major = np.array([-6000, 0, 6000])
+            v_minor = np.array([-9000, -7500, -4500, -3000, -1500,
+                                1500, 3000, 4500, 7500, 9000])
             lam_major = l0 * (1.0 + v_major * KM_TO_CM / C)
             lam_minor = l0 * (1.0 + v_minor * KM_TO_CM / C)
             xlo, xhi = ax.get_xlim()
@@ -548,8 +551,8 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
                        length=8, width=1.5, direction='in', labelsize=20)
         ax.tick_params(top=False, right=True, axis='both', which='minor',
                        length=5, width=1, direction='in')
-        # Keep tick numbers; only the axis text label is suppressed (no
-        # set_xlabel) since the bottom row carries the wavelength label.
+        # The bottom row carries the wavelength tick numbers and label.
+        ax.tick_params(axis='x', which='both', labelbottom=False)
         _add_velocity_top_axis(ax, lambda0)  # velocity axis on top
         _title_textbox(ax, r'$\rm (a)~With~Pillars$', dark_bg=True)
 
@@ -567,8 +570,8 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
                        length=8, width=1.5, direction='in', labelsize=20)
         ax.tick_params(top=False, right=True, axis='both', which='minor',
                        length=5, width=1, direction='in')
-        # Keep tick numbers; axis text labels are suppressed via no
-        # set_xlabel / no set_ylabel since the outer panels carry them.
+        # The bottom row carries the wavelength tick numbers and label.
+        ax.tick_params(axis='x', which='both', labelbottom=False)
         _add_velocity_top_axis(ax, lambda0)
         _title_textbox(ax, r'$\rm (b)~Without~Pillars$', dark_bg=True)
         cb_T = fig.colorbar(im2, cax=cax_T, extend='neither')
@@ -586,13 +589,10 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
             if np.any(psi_map_no_pillars[:, i] > 0):
                 tau_mean_no[i] = np.sum(psi_map_no_pillars[:, i] * tau_grid) / np.sum(psi_map_no_pillars[:, i])
 
-        ax.plot(lambda_grid, tau_mean, color='dodgerblue',
-                linewidth=5, alpha=0.85, label=r'$\rm with~pillar$')
-        ax.plot(lambda_grid, tau_mean_no, color='orangered',
-                linewidth=5, alpha=0.85, linestyle='--',
-                label=r'$\rm without~pillar$')
-
-        # Per-pillar contributions only if more than one pillar.
+        # Per-pillar contributions (only if more than one pillar), drawn as
+        # shaded components between the no-pillar baseline and the mean delay
+        # of the disc with that pillar alone. The with-pillars curve then runs
+        # along the outer edge of the shaded regions.
         if psi_per_pillar is not None and len(psi_per_pillar) > 1:
             colors_pp = ['green', 'purple', 'cyan', 'magenta', 'brown']
             for ip, psi_pp in enumerate(psi_per_pillar):
@@ -602,9 +602,15 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
                         tau_mean_pp[i] = (np.sum(psi_pp[:, i] * tau_grid)
                                           / np.sum(psi_pp[:, i]))
                 c = colors_pp[ip % len(colors_pp)]
-                ax.plot(lambda_grid, tau_mean_pp, '-', color=c,
-                        linewidth=3, alpha=0.7,
-                        label=rf'$\rm pillar~{ip+1}$')
+                ax.fill_between(lambda_grid, tau_mean_no, tau_mean_pp,
+                                color=c, alpha=0.45, linewidth=0,
+                                label=rf'$\rm pillar~{ip+1}$')
+
+        ax.plot(lambda_grid, tau_mean, color='dodgerblue',
+                linewidth=3, alpha=0.9, label=r'$\rm with~pillars$')
+        ax.plot(lambda_grid, tau_mean_no, color='black',
+                linewidth=2, linestyle=':',
+                label=r'$\rm without~pillars$')
         ax.axvline(lambda0, color='black', linestyle=':', linewidth=1,
                    alpha=0.5)
         ax.set_xlabel(r'$\lambda~[\rm \AA]$', fontsize=24)
@@ -614,7 +620,9 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
                                   tau_mean_no[tau_mean_no > 0]])
         if len(all_tau) > 0:
             ax.set_ylim(0, 1.3 * np.max(all_tau))
-        ax.legend(fontsize=20, loc='lower center', ncol=2,
+        ax.legend(fontsize=15, loc='lower center', ncol=2,
+                  handlelength=1.4, columnspacing=0.8, handletextpad=0.5,
+                  borderaxespad=0.3,
                   facecolor='white', edgecolor='none', framealpha=0.7)
         ax.minorticks_on()
         ax.tick_params(top=True, right=True, axis='both', which='major',
@@ -655,10 +663,9 @@ def plot_velocity_delay_map(lambda_grid, tau_grid, psi_map, lambda0,
                        length=5, width=1, direction='in')
         # Keep tick numbers on the inner edge; only the y-axis text label
         # is suppressed (no set_ylabel) since the left column carries it.
-        _title_textbox(ax,
-                       r'$\rm (d)~\Delta\log\Psi='
-                       r'\log_{10}(\Psi_{\rm with}/\Psi_{\rm without})$',
-                       dark_bg=False)
+        # Short title: the full definition is on the colorbar label and in
+        # the figure caption, and the long form overflows the compact panel.
+        _title_textbox(ax, r'$\rm (d)~\Delta\log\Psi$', dark_bg=False)
         cb_B = fig.colorbar(im3, cax=cax_B, extend='neither')
         cb_B.set_label(r'$\Delta\log\Psi(\lambda,\tau)$', fontsize=19)
         cb_B.ax.tick_params(labelsize=16)

@@ -1063,7 +1063,7 @@ class PillarDisk:
         * ``'scale_temp'`` (legacy) -- rescale T_e / T_ref linearly to
           [17, 21.5].
         * ``'direct'`` -- geometric lamp flux + viscous blackbody Wien
-          tail above 1 Ryd, clipped to the Cloudy grid [17, 21].
+          tail above 1 Ryd, clipped to the extended Cloudy grid [15, 21].
 
         Parameters
         ----------
@@ -1137,7 +1137,7 @@ class PillarDisk:
         Phi_total = S(r,phi) * Q * cos(theta) / (4 pi d^2) + Phi_visc(r)
 
         Q is calibrated so that Phi(r_in) = 10^log_phi_inner on the
-        illuminated flat disk.  The result is clipped to [17, 21].
+        illuminated flat disk.  The result is clipped to [15, 21].
         """
         r = np.asarray(r, dtype=float)
         phi = np.asarray(phi, dtype=float)
@@ -1223,8 +1223,10 @@ class PillarDisk:
         # Clip upper bound to Cloudy grid max
         log_phi = np.clip(log_phi, None, 21.0)
         if not self.no_fluxfloor:
-            # Clip lower bound to Cloudy grid min (legacy: shadows get min emissivity)
-            log_phi = np.clip(log_phi, 17.0, None)
+            # Clip lower bound to the extended Cloudy grid min, log Phi = 15
+            # (was 17 before 2026-10-03, which raised ~25% of the disc;
+            # see plots/archive_logphi_floor17_2026-10-03/)
+            log_phi = np.clip(log_phi, 15.0, None)
         return log_phi
 
     def plot_3d_geometry(self, n_phi_plot: int = 180, n_r_plot: int = 200,

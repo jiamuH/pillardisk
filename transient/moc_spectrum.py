@@ -26,13 +26,15 @@ split into its reprocessed continuum and line spectra, plus the thermal
 
 Outputs (in <run>/plots):
   moc_line_profiles.png  L_lambda vs velocity for H alpha, H beta,
-                         C IV 1549, Mg II 2798, [O III] 5007: MOCASSIN vs
+                         C IV 1549, Mg II 2798: MOCASSIN vs
                          the pipeline's line spectrum (which includes
                          every Cloudy line in the window, e.g. [N II]
                          next to H alpha)
   moc_full_spectrum.png  lambda L_lambda 1000-11000 A: pipeline total,
-                         pipeline continuum only, and pipeline continuum
-                         + the MOCASSIN lines
+                         pipeline continuum + the MOCASSIN lines, and the
+                         components (reprocessed, Cloudy lines, MOCASSIN
+                         lines, thermal, AGN direct)
+  moc_line_spectrum.png  lines only: Cloudy vs MOCASSIN at INCL_DEG
 and prints line luminosities and FWHMs for both.
 
 Run:  python3 -m transient.moc_spectrum [--run /data2/jhuang/runs/mocassin/moc_coarse]
@@ -49,7 +51,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import ScalarFormatter, NullFormatter  # noqa: E402
 
 from transient.sim_spectrum import (  # noqa: E402
-    load_sim, to_physical, vlos_cube, CONFIG, C_KMS)
+    load_sim, to_physical, vlos_cube, CONFIG, C_KMS, LD_CM)
 from transient.sim_cloudy_spectrum import load_grid, compute_rays  # noqa: E402
 from transient.sim_full_spectrum import thermal_and_agn  # noqa: E402
 from transient.cmi_convert import resample  # noqa: E402
@@ -75,8 +77,10 @@ LINE_DATA = {'Ha': (6562.80, 1.008), 'Hb': (4861.33, 1.008),
 PANELS = [(r'H\alpha', ['Ha'], 6562.80),
           (r'H\beta', ['Hb'], 4861.33),
           (r'C\,IV\,1549', ['CIV1548', 'CIV1551'], 1548.19),
-          (r'Mg\,II\,2798', ['MgII2796', 'MgII2804'], 2795.53),
-          (r'[O\,III]\,5007', ['OIII5007'], 5006.84)]
+          (r'Mg\,II\,2798', ['MgII2796', 'MgII2804'], 2795.53)]
+# no [O III] 5007 panel: its critical density (~7e5 cm^-3) is far below the
+# emitting gas (1e8-1e10), so it is collisionally suppressed (MOCASSIN:
+# 0.01 H beta); the pipeline window held only [O III] 4959 and H beta
 VWIN = 10000.0          # km/s half-width of the profile panels
 VINT = 6500.0           # km/s half-width for line luminosities (MOCASSIN
                         # |v| < 5600; wider windows pull in other pipeline
@@ -197,7 +201,28 @@ def pipeline(sim, phys):
                                     left=0, right=0)
     L_th_base, L_agn = thermal_and_agn(sim, phys, CONFIG, wave)
     L_th = 4.0 * np.cos(np.radians(CONFIG['INCL_DEG'])) * L_th_base
-    return wave, dict(cont=L_cont, line=L_line, th=L_th, agn=L_agn)
+    # angle-integrated (all-sky) rest-frame line power: every slab face
+    # counted once, with no face selection, Lambert 4|cos| or observer-side
+    # cut - the quantity to set against MOCASSIN's whole-grid totals
+    F_all = rays['F_raw']['refl_line'] + rays['F_raw']['out_line']
+    L_all = (slab_area_all(sim, rays['r_if']) @ F_all) / wave
+    return wave, dict(cont=L_cont, line=L_line, th=L_th, agn=L_agn,
+                      line_all=L_all)
+
+
+def slab_area_all(sim, r_if):
+    """Per-ray slab area [cm^2] over BOTH hemispheres: compute_rays' dA
+    formula ((r_IF r0)^2 dOmega / mu, with its foreshortening mu) before
+    it zeroes the lower hemisphere."""
+    r0 = CONFIG['R0_LD'] * LD_CM
+    th, ph = sim['th'], sim['ph']
+    lnf = np.log(r_if)
+    mu = 1.0 / np.sqrt(1.0 + np.gradient(lnf, th, axis=1) ** 2
+                       + (np.gradient(lnf, ph, axis=0)
+                          / np.sin(th)[None, :]) ** 2)
+    dOm = np.diff(sim['phf'])[:, None] * (np.sin(th)
+                                          * np.diff(sim['thf']))[None, :]
+    return ((r_if * r0) ** 2 * dOm / mu).reshape(-1)
 
 
 def peaks(vel, prof):
@@ -237,8 +262,13 @@ def main():
     pdir = os.path.join(a.run, 'plots')
     os.makedirs(pdir, exist_ok=True)
     fig, axs = plt.subplots(1, len(PANELS), figsize=(5.2 * len(PANELS), 5))
-    print(f"{'line':12s} {'L_MOC':>10s} {'L_pipe':>10s} {'ratio':>6s}   "
-          f"peaks MOC / pipe [km/s]   (L in erg/s, |v| < {VINT:.0f})")
+    # MOCASSIN all-sky: every active cell, both sides, rest frame
+    M_all = {n: d['lines'][n][act].sum() * 1e36 for n in d['lines']}
+    print(f"line luminosities [erg/s], |v| < {VINT:.0f} km/s:")
+    print(f"{'':12s} {'--- observed, i = 45 deg ---':>30s}   "
+          f"{'---- all-sky (angle-integrated) ----':>36s}")
+    print(f"{'line':12s} {'MOC':>9s} {'pipe':>9s} {'ratio':>6s}   "
+          f"{'MOC':>9s} {'pipe':>9s} {'ratio':>6s}   peaks MOC / pipe [km/s]")
     for n, (ax, (title, cols, lam_ref)) in enumerate(zip(axs, PANELS)):
         vel = (wave - lam_ref) / lam_ref * C_KMS            # + = redshift
         win = np.abs(vel) < VWIN
@@ -246,9 +276,12 @@ def main():
         dl = np.gradient(wave)
         wi = np.abs(vel) < VINT
         Lm, Lp = np.sum((m * dl)[wi]), np.sum((P['line'] * dl)[wi])
+        Am = sum(M_all[c] for c in cols)
+        Ap = np.sum((P['line_all'] * dl)[wi])
         pm, pp = peaks(vel[wi], m[wi]), peaks(vel[wi], P['line'][wi])
         name = title.replace('\\,', ' ').replace('\\', '')
-        print(f"{name:12s} {Lm:10.3e} {Lp:10.3e} {Lm / Lp:6.2f}   "
+        print(f"{name:12s} {Lm:9.2e} {Lp:9.2e} {Lm / Lp:6.2f}   "
+              f"{Am:9.2e} {Ap:9.2e} {Am / Ap:6.2f}   "
               f"{pm[0]:+6.0f} {pm[1]:+6.0f} / {pp[0]:+6.0f} {pp[1]:+6.0f}")
         ax.plot(vel[win], P['line'][win], '-', color='gray', lw=2,
                 drawstyle='steps-mid', label=r'$\rm pipeline~(Cloudy)$')
@@ -287,6 +320,9 @@ def main():
     ax.plot(wave, wave * (P['cont'] + P['line']), '-', color='darkorange',
             lw=1.8, alpha=0.85, drawstyle='steps-mid',
             label=r'$\rm reprocessed~(Cloudy~continuum + lines)$')
+    ax.plot(wave, wave * P['line'], '-', color='saddlebrown', lw=1.6,
+            alpha=0.8, drawstyle='steps-mid',
+            label=r'$\rm Cloudy~lines~alone~(compare~with~MOCASSIN)$')
     ax.plot(wave, wave * np.where(L_moc > 0, L_moc, np.nan), '-',
             color='purple', lw=1.8, drawstyle='steps-mid',
             label=r'$\rm MOCASSIN~lines~alone$')
@@ -310,6 +346,43 @@ def main():
     ax.legend(fontsize=12, frameon=False, loc='upper right')
     ticks(ax)
     out = os.path.join(pdir, 'moc_full_spectrum.png')
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {out}")
+
+    # ---- lines only: Cloudy vs MOCASSIN, both as observed at INCL_DEG ----
+    fig, ax = plt.subplots(figsize=(12.5, 6.5))
+    ax.plot(wave, wave * np.where(P['line'] > 0, P['line'], np.nan), '-',
+            color='orangered', lw=1.8, drawstyle='steps-mid',
+            label=r'$\rm Cloudy~(pipeline)~lines$')
+    ax.plot(wave, wave * np.where(L_moc > 0, L_moc, np.nan), '-',
+            color='dodgerblue', lw=1.8, alpha=0.85, drawstyle='steps-mid',
+            label=rf'$\rm MOCASSIN~lines~({len(M)})$')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlim(1000, 11000)
+    ytop = (wave * np.maximum(P['line'], L_moc))[msel].max()
+    ax.set_ylim(ytop / 1e3, ytop * 4)
+    for lam, lab, up in ((1216, r'Ly\alpha', 2), (1549, r'C\,IV', 2),
+                         (1640, r'He\,II', 1.15), (1909, r'C\,III]', 2),
+                         (2798, r'Mg\,II', 2), (4861, r'H\beta', 2),
+                         (6563, r'H\alpha', 2), (8446, r'O\,I^*', 2),
+                         (10830, r'He\,I', 2)):
+        ax.text(lam, ytop * up, rf'$\rm {lab}$', ha='center',
+                va='bottom', fontsize=12)
+    ax.set_xticks([1000, 2000, 3000, 5000, 10000])
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlabel(r'$\rm wavelength~[\AA]$', fontsize=18)
+    ax.set_ylabel(r'$\lambda L_\lambda~[\rm erg~s^{-1}]$', fontsize=17)
+    # O I 8446 is Ly beta-fluorescence pumped: needs Lyman-line transfer and
+    # high O I levels, neither of which MOCASSIN has (Cloudy only)
+    ax.set_title(rf'$\rm lines~only,~i={i_deg:.0f}^\circ~(MOCASSIN:~no~'
+                 r'Ly\alpha,~no~Fe;~^*Cloudy~only)$', fontsize=16)
+    ax.legend(fontsize=13, frameon=False, loc='upper right',
+              bbox_to_anchor=(1.0, 0.86))
+    ticks(ax)
+    out = os.path.join(pdir, 'moc_line_spectrum.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {out}")

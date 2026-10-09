@@ -21,7 +21,7 @@ on the Mac).
 ## Where things are on the server
 
 - `/data2/jhuang/repos/MOCASSIN-2.0` : MOCASSIN 2.0 source (cloned from
-  github.com/mocassin/MOCASSIN-2.0, with three local fixes below).
+  github.com/mocassin/MOCASSIN-2.0, with five local fixes below).
 - `/data2/jhuang/runs/mocassin/moc_test` : the run directory.
   - `input/input.in` : MOCASSIN input file.
   - `input/density.dat` : hydrogen density on a Cartesian grid of
@@ -64,7 +64,10 @@ server's ~2 TB of memory makes an iron run possible later: raise
 the Mac with `python3 -m transient.moc_convert --with-iron`. Do the
 iron-free run first.
 
-## The three local source fixes (already in the pushed source)
+## Local source fixes
+
+Fixes 1 to 3 are in the pushed source; fixes 4 and 5 were made on the
+server (2026-10-09) and must be copied to the Mac's source tree.
 
 1. `source/photon_mod.f90`, line 32: argument `gpLoc` of
    `energyPacketDriver` changed from `intent(inout)` to `intent(in)`. It is
@@ -78,6 +81,18 @@ iron-free run first.
 Fixes 2 and 3: these pointers were never initialized, so `associated()`
 returned garbage, and the code freed memory it never allocated ("pointer
 being freed was not allocated", found with lldb on a debug build).
+
+4. `source/photon_mod.f90`, line 22: `totalEscaped` changed from `integer`
+   to `real`. It sums the real-valued `escapedPackets`, so the integer
+   overflowed and every iteration printed
+   `total Escaped Packets : -2147483648`.
+5. `source/set_input_mod.f90`, keywords `LStar` and `LPhot`: added
+   `Lstar = 0.` right after `allocate(Lstar(0:1))`. Only `Lstar(1)` is
+   read, so `Lstar(0)` was uninitialized and `writeSED` printed garbage
+   (e.g. `-1.04E+38`) in "Total energy radiated out of the nebula".
+
+Fixes 4 and 5 only affect printed diagnostics, not the physics. The first
+server run (started 2026-10-09 04:23) used the binary built before them.
 
 ## Building
 

@@ -11,13 +11,25 @@ Writes a self-contained run directory (default transient/data/moc_test):
   input/agn_sed.dat   the Cloudy-deck incident AGN spectrum (the same
                       interpolate table as the pipeline), as wavelength
                       [A] vs f_lambda (shape only: MOCASSIN rescales it
-                      to LPhot = the pipeline's Q_ION)
+                      to LStar, see below)
   input/abun.in       solar abundances (Asplund et al. 2009) for H, He,
                       C, N, O, Ne, Mg, Si, S (and Fe with --with-iron);
                       all others zero
   grid.npz            the same Cartesian density as a numpy array
   data, dustData      symbolic links to MOCASSIN's atomic data
   output/             empty, for MOCASSIN's results
+
+Luminosity: the input sets LStar (total luminosity of the SED over
+nuMin..nuMax) = Q_ION x (L/Q of the SED), NOT LPhot. With LPhot and a file
+spectrum MOCASSIN sets L = 4 pi R^2 sigma TStellar^4 (a blackbody formula,
+continuum_mod.f90), which for this SED made the lamp ~1e16 times too
+bright. With LStar the photon packets carry LStar/nPhotons and follow
+the SED shape, so the ionizing photon rate is Q_ION; the Q(H) MOCASSIN
+prints in that mode is still the blackbody value and is meaningless.
+
+No `output` keyword: it reruns the serial line-emission step (outputGas)
+after EVERY iteration (~80% of the run time); MOCASSIN still writes all
+outputs once at the end.
 
 The grid has an ODD number of cells per axis, so one cell is centred on
 the lamp at the origin. Cells outside the simulated volume get zero
@@ -40,7 +52,10 @@ from transient.sim_cloudy_spectrum import Q_ION  # noqa: E402
 from transient.sim_full_spectrum import SED_X, SED_Y  # noqa: E402
 from transient.cmi_convert import resample  # noqa: E402
 
-MOC = '/Users/jiamuh/codes/MOCASSIN-2.0'
+# MOCASSIN source tree (atomic data links): igm server, else the Mac
+MOC = next((p for p in ('/data2/jhuang/repos/MOCASSIN-2.0',
+                        '/Users/jiamuh/codes/MOCASSIN-2.0')
+            if os.path.isdir(p)), '/Users/jiamuh/codes/MOCASSIN-2.0')
 
 # abundances by number relative to H (Asplund et al. 2009, solar);
 # elements not listed are switched off (zero) to save memory and time
@@ -56,7 +71,7 @@ ny {ny}
 nz {nz}
 contShape "input/agn_sed.dat"
 TStellar 100000.
-LPhot {lphot:.4e}
+LStar {lstar:.4e}
 nebComposition "input/abun.in"
 TeStart 10000.
 nuMin 1.001e-5
@@ -68,7 +83,6 @@ maxIterateMC {niter} 95.
 convLimit 0.05
 nstages 7
 Rin {rin:.6e}
-output
 """
 
 
@@ -82,6 +96,25 @@ def write_sed(path, numax):
     order = np.argsort(lam)
     np.savetxt(path, np.column_stack([lam[order], flam[order]]),
                fmt='%.6e')
+
+
+def grid_half(sim):
+    """Half-widths [r0] of the Cartesian box enclosing the sim volume."""
+    rmax = sim['rf'][-1]
+    zmax = rmax * np.cos(sim['thf'][0])
+    return [rmax, rmax, zmax * 1.02]
+
+
+def sed_energy_per_photon(numax):
+    """L / Q [erg per ionizing photon] of the Cloudy-deck SED: L over
+    1e-5 Ryd..numax (MOCASSIN's frequency range), Q over 1 Ryd..numax."""
+    logE = np.linspace(-5.0, np.log10(numax), 20000)
+    fnu = 10.0 ** np.interp(logE, SED_X, SED_Y)
+    nu = 10.0 ** logE * 3.2898e15                       # [Hz]
+    L = np.trapz(fnu * nu, logE)                        # (common ln10 drops)
+    ion = logE >= 0.0
+    Q = np.trapz(fnu[ion] / 6.62607e-27, logE[ion])
+    return L / Q
 
 
 def main():
@@ -107,9 +140,7 @@ def main():
 
     sim = load_sim(a.dump)
     phys = to_physical(sim, CONFIG)
-    rmax = sim['rf'][-1]
-    zmax = rmax * np.cos(sim['thf'][0])
-    half = [rmax, rmax, zmax * 1.02]
+    half = grid_half(sim)
     cent, grid = resample(sim, phys, a.ncell, half, empty=0.0)
 
     for sub in ('input', 'output'):
@@ -134,7 +165,8 @@ def main():
             fh.write(f"{abun.get(zat, 0.0):.4e}   ! {sym}\n")
     with open(os.path.join(a.outdir, 'input', 'input.in'), 'w') as fh:
         fh.write(INPUT.format(nx=a.ncell[0], ny=a.ncell[1], nz=a.ncell[2],
-                              lphot=Q_ION / 1e36, numax=a.numax,
+                              lstar=Q_ION * sed_energy_per_photon(a.numax)
+                              / 1e36, numax=a.numax,
                               nbins=a.nbins, nphot=a.nphot,
                               nphotmax=a.nphot * 8, niter=a.niter,
                               rin=0.48 * r0_cm))

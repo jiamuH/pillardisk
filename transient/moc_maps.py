@@ -8,9 +8,11 @@ Reads, from <run>/output:
   grid1.out  per-cell Te [K], Ne, n_H [cm^-3]
   grid2.out  per-cell ion fractions, one line per element switched on
   plot.out   (optional) per-cell line luminosities [1e36 erg/s] from
-             mocassinPlot with the line list in <run>/input/plot.in:
-             H alpha, H beta, C IV 1551+1548, Mg II 2804+2796,
-             [O III] 5007 (codes 1, 2, 1393, 1394, 6884, 6885, 3741)
+             mocassinPlot with the line list in <run>/input/plot.in; the
+             columns are named by <run>/input/plot_lines.txt (written with
+             plot.in by transient.moc_plotin), else they must be the
+             original seven: H alpha, H beta, C IV 1551+1548,
+             Mg II 2804+2796, [O III] 5007
 and <run>/grid.npz (written by transient.moc_convert) for the r0 scale.
 
 Views (one figure each):
@@ -46,12 +48,27 @@ plt.rcParams['text.latex.preamble'] = r'\usepackage{amsmath} \usepackage{bm} \bo
 
 DEFAULT_RUN = '/data2/jhuang/runs/mocassin/moc_coarse'
 NSTAGES = 7
-# plot.out column order (must match input/plot.in)
+# plot.out columns of the original seven-line plot.in (used when there is
+# no input/plot_lines.txt); the first seven of moc_plotin's list too
 PLOT_COLS = ['Ha', 'Hb', 'CIV1551', 'CIV1548', 'MgII2804', 'MgII2796',
              'OIII5007']
-# lineFlux.out index of each metal line (same numbering as plot.in)
-LINEFLUX_IDX = {'CIV1551': 1393, 'CIV1548': 1394, 'MgII2804': 6884,
-                'MgII2796': 6885, 'OIII5007': 3741}
+PLOT_CODES = [1, 2, 1393, 1394, 6884, 6885, 3741]
+
+
+def read_line_table(run):
+    """input/plot_lines.txt as a list of dicts (None if absent)."""
+    path = os.path.join(run, 'input', 'plot_lines.txt')
+    if not os.path.exists(path):
+        return None
+    rows = []
+    for line in open(path):
+        if line.startswith('#'):
+            continue
+        t = line.split()
+        rows.append(dict(name=t[0], code=int(t[1]), lam=float(t[2]),
+                         air=int(t[3]), mass=float(t[4]),
+                         ratio=float(t[5])))
+    return rows
 
 
 def read_tokens(path):
@@ -97,11 +114,20 @@ def load_run(run):
     pfile = os.path.join(out, 'plot.out')
     if os.path.exists(pfile):
         pl = read_tokens(pfile).reshape(nx * ny * nz, -1)[:, 1:]
-        if pl.shape[1] != len(PLOT_COLS):
-            raise SystemExit(f'plot.out has {pl.shape[1]} lines, expected '
-                             f'{len(PLOT_COLS)} (check input/plot.in)')
+        table = read_line_table(run)
+        if table is not None and len(table) == pl.shape[1]:
+            names = [r['name'] for r in table]
+            d['line_table'] = table
+        elif pl.shape[1] == len(PLOT_COLS):
+            names = PLOT_COLS
+            d['line_table'] = [dict(name=n, code=c) for n, c in
+                               zip(PLOT_COLS, PLOT_CODES)]
+        else:
+            raise SystemExit(f'plot.out has {pl.shape[1]} lines, matching '
+                             'neither input/plot_lines.txt nor the original '
+                             'seven: rerun mocassinPlot')
         d['lines'] = {name: pl[:, i].reshape(shape)
-                      for i, name in enumerate(PLOT_COLS)}
+                      for i, name in enumerate(names)}
 
     # r0 in cm: grid.npz stores the same cell centres in units of r0
     npz = np.load(os.path.join(run, 'grid.npz'))
@@ -113,17 +139,26 @@ def load_run(run):
 
 
 def check_totals(d, run):
-    """Summed plot.out luminosities vs the lineFlux.out totals."""
+    """Summed plot.out luminosities vs the lineFlux.out totals (the
+    Formal Solution block lists every line as '... ratio code'): checks
+    that each plot.out column is the line its code claims."""
     txt = open(os.path.join(run, 'output', 'lineFlux.out')).read()
     hb_ref = float(re.search(r'Hbeta \[E36 erg/s\]:\s+(\S+)', txt).group(1))
     hb = d['lines']['Hb'].sum()
     print(f"  H beta: plot.out {hb:.5g}, lineFlux.out {hb_ref:.5g} "
           f"[1e36 erg/s]")
-    for name, idx in LINEFLUX_IDX.items():
-        m = re.search(rf'\s(\S+)\s+{idx}\s*\n', txt)
+    fs = txt[txt.index('Formal Solution'):txt.index('Component:')]
+    dev = []
+    for r in d['line_table']:
+        m = re.search(rf'\s(\S+)\s+{r["code"]}\s*\n', fs)
         ref = float(m.group(1)) if m else np.nan
-        print(f"  {name:9s}/H beta: plot.out "
-              f"{d['lines'][name].sum() / hb:.4g}, lineFlux.out {ref:.4g}")
+        val = d['lines'][r['name']].sum() / hb
+        dev.append((abs(val / ref - 1) if ref > 0 else np.inf, r['name'],
+                    val, ref))
+    dev.sort(reverse=True)
+    print(f"  {len(dev)} lines vs lineFlux.out (ratio to H beta): max "
+          f"deviation {100 * dev[0][0]:.2f}% ({dev[0][1]}: {dev[0][2]:.4g} "
+          f"vs {dev[0][3]:.4g}); median {100 * np.median([x[0] for x in dev]):.2f}%")
 
 
 def edges(c):

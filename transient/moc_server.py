@@ -14,7 +14,9 @@ Steps (run in order):
   status  show the last progress lines of the server log
   pull    copy the results back to transient/data/moc_test/output_server
 
-Remote layout:  ~/codes/MOCASSIN-2.0   and   ~/mocassin_runs/moc_test
+Remote layout (never the home directory, per the server rules):
+  code  /data2/jhuang/repos/MOCASSIN-2.0
+  run   /data2/jhuang/runs/mocassin/moc_test
 
 Run:  python3 -m transient.moc_server push
       python3 -m transient.moc_server build
@@ -34,8 +36,11 @@ JUMP = 'jhuang@ssh.strw.leidenuniv.nl'
 SSH = f'ssh -o ProxyJump={JUMP}'
 LOCAL_SRC = '/Users/jiamuh/codes/MOCASSIN-2.0/'
 LOCAL_RUN = os.path.join(HERE, 'data', 'moc_test') + '/'
-REMOTE_SRC = 'codes/MOCASSIN-2.0'
-REMOTE_RUN = 'mocassin_runs/moc_test'
+REMOTE_SRC = '/data2/jhuang/repos/MOCASSIN-2.0'
+REMOTE_RUN = '/data2/jhuang/runs/mocassin/moc_test'
+# writing to the home directory on igm is forbidden (small quota)
+assert not REMOTE_SRC.startswith(('/home', '~')) and \
+    not REMOTE_RUN.startswith(('/home', '~')), 'never use home'
 MPI = '/usr/lib64/openmpi/bin'
 
 
@@ -52,7 +57,7 @@ def remote(cmd):
 
 
 def push():
-    remote(f'mkdir -p ~/{REMOTE_SRC} ~/{REMOTE_RUN}/output')
+    remote(f'mkdir -p {REMOTE_SRC} {REMOTE_RUN}/output')
     excl = ' '.join(f"--exclude '{e}'" for e in (
         '.git', '*.o', '*.mod', 'mocassin', 'mocassin_debug', '*.dSYM'))
     sh(f'rsync -avz --progress -e "{SSH}" {excl} {LOCAL_SRC} '
@@ -61,24 +66,24 @@ def push():
     # skip them and link the server's copy instead
     sh(f'rsync -avz --progress -e "{SSH}" --exclude data --exclude '
        f'dustData --exclude output {LOCAL_RUN} {HOST}:{REMOTE_RUN}/')
-    remote(f'cd ~/{REMOTE_RUN} && ln -sfn ~/{REMOTE_SRC}/data data && '
-           f'ln -sfn ~/{REMOTE_SRC}/dustData dustData && ls -l')
+    remote(f'cd {REMOTE_RUN} && ln -sfn {REMOTE_SRC}/data data && '
+           f'ln -sfn {REMOTE_SRC}/dustData dustData && ls -l')
 
 
 def build():
-    remote(f'cd ~/{REMOTE_SRC} && make -B mocassin F90={MPI}/mpif90 '
+    remote(f'cd {REMOTE_SRC} && make -B mocassin F90={MPI}/mpif90 '
            f'OPT1=\\\"-fno-range-check -O2\\\" > build.log 2>&1; '
            f'tail -3 build.log; ls -l mocassin')
 
 
 def run(np_):
-    remote(f'cd ~/{REMOTE_RUN} && setsid nohup {MPI}/mpirun -np {np_} '
-           f'~/{REMOTE_SRC}/mocassin > run.log 2>&1 < /dev/null & '
-           f'sleep 2; echo started; tail -2 ~/{REMOTE_RUN}/run.log')
+    remote(f'cd {REMOTE_RUN} && setsid nohup {MPI}/mpirun -np {np_} '
+           f'{REMOTE_SRC}/mocassin > run.log 2>&1 < /dev/null & '
+           f'sleep 2; echo started; tail -2 {REMOTE_RUN}/run.log')
 
 
 def status():
-    remote(f'cd ~/{REMOTE_RUN} && ls -l output | tail -5; '
+    remote(f'cd {REMOTE_RUN} && ls -l output | tail -5; '
            f'grep -E \\\"iterateMC: (Starting|updateCell out)|convergence\\\" '
            f'run.log | tail -6; tail -2 run.log; '
            f'echo mocassin processes running: \\$(pgrep -c -x mocassin)')

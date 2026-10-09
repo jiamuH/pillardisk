@@ -20,9 +20,9 @@ on the Mac).
 
 ## Where things are on the server
 
-- `~/codes/MOCASSIN-2.0` : MOCASSIN 2.0 source (cloned from
+- `/data2/jhuang/repos/MOCASSIN-2.0` : MOCASSIN 2.0 source (cloned from
   github.com/mocassin/MOCASSIN-2.0, with three local fixes below).
-- `~/mocassin_runs/moc_test` : the run directory.
+- `/data2/jhuang/runs/mocassin/moc_test` : the run directory.
   - `input/input.in` : MOCASSIN input file.
   - `input/density.dat` : hydrogen density on a Cartesian grid of
     65 x 65 x 33 cells (x, y, z in cm, n_H in cm^-3), resampled from
@@ -88,7 +88,7 @@ plain `make` skips rebuilding when a binary exists). The server's
 gfortran 8.5 should not need those two flags, and they do not exist in
 gfortran 8, so do not pass them. The build command:
 
-    cd ~/codes/MOCASSIN-2.0 && make -B mocassin F90=/usr/lib64/openmpi/bin/mpif90 OPT1="-fno-range-check -O2" > build.log 2>&1
+    cd /data2/jhuang/repos/MOCASSIN-2.0 && make -B mocassin F90=/usr/lib64/openmpi/bin/mpif90 OPT1="-fno-range-check -O2" > build.log 2>&1
 
 The system OpenMPI is version 4.1.1 in `/usr/lib64/openmpi/bin` (not on
 the default PATH). The login shell is csh: for redirections like `2>&1`,
@@ -96,7 +96,7 @@ run commands through `bash -lc '...'` or start bash first.
 
 ## Running
 
-    cd ~/mocassin_runs/moc_test && setsid nohup /usr/lib64/openmpi/bin/mpirun -np 32 ~/codes/MOCASSIN-2.0/mocassin > run.log 2>&1 < /dev/null &
+    cd /data2/jhuang/runs/mocassin/moc_test && setsid nohup /usr/lib64/openmpi/bin/mpirun -np 32 /data2/jhuang/repos/MOCASSIN-2.0/mocassin > run.log 2>&1 < /dev/null &
 
 MOCASSIN must be started from the run directory (it reads `input/` and
 `data/` relative to the current directory). Choose `-np` with the shared
@@ -118,6 +118,8 @@ If writing outputs every iteration turns out slow, consider dropping the
 
 ## Rules for the session
 
+- NEVER write anything to the home directory (/home/jhuang, small quota). All code goes in /data2/jhuang/repos/, runs and outputs under /data2/jhuang/ (see /data2/jhuang/CLAUDE.md).
+
 - Anything expected to run longer than about one minute is the user's to
   start: hand over a one-line command. A small photon count does not make
   a MOCASSIN run short (the per-cell update cost is fixed).
@@ -127,7 +129,7 @@ If writing outputs every iteration turns out slow, consider dropping the
 
 ## Checking progress
 
-    grep -E "iterateMC: (Starting|updateCell out)|convergence" ~/mocassin_runs/moc_test/run.log | tail
+    grep -E "iterateMC: (Starting|updateCell out)|convergence" /data2/jhuang/runs/mocassin/moc_test/run.log | tail
     pgrep -c -x mocassin
 
 From the Mac the same is `python3 -m transient.moc_server status`.

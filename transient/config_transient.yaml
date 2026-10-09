@@ -1,0 +1,73 @@
+# Configuration for the transient-SED experiment (TDE-heated pillar +
+# observer occultation), matching the Liu et al. Main Target at z = 0.494.
+
+disk:
+  rin: 0.05          # inner radius (light days)
+  rout: 100.0        # outer radius (light days)
+  nr: 300
+  nphi: 720
+  h1: 2.0            # bowl rim height at r0 (light days)
+  r0: 100.0          # bowl reference radius = outer edge (light days)
+  beta: 10.0
+
+temperature:
+  tv1: 650.0              # viscous temperature at r0 = 100 ld (K); T(1 ld) ~ 2.1e4 K
+  tirrad_tvisc_ratio: 0.15 # keep the SED viscous-dominated (weak lamp)
+  fcol: 1.0
+
+lamp:
+  hlamp: 0.05        # lamp height (light days)
+
+observation:
+  dmpc: auto         # luminosity distance from redshift (FlatLambdaCDM H0=70 Om0=0.3)
+  inclination: 60.0  # degrees (interior optimum of fit_incl_scan.py, ~58; adopted 60)
+  redshift: 0.494
+
+transient:
+  wall_flux_conserve: true  # spread fixed annulus luminosity over pillar walls
+  pillar:
+    # single pillar sheared by the slow TDE into TWO spiral arms (inner arm
+    # leads, outer arm trails); heated over its own footprint; the raised
+    # arms occult the UV-emitting interior
+    r_pillar: 2.0      # light days (embedded star's orbit)
+    phi_pillar: 0.0    # near side (toward observer)
+    height: 1.2        # light days (occults the inner UV disk)
+    sigma_r: 1.5       # light days (radial envelope of the sheared debris)
+    sigma_phi: 0.9     # radians (azimuthal thickness of each arm)
+    spiral_shear: 2.0  # radians; A = Omega(r_pillar) * t (winding of the arms)
+    arm_length: 2.5    # radians; taper along the spiral -> two finite arms
+    pillar_temp: 26000.0 # K: sets the arm-emission AMPLITUDE (balmer mode)
+    heat_mode: balmer    # self-consistent: arm emits recombination continuum;
+                         # occultation is the geometric mask (opaque mode)
+    balmer_te: 11000.0   # electron temperature of the recombining gas (K)
+    balmer_bb_frac: 0.20 # thermalized-blackbody fraction of the arm emission
+    balmer_vsmear: 25000.0 # km/s; Doppler smearing of the Balmer edge
+  flare_tv1_scale: 1.0 # brightened viscous temperature in the transient epoch
+  occultation:
+    enabled: true
+    mode: opaque       # geometric (gray) blocking of the inner disk by the arm
+    # Balmer-absorption-screen parameters (used only when mode: balmer_abs)
+    tau_edge: 14.0     # optical depth at the Balmer edge for a central chord
+    n3_frac: 0.1       # n=3 (Paschen continuum) opacity fraction
+    abs_vsmear: 25000.0 # km/s; Doppler smearing of the absorption edges
+    f_trans_obs: 0.0
+    n_ray: 300
+    penumbra_frac: 0.05
+  plot_balmer_model: false  # (Balmer-opacity model curves are not drawn)
+  inclination_curves: [0.0, 45.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0]  # dense near the ~59 deg occultation turn-on
+  # geometry override used for the inclination-sweep curves (kept in sync
+  # with the base pillar so the sweep is the same model at each angle)
+  variant_geometric:
+    inclination: 80.0
+    height: 1.2
+    pillar_temp: 10500.0
+  normalization:
+    # anchor where the transient has died away (2019/2000 -> 1), i.e. the
+    # red side, NOT at 5150 where the bump is still active
+    rest_window: [5500.0, 6050.0]
+    ref_epoch: sdss2000
+
+computation:
+  wobs_min: 3500.0   # observed-frame wavelength grid (Angstroms)
+  wobs_max: 10200.0
+  nwavelengths: 160

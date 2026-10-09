@@ -18,3 +18,6 @@ __pycache__/
 *.for
 *.mod
 *.o
+
+# transient: simulation dumps, Cloudy caches, photoionization run folders
+transient/data/

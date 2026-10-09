@@ -1,0 +1,37 @@
+title extended arm grid: low-density surface layers, brighter lamp, finer wave grid
+set save prefix "arm_column2"
+init "c84.ini"
+# same incident AGN SED as the loc_metal_flux BLR grid
+interpolate (-8.0 -13.6) (-1.7 -1.0) (-1.3 1.48) (-1.0 2.0)
+continue    (-0.19 1.65) (0.4 1.32) (1.87  -1.87)  (2.43 -2.37)
+continue    (2.98 -2.79) (3.3 -2.96) (3.7 -3.38) (4.18 -4.05)
+continue    (4.99 -5.59) (5.1 -6.67) (7.0 -12.37)
+# EXTENDED vs arm_column: phi to 23 (realistic AGN Q at the inner rim),
+# hden down to 6 (the sim's dilute matter-bounded surface layers were
+# clipped at the old floor of 9), colden up to 24.5 (the rim columns)
+phi(H) 20 vary
+grid 17 23 1.0
+hden 9 vary
+grid 6 12 1.0
+stop column density 23 vary
+grid 21.5 24.5 1.0
+# solar metallicity (the observed difference spectrum is Fe II-free)
+turbulence = 100 km/s #from Sarkar2021
+stop temperature 3e3 K
+stop zone 800
+# ~5x finer continuum wavelength grid: resolves the +-3,500 km/s
+# kinematic line profiles (old default R ~ 300 made them chunky)
+set continuum resolution 0.2
+print last
+save continuum "_SED.conA" units Angstroms
+save grid ".grd"
+# depth-resolved emissivity of the mapped lines: lets the maps place
+# each line where Cloudy actually forms it inside the slab (C IV near
+# the irradiated face, Mg II by the front) instead of ad-hoc weights
+save lines emissivity ".ems" last
+H  1  6562.80A
+C  4  1548.19A
+C  4  1550.77A
+Mg 2  2795.53A
+Mg 2  2802.71A
+end of lines

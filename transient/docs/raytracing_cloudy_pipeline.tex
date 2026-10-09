@@ -1,0 +1,322 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[colorlinks=true, linkcolor=blue, urlcolor=blue]{hyperref}
+
+\title{How the ray tracing is combined with the Cloudy model:\\
+the simulation-to-spectrum pipeline}
+\author{pillardisk / transient}
+\date{\today}
+
+\newcommand{\nH}{n_{\rm H}}
+\newcommand{\rIF}{r_{\rm IF}}
+\newcommand{\alphB}{\alpha_{\rm B}}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+
+The pipeline turns one Athena++ dump of the perturbed disk into a
+predicted UV--optical spectrum. It has four stages, implemented in
+three files under \texttt{transient/}, namely
+\texttt{sim\_spectrum.py} (stage 1),
+\texttt{sim\_cloudy\_spectrum.py} (stages 2--4), and
+\texttt{sim\_full\_spectrum.py} (the thermal and direct
+components added in stage~4).
+
+\begin{enumerate}
+\item \textbf{Physical fields.} The scale-free simulation cube
+      (density, pressure, velocity on a spherical $r,\theta,\phi$ grid)
+      is anchored to physical units.
+\item \textbf{Ray tracing.} A central ionizing lamp is placed at the
+      origin. Along every $(\theta,\phi)$ direction the code marches
+      through the simulation's own density cells and finds where the
+      lamp's photon budget is exhausted. This defines the
+      three-dimensional ionization front, the irradiated ``bowl.''
+\item \textbf{Cloudy lookup.} Each ray's irradiated layer is
+      characterized by three numbers (ionizing flux, density, column)
+      and mapped onto a precomputed Cloudy grid, which returns the
+      emitted spectrum of that patch, separately for its illuminated
+      face and its shielded back.
+\item \textbf{Assembly.} Every patch's spectrum is weighted by its
+      area, by which face the observer sees, and by a Lambert
+      projection factor, then Doppler shifted by the local gas
+      velocity. The sum, plus the thermal light of the photosphere and
+      the directly seen lamp, is the predicted spectrum.
+\end{enumerate}
+
+The key design choice is that Cloudy is \textbf{not} run per cell.
+Cloudy is run once, offline, over a three-parameter family of
+irradiated slabs. The ray tracing reduces every line of sight from the
+lamp to a member of that family. This keeps the photoionization
+physics exact (full radiative transfer within each slab, done by
+Cloudy) while the geometry, the shadowing, and the kinematics come
+from the simulation.
+
+\section{Stage 1: from simulation to physical fields}
+
+The dump (\texttt{disk.out1.00012.athdf}) is scale free, so three
+anchors set the units (all in \texttt{CONFIG}):
+\begin{itemize}
+\item $r=1$ in code units corresponds to $r_0 = 2$ light days, the
+      orbital radius of the disrupted star;
+\item the black-hole mass is $M_{\rm BH} = 10^{7}\,M_\odot$, which
+      sets the velocity unit $v_0 = \sqrt{GM_{\rm BH}/r_0} \simeq
+      5{,}060~{\rm km~s^{-1}}$ and the orbital period at $r=1$
+      ($\simeq 740$ days);
+\item the azimuthally averaged midplane density at $r=1$ is set to
+      $\nH = 10^{10}~{\rm cm^{-3}}$, and the midplane temperature
+      anchor there is $3000$~K (the ``rescaled'' temperature mode,
+      $T \propto P/\rho$, because the simulation's literal equation of
+      state is numerically inflated).
+\end{itemize}
+Everything downstream (columns, recombination rates, Doppler shifts)
+uses these physical fields.
+
+\section{Stage 2: the lamp and the ionization-front march}
+
+A lamp-post ionizing source sits at the origin with photon rate
+\begin{equation}
+Q_{\rm ion} = 8.5\times10^{52}~{\rm s^{-1}},
+\end{equation}
+chosen so that the flux arriving at the inner rim is
+$\log\varphi \simeq 21$, inside the Cloudy grid. Along each of the
+$256\times64$ directions $(\phi,\theta)$ the code marches outward
+through the simulation's density cells and integrates the
+recombinations per steradian,
+\begin{equation}
+S(r) \;=\; \int_{r_{\rm in}}^{r} \nH^2\,\alphB\, r'^2\,dr',
+\qquad \alphB = 2.59\times10^{-13}~{\rm cm^3\,s^{-1}},
+\end{equation}
+comparing it with the available photons per steradian,
+$Q_{\rm ion}/4\pi$. The ionization front along that ray is the radius
+$\rIF(\theta,\phi)$ where $S = Q_{\rm ion}/4\pi$ (photon counting in
+Str\"omgren balance, absorption by the gas the lamp actually shines
+through). Two outcomes are possible.
+\begin{itemize}
+\item \textbf{Radiation bounded.} The budget runs out inside the grid.
+      The ray has a sharp front, and everything beyond it sits in
+      shadow. Dense midplane gas and the arm walls stop the front at
+      small radius, so shadowing is automatic; no separate shadow
+      computation is needed.
+\item \textbf{Matter bounded.} The ray reaches the outer edge of the
+      cube with photons to spare (46\% of rays in dump 00012, mostly
+      the dilute layers well above the midplane). The whole column is
+      ionized and transparent.
+\end{itemize}
+Note that the photosphere (the $N_{\rm H} = 10^{24}~{\rm cm^{-2}}$
+surface) plays no role here. The front emerges from the density field
+itself, and the two surfaces are different: the ionization front hugs
+the dense structures much more tightly.
+
+\section{Stage 3: reducing each ray to a Cloudy slab}
+
+Cloudy models a plane-parallel slab irradiated on one side. Three
+numbers pick the slab for each ray.
+
+\paragraph{Ionizing flux at the front, with foreshortening.}
+The front is a tilted surface $r = \rIF(\theta,\phi)$. Its tilt
+relative to the incoming radial rays gives the incidence cosine
+\begin{equation}
+\mu \;=\;
+\Bigl[\,1 + \Bigl(\tfrac{\partial \ln \rIF}{\partial\theta}\Bigr)^{2}
+        + \Bigl(\tfrac{1}{\sin\theta}
+          \tfrac{\partial \ln \rIF}{\partial\phi}\Bigr)^{2}\Bigr]^{-1/2},
+\qquad
+\varphi \;=\; \frac{Q_{\rm ion}}{4\pi (\rIF r_0)^{2}}\;\mu .
+\end{equation}
+A wall that faces the lamp (the inner rim, the arm fronts, where
+$\rIF$ is nearly constant with angle) has $\mu \simeq 1$ and is hit
+hard. A flared surface climbing steeply with angle is grazed,
+$\mu \ll 1$. This is the same foreshortening physics as the
+irradiation temperature in the pillardisk toy model.
+
+\paragraph{Density.} The slab's hydrogen density is the
+recombination-weighted mean over the ray's ionized cells,
+$\log \bar{n}_{\rm H} = \sum w_i \log n_{{\rm H},i} / \sum w_i$ with
+$w_i = \nH^2 r^2\,dr$ evaluated per cell.
+
+\paragraph{Column density.} A matter-bounded ray hands Cloudy its
+true, finite column $N_{\rm H} = \int \nH\,dr$, and Cloudy then
+returns a slab that is transparent to ionizing photons. A
+radiation-bounded ray is given the grid's maximum column, and Cloudy's
+own internal ionization front terminates the slab, so the near
+(illuminated) side is fully modeled and the code never has to guess
+where Cloudy would place the front.
+
+\section{The precomputed Cloudy grid}
+
+The grid deck (\texttt{transient/cloudy/arm\_column.in}) uses the same
+AGN incident spectrum as the older BLR grids (the 15-point
+\texttt{interpolate} table), solar abundances, 100~km\,s$^{-1}$
+turbulence, and varies three parameters:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+parameter & range (current grid) & range (\texttt{arm\_column2}, queued)\\
+\midrule
+$\log \varphi$ (ionizing photon flux) & 17 -- 21 & 17 -- 23\\
+$\log \nH$ (hydrogen density)         & 9 -- 12  & 6 -- 12\\
+$\log N_{\rm H}$ (stopping column)    & 21.5 -- 23.5 & 21.5 -- 24.5\\
+\bottomrule
+\end{tabular}
+\end{center}
+For every grid point the \texttt{save continuum} output is split into
+four channels, each stored as $\nu F_\nu$ per cm$^2$ of slab surface
+on a common wavelength grid (301 -- 11{,}967~\AA):
+\begin{itemize}
+\item \texttt{refl\_cont}, \texttt{refl\_line}: continuum and lines
+      leaving the \textbf{illuminated face} (the ``reflected''
+      emission, toward the lamp);
+\item \texttt{out\_cont}, \texttt{out\_line}: continuum and lines
+      leaving the \textbf{shielded back face} (the ``outward''
+      emission, away from the lamp).
+\end{itemize}
+The four channels are interpolated trilinearly in
+$(\log\varphi, \log\nH, \log N_{\rm H})$ in log flux
+(\texttt{load\_grid} in \texttt{sim\_cloudy\_spectrum.py}). Rays whose
+parameters fall outside the box are clipped to its edge; with the
+current grid 62\% of rays clip at the density floor and 68\% at the
+column edge, which produces the flat uniform patches in the outer disk
+of the line maps. The queued \texttt{arm\_column2} run extends the box
+to remove almost all of this clipping.
+
+\section{Face selection and projection}
+
+Resonant lines (Ly$\alpha$, C\,IV) escape preferentially from the
+illuminated face, while non-resonant photons leave the shielded back
+freely. Cloudy's reflected/outward split encodes exactly this, so the
+observer-dependent part of the problem reduces to which face of each
+slab patch the observer sees.
+
+The back-face normal of the front surface is
+\begin{equation}
+\hat{n} \;\propto\; \hat{r}
+ - \frac{\partial \ln \rIF}{\partial\theta}\,\hat{\theta}
+ - \frac{1}{\sin\theta}\frac{\partial \ln \rIF}{\partial\phi}\,\hat{\phi},
+\end{equation}
+and with the observer direction $\hat{o}$ (inclination $i$ from the
+disk axis, plus an azimuth in the phase sweeps) the blend
+\begin{equation}
+\cos v = \hat{n}\cdot\hat{o}, \qquad
+s_{\rm out} = \tfrac12\bigl[1 + \tanh(\cos v / 0.3)\bigr]
+\end{equation}
+weights the two faces: $s_{\rm out}\to1$ shows the shielded back
+(patch between lamp and observer), $s_{\rm out}\to0$ shows the lit
+face, and the smooth blend avoids a hard switch for edge-on patches.
+An optically thick patch is also a Lambert emitter, so its flux
+carries the projection factor $4|\cos v|$ (the factor 4 makes an
+isotropic-equivalent luminosity, so a face-on patch is brighter and an
+edge-on patch fainter than the isotropic average, energy conserved
+over viewing angles). Matter-bounded (transparent) patches emit both
+channels isotropically with no projection factor. At $i=45^\circ$
+half the radiation-bounded patches show the observer their lit face
+and half their shadow face.
+
+\section{Stage 4: assembling the spectrum}
+
+Each ray's patch has surface area
+\begin{equation}
+dA \;=\; \frac{(\rIF r_0)^2\, d\Omega}{\mu},
+\end{equation}
+the solid-angle patch enlarged by $1/\mu$ for the tilt, which together
+with $\varphi \propto \mu$ conserves the photon budget per steradian.
+Because the observer sees only one face of an opaque disk, only the
+observer-side (upper, $\theta \le 90^\circ$) hemisphere enters the
+reprocessed sum, matching the one-sided thermal treatment below; the
+lower-hemisphere patches have $dA$ set to zero at the source, so the
+spectra, both sweeps, and the line maps all inherit the restriction
+consistently.
+The luminosity spectrum is then
+\begin{equation}
+L_\lambda \;=\; \sum_{\rm rays} dA \;
+\Bigl[ w_{\rm ref}\, F^{\rm refl}_\lambda
+     + w_{\rm out}\, F^{\rm out}_\lambda \Bigr]_{\lambda \to \lambda(1 - v_{\rm los}/c)}
+\;+\; 4\cos i \; L^{\rm base}_{\lambda,\rm th} \;+\; L_{\lambda,\rm AGN},
+\end{equation}
+with the three pieces as follows.
+\begin{itemize}
+\item \textbf{Reprocessed light} (the Cloudy sum). Each patch's entire
+      spectrum, continuum and lines alike, is Doppler shifted by the
+      recombination-weighted line-of-sight velocity of its ionized
+      cells, taken from the simulation velocity field. This is what
+      broadens the lines into the observed $\pm3000~{\rm km~s^{-1}}$
+      double-horned profiles and smears the Balmer jump; it is not
+      applied artificially to lines only.
+\item \textbf{Thermal light.} Every disk column radiates as a
+      blackbody at the temperature sampled at its own photosphere,
+      the depth where the vertical column from the wedge surface
+      reaches $N_{\rm H} = 10^{24}~{\rm cm^{-2}}$. This single
+      component contains the viscous disk, the TDE-heated region, and
+      the arms, because they are all part of the one simulation
+      temperature field; the $4\cos i$ factor is the same Lambert
+      convention as above.
+\item \textbf{Direct AGN light.} The lamp seen directly, using the
+      identical \texttt{interpolate} SED that irradiates the Cloudy
+      slabs, normalized so that its photon rate above 1~Ryd equals
+      $Q_{\rm ion}$. Input SED, reprocessed emission, and direct light
+      therefore share one spectral shape and one normalization.
+\end{itemize}
+The inclination sweep recomputes only face selection, projection, and
+Doppler geometry per inclination (the march and the Cloudy lookup are
+inclination independent); the phase sweep does the same per observer
+azimuth at fixed inclination.
+
+\section{The line maps and the self-consistency check}
+
+The face-on line maps (C\,IV, Mg\,II, H$\alpha$, and the RGB
+composite) are \textbf{not} an input to the spectra. Both are
+projections of the same per-ray line luminosities. The spectrum sums
+them in wavelength; the map paints each ray's line luminosity back
+along its ionized cells with the recombination weight
+$\nH^2 r^2 dr$ (with the front surface interpolated in $\theta$ so the
+rendering shows the continuous bowl rather than the 64 discrete polar
+rays).
+
+Numerical check, dump 00012 at $i=45^\circ$ (upper hemisphere).
+Summing the H$\alpha$ map gives
+$1.83\times10^{40}~{\rm erg~s^{-1}}$, and integrating the line channel
+of the $45^\circ$ spectrum over the full Doppler-broadened profile
+(6350 -- 6800~\AA) returns the same number, because they are the same
+photons, projected spatially in one case and spectrally in the other.
+(A narrow window such as 6510 -- 6620~\AA\ underestimates the
+spectral side by a factor of a few, since the $\pm3000~{\rm
+km~s^{-1}}$ horns carry the flux outside it.)
+
+\section{Approximations worth remembering}
+
+\begin{enumerate}
+\item The march uses a single case-B recombination coefficient at
+      $10^4$~K; Cloudy then handles the real thermal and ionization
+      structure inside each slab, but the location of the front itself
+      is photon counting only, with no diffuse-field transport between
+      rays.
+\item Slabs are characterized by one mean density and one column per
+      ray; density gradients along the ionized segment are folded into
+      the recombination-weighted mean.
+\item First-order Doppler shift only; relativistic beaming
+      ($\sim20\%$ on the inner rim) and gravitational redshift
+      ($\sim1\%$) are neglected.
+\item No patch-on-patch occultation along the observer's line of
+      sight, so the sweeps stop at $i = 80^\circ$. For the same reason
+      the far-side strip of the lower rim wall that is really visible
+      through the central funnel is neglected (the reprocessed sum
+      keeps the upper hemisphere only).
+\item The lamp is a point at the origin. For
+      $M_{\rm BH} = 10^7\,M_\odot$ the gravitational radius is
+      $5.7\times10^{-4}$ light days, so any standard lamp height of
+      6 -- 20~$r_g$ changes the incidence angles at the simulated radii
+      ($\geq 1$ light day) by well under a degree; the physically
+      load-bearing part of an elevated lamp, its clear view over the
+      inner disk, is present as the assumption that the unsimulated
+      hole ($r < 1$ light day) is transparent.
+\item 62\% / 68\% of rays currently clip at the Cloudy grid's density
+      floor / column edge; superseded once \texttt{arm\_column2} is
+      run and extracted (the pipeline adopts the extended cache
+      automatically).
+\end{enumerate}
+
+\end{document}

@@ -111,9 +111,10 @@ def sed_energy_per_photon(numax):
     logE = np.linspace(-5.0, np.log10(numax), 20000)
     fnu = 10.0 ** np.interp(logE, SED_X, SED_Y)
     nu = 10.0 ** logE * 3.2898e15                       # [Hz]
-    L = np.trapz(fnu * nu, logE)                        # (common ln10 drops)
+    trap = getattr(np, 'trapezoid', None) or np.trapz   # numpy 1.x / 2.x
+    L = trap(fnu * nu, logE)                            # (common ln10 drops)
     ion = logE >= 0.0
-    Q = np.trapz(fnu[ion] / 6.62607e-27, logE[ion])
+    Q = trap(fnu[ion] / 6.62607e-27, logE[ion])
     return L / Q
 
 
@@ -125,6 +126,9 @@ def main():
                                                      'moc_test'))
     ap.add_argument('--ncell', type=int, nargs=3, default=[65, 65, 33])
     ap.add_argument('--nphot', type=int, default=10000000)
+    ap.add_argument('--nphot-max', type=int, default=None,
+                    help='packets per iteration autoPackets may ramp up '
+                         'to (default 4 x --nphot)')
     ap.add_argument('--niter', type=int, default=20)
     ap.add_argument('--numax', type=float, default=300.0)  # Ryd, ~4 keV
     ap.add_argument('--nbins', type=int, default=1500)
@@ -132,6 +136,10 @@ def main():
                     help='include iron (needs nForLevels raised in the '
                          'MOCASSIN source and much more memory)')
     a = ap.parse_args()
+    # autoPackets compares its cap with nPhotons(1) + sum(nPhotons), i.e.
+    # twice the packets of our single source (iteration_mod.f90), so the
+    # cap written is 2x the packets per iteration actually reached
+    nphot_max = a.nphot_max or 4 * a.nphot
     abun = dict(ABUN)
     if not a.with_iron:
         abun.pop(26)
@@ -168,7 +176,7 @@ def main():
                               lstar=Q_ION * sed_energy_per_photon(a.numax)
                               / 1e36, numax=a.numax,
                               nbins=a.nbins, nphot=a.nphot,
-                              nphotmax=a.nphot * 8, niter=a.niter,
+                              nphotmax=2 * nphot_max, niter=a.niter,
                               rin=0.48 * r0_cm))
     gas = grid > 0
     cell = [2 * half[k] / a.ncell[k] for k in range(3)]

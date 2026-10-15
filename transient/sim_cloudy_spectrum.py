@@ -23,8 +23,9 @@ inside. Each (theta, phi) direction is ONE radial ray = ONE Cloudy slab:
      and photon conservation with the source built in.
 
 Physical anchors are shared with sim_spectrum.py (r0, M_BH, n_mid).
-The ionizing source is Q_ION [photons/s]; the default puts the face flux
-at log phi = 21 (grid maximum).
+The ionizing source is Q_ION [photons/s]: the lamp-post supplies the
+fraction F_ION of L_bol = EDD_RATIO x L_Edd(M_BH) above 1 Ryd (the disk
+supplies the light below 1 Ryd), with the photons of the Cloudy-deck SED.
 
 Run:  python3 transient/sim_cloudy_spectrum.py [dump.athdf]
 """
@@ -51,7 +52,16 @@ _NPZ2 = os.path.join(HERE, 'data', 'cloudy_arm_spectra_arm_column2.npz')
 if os.path.exists(_NPZ2):
     NPZ = _NPZ2          # extended grid (phi 17-23, hden 6-12, N 21.5-24.5)
 ALPHA_B = 2.59e-13          # case B recombination coefficient (1e4 K)
-Q_ION = 8.5e52              # ionizing photon rate [1/s] -> log phi_face = 21
+# lamp: M_BH = CONFIG['MBH_MSUN'] at EDD_RATIO of Eddington; F_ION of L_bol
+# above 1 Ryd (the SED's own split over 1e-5..300 Ryd, 0.628); E_ION = mean
+# energy of an ionizing photon of the SED over 1-300 Ryd (33.3 eV; 36.5 eV
+# out to 1e7 Ryd). 1e7 Msun, 10%: Q_ION = 1.49e54/s, L_bol = 1.26e44 erg/s
+# (was 8.5e52, log phi_face = 21: 0.6% Eddington).
+L_EDD_PER_MSUN = 1.26e38    # erg/s
+EDD_RATIO = 0.1
+F_ION = 0.63
+E_ION = 5.338e-11           # erg
+Q_ION = F_ION * EDD_RATIO * L_EDD_PER_MSUN * CONFIG['MBH_MSUN'] / E_ION
 
 
 def load_grid():

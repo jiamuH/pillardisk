@@ -21,7 +21,8 @@ Views (one figure each):
             fractions and Te n_H-weighted along z; column density N_H
   midplane  z = 0 slice
   vertical  y = 0 slice (x-z plane through the lamp)
-  faceon_smooth  the face-on maps smoothed over one z-layer step in r
+  faceon_smooth  the face-on line maps smoothed over one z-layer step
+            along r only
             (see smooth_faceon): MOCASSIN's uniform Cartesian cells turn
             the smoothly flaring, grazingly lit disk surface into a
             staircase, and the photons bunch on the risers, which shows
@@ -243,32 +244,43 @@ def step_width(d):
 
 
 def smooth_faceon(d, maps, dr):
-    """Average each face-on map with a Gaussian of sigma dr/2 in radius
-    (dr = one staircase period; a box of width dr spans only ~3 pixels
-    and leaves ~3x more ring residual) and of one pixel in the azimuthal
-    direction, using only gas columns. Line
-    surface brightness is a plain (area) average; x and Te keep their
-    column n_H weighting. N_H is left as is: the column through the
-    whole disk has no staircase."""
+    """Smooth the line maps along the radius only, with a Gaussian of
+    sigma dr/2 (dr = one staircase period): each pixel averages bilinear
+    samples of the map along its own radial line, from gas columns only,
+    so the azimuthal structure (the spiral arm's edges along r) keeps
+    the pixel resolution; a Gaussian of half a pixel across the line
+    keeps the Monte Carlo noise of single pixels from streaking along r. The rings are faint in Te, the ion fractions
+    and N_H, which are left as they are."""
+    from scipy.ndimage import map_coordinates
     x, y, _ = (a / d['r0_cm'] for a in d['axes'])
     X, Y = np.meshgrid(x, y, indexing='ij')
-    r, phi = np.hypot(X, Y).ravel(), np.arctan2(Y, X).ravel()
-    gas = np.isfinite(maps['nH']).ravel() & (maps['nH'].ravel() > 0)
-    dphi = np.angle(np.exp(1j * (phi[:, None] - phi[None, :])))
-    sig = np.diff(x).mean()
-    k = (np.exp(-0.5 * ((r[:, None] - r[None, :]) / (dr / 2)) ** 2)
-         * np.exp(-0.5 * (r[:, None] * dphi / sig) ** 2) * gas[None, :])
-    wcol = np.where(d['active'], d['nH'], 0.0).sum(axis=2).ravel()
-    out = {'nH': maps['nH']}
-    for key, m in maps.items():
-        if key == 'nH':
+    r, phi = np.hypot(X, Y), np.arctan2(Y, X)
+    gas = (np.isfinite(maps['nH']) & (maps['nH'] > 0)).astype(float)
+    sig = dr / 2
+    ds = np.arange(-2.5 * sig, 2.5 * sig + 1e-9, (x[1] - x[0]) / 4)
+    dt = (x[1] - x[0]) * np.array([-1, -0.5, 0, 0.5, 1])
+    wt = np.exp(-0.5 * (dt / (0.5 * (x[1] - x[0]))) ** 2)
+    offs = [(wr * wa, s, t) for wr, s in
+            zip(np.exp(-0.5 * (ds / sig) ** 2), ds) for wa, t in zip(wt, dt)]
+
+    def sample(a, s, t):
+        # pixel coordinates at radius r + s along each pixel's own
+        # direction, shifted by t across it
+        px = (r + s) * np.cos(phi) - t * np.sin(phi)
+        py = (r + s) * np.sin(phi) + t * np.cos(phi)
+        return map_coordinates(a, [(px - x[0]) / (x[1] - x[0]),
+                                   (py - y[0]) / (y[1] - y[0])],
+                               order=1, mode='constant')
+
+    out = dict(maps)
+    for key in ('Ha', 'CIV', 'MgII'):
+        if key not in maps:
             continue
-        v = np.nan_to_num(m.ravel())
-        kw = k * wcol[None, :] if key in ('xH', 'xC4', 'xMg2', 'Te') else k
-        norm = kw.sum(axis=1)
-        out[key] = np.where(gas & (norm > 0),
-                            kw @ v / np.where(norm > 0, norm, 1),
-                            np.nan).reshape(m.shape)
+        v = np.nan_to_num(maps[key]) * gas
+        num = sum(w * sample(v, s, t) for w, s, t in offs)
+        den = sum(w * sample(gas, s, t) for w, s, t in offs)
+        out[key] = np.where((gas > 0) & (den > 0),
+                            num / np.where(den > 0, den, 1), np.nan)
     return out
 
 
@@ -372,7 +384,7 @@ def main():
         print(f'  emitting surface: dz_em/dr = {slope:.3f}, '
               f'step width dr = {dr:.3f} r0')
         titles['faceon_smooth'] = (
-            titles['faceon'][:-2] + r';\ radial\ smoothing\ \sigma_r='
+            titles['faceon'][:-2] + r';\ lines\ smoothed\ along\ r,\ \sigma_r='
             + f'{dr / 2:.2f}' + r'\,r_0)$')
     for view in ('faceon', 'midplane', 'vertical'):
         maps, h, v, labels = view_maps(d, view)

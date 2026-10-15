@@ -21,13 +21,18 @@ Views (one figure each):
             fractions and Te n_H-weighted along z; column density N_H
   midplane  z = 0 slice
   vertical  y = 0 slice (x-z plane through the lamp)
+  faceon_smooth  the face-on maps averaged over one z-layer step in r
+            (see smooth_faceon): MOCASSIN's uniform Cartesian cells turn
+            the smoothly flaring, grazingly lit disk surface into a
+            staircase, and the photons bunch on the risers, which shows
+            as rings spaced by one step, dr = dz / (dz_front/dr)
 Panels: Te, x(H+), x(C3+), x(Mg+) / n_H (N_H face-on), H alpha, C IV,
 Mg II.
 
 Also prints a consistency check of the summed plot.out lines against
 the volume-integrated totals in output/lineFlux.out.
 
-Outputs: <run>/plots/moc_maps_{faceon,midplane,vertical}.png
+Outputs: <run>/plots/moc_maps_{faceon,faceon_smooth,midplane,vertical}.png
 Run:  python3 -m transient.moc_maps [--run /data2/jhuang/runs/mocassin/moc_coarse]
 """
 
@@ -222,6 +227,50 @@ def view_maps(d, view):
     return out, h, v_, labels
 
 
+def step_width(d):
+    """Radial width of one z-layer step of the emitting surface, in r0:
+    the cell height over the slope of the H alpha-weighted emission
+    height z_em(r) (observer side, least squares through all columns)."""
+    x, y, z = (a / d['r0_cm'] for a in d['axes'])
+    up = z > 0
+    ha = np.where(d['active'], d['lines']['Ha'], 0.0)[..., up]
+    s = ha.sum(axis=2)
+    m = s > 0
+    zem = (ha * z[up]).sum(axis=2)[m] / s[m]
+    r = np.hypot(*np.meshgrid(x, y, indexing='ij'))[m]
+    slope = np.polyfit(r, zem, 1, w=np.sqrt(s[m]))[0]
+    return np.diff(z).mean() / slope, slope
+
+
+def smooth_faceon(d, maps, dr):
+    """Average each face-on map over a box of width dr in radius (one
+    staircase period, which removes the rings) and a Gaussian of one
+    pixel in the azimuthal direction, using only gas columns. Line
+    surface brightness is a plain (area) average; x and Te keep their
+    column n_H weighting. N_H is left as is: the column through the
+    whole disk has no staircase."""
+    x, y, _ = (a / d['r0_cm'] for a in d['axes'])
+    X, Y = np.meshgrid(x, y, indexing='ij')
+    r, phi = np.hypot(X, Y).ravel(), np.arctan2(Y, X).ravel()
+    gas = np.isfinite(maps['nH']).ravel() & (maps['nH'].ravel() > 0)
+    dphi = np.angle(np.exp(1j * (phi[:, None] - phi[None, :])))
+    sig = np.diff(x).mean()
+    k = ((np.abs(r[:, None] - r[None, :]) < dr / 2)
+         * np.exp(-0.5 * (r[:, None] * dphi / sig) ** 2) * gas[None, :])
+    wcol = np.where(d['active'], d['nH'], 0.0).sum(axis=2).ravel()
+    out = {'nH': maps['nH']}
+    for key, m in maps.items():
+        if key == 'nH':
+            continue
+        v = np.nan_to_num(m.ravel())
+        kw = k * wcol[None, :] if key in ('xH', 'xC4', 'xMg2', 'Te') else k
+        norm = kw.sum(axis=1)
+        out[key] = np.where(gas & (norm > 0),
+                            kw @ v / np.where(norm > 0, norm, 1),
+                            np.nan).reshape(m.shape)
+    return out
+
+
 def add_colorbar(pc, ax):
     """Colorbar with exactly the height of the parent axes (same as
     transient.sim_spectrum.add_colorbar, which cannot be imported on the
@@ -317,11 +366,23 @@ def main():
     titles = {'faceon': r'$\rm face\mbox{-}on\ (lines:\ observer\ side\ z>0;\ x,\ T_e:\ n_H\mbox{-}weighted)$',
               'midplane': r'$\rm midplane\ slice\ (z=0)$',
               'vertical': r'$\rm vertical\ slice\ (y=0)$'}
+    if 'lines' in d:
+        dr, slope = step_width(d)
+        print(f'  emitting surface: dz_em/dr = {slope:.3f}, '
+              f'step width dr = {dr:.3f} r0')
+        titles['faceon_smooth'] = (
+            titles['faceon'][:-2] + r';\ smoothed\ over\ \Delta r='
+            + f'{dr:.2f}' + r'\,r_0)$')
     for view in ('faceon', 'midplane', 'vertical'):
         maps, h, v, labels = view_maps(d, view)
         path = os.path.join(pdir, f'moc_maps_{view}.png')
         plot_view(maps, h, v, labels, titles[view], path, view)
         print(f'  wrote {path}')
+        if view == 'faceon' and 'faceon_smooth' in titles:
+            path = os.path.join(pdir, 'moc_maps_faceon_smooth.png')
+            plot_view(smooth_faceon(d, maps, dr), h, v, labels,
+                      titles['faceon_smooth'], path, view)
+            print(f'  wrote {path}')
 
 
 if __name__ == '__main__':

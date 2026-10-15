@@ -344,7 +344,13 @@ def plot_view(maps, h, v, labels, title, path, view):
                                                        np.nanmax(m)),
                                cmap='viridis')
         else:
-            m = np.where(m > 0, m, np.nan)
+            # cells with gas but (near) zero emission get the bottom
+            # colour (cold neutral gas underflows to exactly 0 in
+            # MOCASSIN's single precision); white is left for no gas
+            # and the masked black cells, as in the other panels
+            gas = np.isfinite(maps['nH'].T) & (maps['nH'].T > 0)
+            m = np.where(gas, np.maximum(np.nan_to_num(m), lnorm.vmin),
+                         np.nan)
             im = ax.pcolormesh(he, ve, m, norm=lnorm, cmap='magma')
         ax.set_aspect('equal')
         ax.set_title(lab)

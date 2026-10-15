@@ -50,7 +50,8 @@ plt.rcParams['text.latex.preamble'] = r'\usepackage{amsmath} \usepackage{bm} \bo
 CONFIG = dict(
     R0_LD=2.0,            # r = 1 in light days (star's orbital radius)
     MBH_MSUN=1.0e7,       # central black-hole mass (sets v0, t0)
-    NMID_CM3=1.0e10,      # midplane phi-mean n_H at r = 1  [cm^-3]
+    NMID_CM3=10 ** 11.5,  # midplane phi-mean n_H at r = 1 [cm^-3]; 11.5 keeps
+                          # every ray density in the Cloudy grid at 10% Edd
     TMID_K=3000.0,        # midplane T anchor at r = 1 ('rescaled' mode) [K]
     TEMP_MODE='rescaled',  # 'rescaled' | 'eos'
     X_ION=1.0,            # ionized fraction (v1: uniform; Cloudy later)

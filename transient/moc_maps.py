@@ -21,7 +21,7 @@ Views (one figure each):
             fractions and Te n_H-weighted along z; column density N_H
   midplane  z = 0 slice
   vertical  y = 0 slice (x-z plane through the lamp)
-  faceon_smooth  the face-on maps averaged over one z-layer step in r
+  faceon_smooth  the face-on maps smoothed over one z-layer step in r
             (see smooth_faceon): MOCASSIN's uniform Cartesian cells turn
             the smoothly flaring, grazingly lit disk surface into a
             staircase, and the photons bunch on the risers, which shows
@@ -243,9 +243,10 @@ def step_width(d):
 
 
 def smooth_faceon(d, maps, dr):
-    """Average each face-on map over a box of width dr in radius (one
-    staircase period, which removes the rings) and a Gaussian of one
-    pixel in the azimuthal direction, using only gas columns. Line
+    """Average each face-on map with a Gaussian of sigma dr/2 in radius
+    (dr = one staircase period; a box of width dr spans only ~3 pixels
+    and leaves ~3x more ring residual) and of one pixel in the azimuthal
+    direction, using only gas columns. Line
     surface brightness is a plain (area) average; x and Te keep their
     column n_H weighting. N_H is left as is: the column through the
     whole disk has no staircase."""
@@ -255,7 +256,7 @@ def smooth_faceon(d, maps, dr):
     gas = np.isfinite(maps['nH']).ravel() & (maps['nH'].ravel() > 0)
     dphi = np.angle(np.exp(1j * (phi[:, None] - phi[None, :])))
     sig = np.diff(x).mean()
-    k = ((np.abs(r[:, None] - r[None, :]) < dr / 2)
+    k = (np.exp(-0.5 * ((r[:, None] - r[None, :]) / (dr / 2)) ** 2)
          * np.exp(-0.5 * (r[:, None] * dphi / sig) ** 2) * gas[None, :])
     wcol = np.where(d['active'], d['nH'], 0.0).sum(axis=2).ravel()
     out = {'nH': maps['nH']}
@@ -371,8 +372,8 @@ def main():
         print(f'  emitting surface: dz_em/dr = {slope:.3f}, '
               f'step width dr = {dr:.3f} r0')
         titles['faceon_smooth'] = (
-            titles['faceon'][:-2] + r';\ smoothed\ over\ \Delta r='
-            + f'{dr:.2f}' + r'\,r_0)$')
+            titles['faceon'][:-2] + r';\ radial\ smoothing\ \sigma_r='
+            + f'{dr / 2:.2f}' + r'\,r_0)$')
     for view in ('faceon', 'midplane', 'vertical'):
         maps, h, v, labels = view_maps(d, view)
         path = os.path.join(pdir, f'moc_maps_{view}.png')

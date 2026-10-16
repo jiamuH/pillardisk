@@ -100,6 +100,8 @@ C  4  1548.19A
 C  4  1550.77A
 Mg 2  2795.53A
 Mg 2  2802.71A
+He 2  1640.41A
+He 2  4685.68A
 end of lines
 '''
 
@@ -223,11 +225,15 @@ def read_conA(path):
 def plot_map(out, iph):
     """Meridional maps at phi index iph from the finished rays: the light
     each SEG-long stretch of a ray emits (sum 4 pi j dl [erg/s per cm^2 of
-    ray cross-section]) for H alpha, Mg II, C IV, one panel and colour
-    scale each (MAP_DEX decades below the line's largest stretch), plus an
-    RGB composite (R = H alpha, G = Mg II, B = C IV) whose hue is the
-    local balance of the three lines (each relative to its own maximum,
-    over RGB_DEX decades) and whose opacity is the brightness. Zoom on the inner rim in
+    ray cross-section]) for H alpha, He II 1640, C IV, Mg II, one panel
+    and colour scale each (MAP_DEX decades below the line's largest
+    stretch), plus an RGB composite of the three ionization zones (R = Mg
+    II, G = C IV, B = He II; no hydrogen, which forms throughout the
+    ionized gas and reddens everything) whose hue is the local balance of
+    the three lines (each relative to its own maximum, over RGB_DEX
+    decades) and whose opacity is the brightness. Rays run before He II
+    was added to the decks lack it: left out of the He II panel and the
+    composite. Zoom on the inner rim in
     every panel; the sim's n_H in grey underneath."""
     import matplotlib
     matplotlib.use('Agg')
@@ -250,10 +256,13 @@ def plot_map(out, iph):
     sim = load_sim(DUMP)
     phys = to_physical(sim, CONFIG)
     r0 = CONFIG['R0_LD'] * LD_CM
+    # .ems columns: depth, Ha, Hb, C IV 1548, 1551, Mg II 2796, 2803,
+    # He II 1640, 4686 (the last two only in decks written after 2026-10-16)
     lines = [((1,), r'$\rm H\alpha$', 'Reds'),
-             ((5, 6), r'$\rm Mg\,II$', 'Greens'),
-             ((3, 4), r'$\rm C\,IV$', 'Blues')]
-    pts = []                                  # (R, z, L_Ha, L_MgII, L_CIV)
+             ((7,), r'$\rm He\,II\,1640$', 'Purples'),
+             ((3, 4), r'$\rm C\,IV$', 'Blues'),
+             ((5, 6), r'$\rm Mg\,II$', 'Greens')]
+    pts = []                        # (R, z, L_Ha, L_HeII, L_CIV, L_MgII)
     for n in names:
         e = np.loadtxt(os.path.join(rdir, n + '.ems'))
         th = sim['th'][int(n[-2:])]
@@ -261,15 +270,20 @@ def plot_map(out, iph):
         ib = (e[:, 0] / r0 // SEG).astype(int)
         nb = ib.max() + 1
         sg = np.stack([np.bincount(ib, e[:, list(c)].sum(axis=1) * dd, nb)
+                       if e.shape[1] > max(c) else np.full(nb, np.nan)
                        for c, _, _ in lines], axis=1)
         rr = sim['rf'][0] + (np.arange(nb) + 0.5) * SEG
         pts.append(np.column_stack([rr * np.sin(th), rr * np.cos(th), sg]))
     pts = np.vstack(pts)
-    lmax = pts[:, 2:].max(axis=0)
+    with np.errstate(invalid='ignore'):
+        lmax = np.nanmax(np.where(np.isfinite(pts[:, 2:]), pts[:, 2:],
+                                  -np.inf), axis=0)
+    has_he = np.isfinite(pts[:, 3])
     R, T = np.meshgrid(sim['rf'], sim['thf'])
     nup = int((sim['th'] <= np.pi / 2).sum())
     X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
-    fig, axs = plt.subplots(2, 2, figsize=(22, 10.5))
+    fig, axs = plt.subplots(2, 3, figsize=(32, 10.5))
+    axs[1, 2].set_visible(False)
 
     # light, opaque grey for the density underneath (alpha < 1 draws the
     # cell edges as seams)
@@ -296,7 +310,13 @@ def plot_map(out, iph):
     for k, (ax, (_, lab, cm)) in enumerate(zip(axs.ravel(), lines)):
         z = base(ax)
         v = pts[:, 2 + k]
-        m = v > lmax[k] * 10 ** -MAP_DEX
+        if not np.isfinite(v).any() or lmax[k] <= 0:
+            ax.text(0.3, 0.12, r'$\rm not~saved~for~these~rays$',
+                    transform=ax.transAxes, ha='center', fontsize=16)
+            ax.set_title(lab, fontsize=16)
+            continue
+        with np.errstate(invalid='ignore'):
+            m = v > lmax[k] * 10 ** -MAP_DEX
         o = np.argsort(v[m])
         norm = LogNorm(lmax[k] * 10 ** -MAP_DEX, lmax[k])
         for x, sz in ((ax, 40), (z, 90)):
@@ -310,13 +330,17 @@ def plot_map(out, iph):
             fontsize=15)
     ax = axs[1, 1]
     z = base(ax)
+    if not has_he.any():
+        ax.text(0.3, 0.12, r'$\rm no~He\,II~yet~for~these~rays$',
+                transform=ax.transAxes, ha='center', fontsize=16)
     # hue from the local balance of the three lines (each normalized to
     # its own maximum, then relative to the point's strongest one, over
     # RGB_DEX); opacity from that strongest one over MAP_DEX - so every
     # emitting stretch shows, coloured by which line dominates it
-    x = pts[:, 2:] / lmax
+    # R = Mg II, G = C IV, B = He II (columns 5, 4, 3 of pts)
+    x = np.nan_to_num(pts[:, [5, 4, 3]] / lmax[[3, 2, 1]])
     xm = x.max(axis=1)
-    m = xm > 10 ** -MAP_DEX
+    m = (xm > 10 ** -MAP_DEX) & has_he
     rgb = np.clip(1 + np.log10(x[m] / xm[m, None] + 1e-300) / RGB_DEX, 0, 1)
     al = np.clip(1 + np.log10(xm[m]) / MAP_DEX, 0.15, 1)
     o = np.argsort(al)
@@ -324,15 +348,15 @@ def plot_map(out, iph):
     for xa, sz in ((ax, 40), (z, 90)):
         xa.scatter(pts[m, 0][o], pts[m, 1][o], c=cols, s=sz, marker='s',
                    edgecolors='none', zorder=5)
-    for i, (_, lab, cm) in enumerate(lines):
-        ax.text(0.03, 0.95 - 0.09 * i, lab,
-                color=('crimson', 'seagreen', 'royalblue')[i],
+    for i, (k, c) in enumerate(((3, 'crimson'), (2, 'seagreen'),
+                                (1, 'royalblue'))):
+        ax.text(0.03, 0.95 - 0.09 * i, lines[k][1], color=c,
                 transform=ax.transAxes, va='top', fontsize=16)
     ax.text(0.03, 0.62, rf'$\rm hue:~line~balance~({RGB_DEX:g}~dex)$',
             transform=ax.transAxes, va='top', fontsize=14)
     make_axes_locatable(ax).append_axes('right', size='2.5%',
                                         pad=0.08).set_visible(False)
-    for ax in axs[1]:
+    for ax in list(axs[1, :2]) + [axs[0, 2]]:
         ax.set_xlabel(r'$R\,[r_0]$')
     for ax in axs[:, 0]:
         ax.set_ylabel(r'$z\,[r_0]$')

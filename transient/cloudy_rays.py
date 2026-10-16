@@ -263,11 +263,24 @@ def plot_rays(out, iph, maponly=False):
     lines = [((1,), 'crimson', r'$\rm H\alpha$'),
              ((5, 6), 'seagreen', r'$\rm Mg\,II$'),
              ((3, 4), 'royalblue', r'$\rm C\,IV$')]
-    # RGB code of each ray point: R = H alpha, G = Mg II, B = C IV, each
-    # line's emissivity as log over RGB_DEX below its maximum over all the
-    # plotted rays; opacity = the brightest channel, so non-emitting gas
-    # (the hot, thin layers) is not drawn
-    RGB_DEX = 4.0
+    # RGB code along each ray: R = H alpha, G = Mg II, B = C IV, from the
+    # light each SEG-long stretch of the ray emits (sum of 4 pi j dl, erg/s
+    # per cm^2 of ray cross-section), each line as log over RGB_DEX below
+    # its largest stretch over all the plotted rays; opacity = the
+    # brightest channel. (Colouring by 4 pi j itself showed only dense thin
+    # skins: a ray through 1e9-1e10 cm^-3 gas emits as much C IV as the
+    # rim, spread over ~0.1 r0 at 1e-4 the emissivity, and only the Mg II
+    # spike at its front passed.)
+    RGB_DEX, SEG = 4.0, 0.004
+    segs = {}
+    for n in names:
+        e = np.loadtxt(os.path.join(rdir, n + '.ems'))
+        dd = np.gradient(e[:, 0])
+        ib = (e[:, 0] / r0 // SEG).astype(int)
+        nb = ib.max() + 1
+        segs[n] = np.stack([np.bincount(ib, e[:, list(col)].sum(axis=1) * dd,
+                                        nb) for col, _, _ in lines], axis=1)
+    smax = [max(v[:, k].max() for v in segs.values()) for k in range(3)]
     # zoom on the inner rim, where the dense rays emit
     axz = ax.inset_axes([0.6, 0.38, 0.38, 0.58])
     axz.pcolormesh((R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1],
@@ -278,9 +291,6 @@ def plot_rays(out, iph, maponly=False):
     axz.set_aspect('equal')
     axz.tick_params(which='both', direction='in', labelsize=10)
     ax.indicate_inset_zoom(axz, edgecolor='purple')
-    allems = {n: np.loadtxt(os.path.join(rdir, n + '.ems')) for n in names}
-    jmax = [max(e[:, list(col)].sum(axis=1).max() for e in allems.values())
-            for col, _, _ in lines]
     for k, name in enumerate(names):
         ith = int(name[-2:])
         th = sim['th'][ith]
@@ -291,18 +301,18 @@ def plot_rays(out, iph, maponly=False):
         ax.plot([sim['rf'][0] * np.sin(th), r_end * np.sin(th)],
                 [sim['rf'][0] * np.cos(th), r_end * np.cos(th)], '-',
                 color='purple', lw=0.8)
-        e = allems[name]
-        rgb = np.stack([np.clip(1 + np.log10(
-            e[:, list(col)].sum(axis=1) / jm + 1e-300) / RGB_DEX, 0, 1)
-            for (col, _, _), jm in zip(lines, jmax)], axis=1)
+        sg = segs[name]
+        rgb = np.stack([np.clip(1 + np.log10(sg[:, k] / smax[k] + 1e-300)
+                                / RGB_DEX, 0, 1) for k in range(3)], axis=1)
         alpha = rgb.max(axis=1)
         m = alpha > 0
-        rr = (sim['rf'][0] * r0 + e[m, 0]) / r0
+        rr = sim['rf'][0] + (np.nonzero(m)[0] + 0.5) * SEG
         o = np.argsort(alpha[m])                  # brightest on top
         cols = np.column_stack([rgb[m][o] / alpha[m][o, None], alpha[m][o]])
         for x in (ax, axz):
-            x.scatter((rr * np.sin(th))[o], (rr * np.cos(th))[o], s=90,
-                      c=cols, edgecolors='none', zorder=5)
+            x.scatter((rr * np.sin(th))[o], (rr * np.cos(th))[o],
+                      s=40 if x is ax else 90, marker='s', c=cols,
+                      edgecolors='none', zorder=5)
         axz.plot([sim['rf'][0] * np.sin(th), r_end * np.sin(th)],
                  [sim['rf'][0] * np.cos(th), r_end * np.cos(th)], '-',
                  color='purple', lw=0.8)

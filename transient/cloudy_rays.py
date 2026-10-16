@@ -15,7 +15,7 @@ pipeline uses):
     a gradual density rise along the radial ray, which Cloudy resolves
   - dlaw table radius = the sim's log n_H at the cell centres (log-log
     interpolation), padded past both ends
-  - stop column density STOP_COL (as the grid's maximum)
+  - stop neutral column density STOP_COL (see there)
 Shadowing is built in: each ray carries all the gas between the lamp and
 any depth. Still 1D: no diffuse light exchanged between rays.
 
@@ -55,7 +55,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DUMP = os.path.join(HERE, 'data', 'sim', 'disk.out1.00012.athdf')
 CLOUDY_DIR = '/data2/jhuang/repos/cloudy'
 EXE = os.path.join(CLOUDY_DIR, 'source', 'cloudy.exe')
-STOP_COL = 24.5           # log N_H [cm^-2], the arm_column2 grid maximum
+# stop at a NEUTRAL column (log N(H0) [cm^-2]) behind the front: a total
+# column counted from the lamp (the grid's 24.5) is mostly used up by the
+# hot ionized gas a ray crosses first (ray 16 stopped 96% ionized, just in
+# front of the arm); the grid's dense slabs ended with N(H0) ~ 1e24
+STOP_COL = 24.0
 WMIN, WMAX = 300.0, 12000.0
 
 DECK = '''title pillardisk lamp ray {name} (phi {ph:.4f}, theta {th:.4f})
@@ -70,7 +74,7 @@ radius {logr_in:.5f} {logr_out:.5f}
 dlaw table radius
 {dlaw}end of dlaw
 turbulence = 100 km/s
-stop column density {stop_col:.2f}
+stop neutral column density {stop_col:.2f}
 stop temperature 3e3 K
 set continuum resolution 0.2
 print last
@@ -233,7 +237,15 @@ def plot_rays(out, iph):
         ems = np.loadtxt(os.path.join(rdir, name + '.ems'))
         a = fig.add_subplot(gs[1, k])
         b = fig.add_subplot(gs[2, k], sharex=a)
-        d = ems[:, 0]
+        # depth from d0, where the lines start (the summed emissivity first
+        # exceeds 1e-4 of its peak): a ray that first crosses hot thin gas
+        # (ray 16: 1.5e15 cm) emits in a layer that a log axis from the
+        # inner face squeezes into its last pixels
+        tot = sum(ems[:, list(col)].sum(axis=1) for col, _, _ in lines)
+        i0 = max(int(np.argmax(tot > 1e-4 * tot.max())) - 1, 0)
+        d0 = ems[i0, 0] if i0 > 0 else 0.0
+        d = ems[:, 0] - d0
+        depth = depth - d0
         for col, c, lab in lines:
             a.plot(d, ems[:, list(col)].sum(axis=1), '-', color=c, lw=2,
                    label=lab)
@@ -246,11 +258,15 @@ def plot_rays(out, iph):
         if k == 0:
             a.set_ylabel(r'$4\pi j\,[\rm erg\,s^{-1}\,cm^{-3}]$')
             a.legend(fontsize=13, frameon=False, loc='lower left')
-        a.set_title(rf'$\rm ray~{ith}:~\theta={np.degrees(th):.1f}^\circ$',
-                    fontsize=16)
+        d0txt = (rf',~d_0={d0:.2e}'.replace('e+', r'\times10^{') + '}\,cm'
+                 if d0 > 0 else '')
+        a.set_title(rf'$\rm ray~{ith}:~\theta={np.degrees(th):.1f}^\circ'
+                    rf'{d0txt}$', fontsize=15)
+        m = d > 0
+        a.set_xlim(d[m].min(), d[m].max())
         b.plot(depth, nh, '-', color='0.3', lw=2)
         b.set_yscale('log')
-        b.set_xlabel(r'$\rm depth\,[cm]$')
+        b.set_xlabel(r'$\rm depth - d_0\,[cm]$')
         c = b.twinx()
         c.plot(depth, Te, '-', color='darkorange', lw=2)
         c.set_yscale('log')

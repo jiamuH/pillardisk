@@ -30,6 +30,9 @@ Steps (all with --out DIR):
   run      run the decks in parallel (--ncpu), skipping finished rays,
            coarse to fine in phi (every 16th column first, then 8th, ...)
   extract  collect the spectra into rays.npz
+  spectrum observed spectrum and line profiles at INCL_DEG from the
+           finished rays (plots/spectrum.png, line_profiles.png,
+           spectrum.npz)
   faceon   face-on H alpha, Mg II, C IV surface brightness maps from the
            finished rays (plots/faceon_lines.png)
   plot     finished rays of one phi column (--iph): their paths over the
@@ -805,10 +808,102 @@ def faceon_map(out, dph):
           f"({nfull} complete)")
 
 
+def spectrum_plots(out, dph):
+    """Observed spectrum at CONFIG['INCL_DEG'] from the finished in-plane
+    rays (ray_spectra on the rays' own wavelength grid): plots/spectrum.png
+    (reprocessed lines + continuum, and lines alone, lambda L_lambda),
+    plots/line_profiles.png (H alpha, H beta, C IV, Mg II, He II 1640 vs
+    velocity) and spectrum.npz (wave, line, cont, line_all, coverage)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import ScalarFormatter, NullFormatter
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    rdir = os.path.join(out, 'rays')
+    first = next(n for n in sorted(glob.glob(os.path.join(rdir, '*.conA')))
+                 if finished(rdir, os.path.basename(n)[:-5]))
+    wave = read_conA(first)[:, 0]
+    R = ray_spectra(out, sim, phys, CONFIG, wave, dph)
+    i_deg = CONFIG['INCL_DEG']
+    np.savez(os.path.join(out, 'spectrum.npz'), wave=wave, line=R['line'],
+             cont=R['cont'], line_all=R['line_all'], cover=R['cover'],
+             ncol=R['ncol'], incl_deg=i_deg)
+    tag = (rf'{R["ncol"]}~\phi~columns,~{100 * R["cover"]:.0f}\%~of~\phi'
+           + ('' if R['cover'] > 0.999 else r'~(incomplete)'))
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(12.5, 7))
+    ax.plot(wave, wave * (R['line'] + R['cont']), '-', color='k', lw=2,
+            drawstyle='steps-mid', label=r'$\rm reprocessed~(lines + continuum)$')
+    ax.plot(wave, wave * R['cont'], '-', color='darkorange', lw=1.8,
+            label=r'$\rm diffuse~continuum$')
+    ax.plot(wave, wave * np.where(R['line'] > 0, R['line'], np.nan), '-',
+            color='royalblue', lw=1.4, drawstyle='steps-mid',
+            label=r'$\rm lines$')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlim(1000, 11000)
+    sel = (wave > 1000) & (wave < 11000)
+    top = np.nanmax((wave * (R['line'] + R['cont']))[sel])
+    ax.set_ylim(top / 3e3, top * 2)
+    ax.set_xticks([1000, 2000, 3000, 5000, 10000])
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlabel(r'$\rm wavelength~[\AA]$')
+    ax.set_ylabel(r'$\lambda L_\lambda~[\rm erg~s^{-1}]$')
+    ax.set_title(rf'$\rm Cloudy~per~ray,~i={i_deg:.0f}^\circ;~{tag}$',
+                 fontsize=16)
+    ax.legend(fontsize=13, frameon=False, loc='upper right')
+    ax.tick_params(which='both', direction='in', top=True, right=True)
+    fig.savefig(os.path.join(pdir, 'spectrum.png'), dpi=140,
+                bbox_inches='tight')
+    plt.close(fig)
+
+    panels = [(r'H\alpha', 6562.80), (r'H\beta', 4861.33),
+              (r'C\,IV\,1549', 1548.19), (r'Mg\,II\,2798', 2795.53),
+              (r'He\,II\,1640', 1640.41)]
+    fig, axs = plt.subplots(1, len(panels), figsize=(5 * len(panels), 4.8))
+    dl = np.gradient(wave)
+    print(f"Cloudy per ray, i = {i_deg:.0f}: {R['ncol']} columns, "
+          f"{100 * R['cover']:.0f}% of phi; |v| < 6500 km/s:")
+    for k, (ax, (t, l0)) in enumerate(zip(axs, panels)):
+        v = (wave - l0) / l0 * C_KMS
+        w = np.abs(v) < 10000
+        ax.plot(v[w], R['line'][w], '-', color='royalblue', lw=2,
+                drawstyle='steps-mid')
+        ax.axvline(0, color='k', ls=':', lw=1)
+        ax.set_title(rf'$\rm {t}$')
+        ax.set_xlabel(r'$v~[\rm km~s^{-1}]$')
+        if k == 0:
+            ax.set_ylabel(r'$L_\lambda~[\rm erg~s^{-1}~\AA^{-1}]$')
+        ax.set_xlim(-10000, 10000)
+        ax.set_ylim(0, None)
+        ax.tick_params(which='both', direction='in', top=True, right=True)
+        wi = np.abs(v) < 6500
+        print(f"  {t.replace(chr(92) + ',', ' ').replace(chr(92), ''):14s}"
+              f" observed {np.sum((R['line'] * dl)[wi]):.2e}  all-sky "
+              f"{np.sum((R['line_all'] * dl)[wi]):.2e} erg/s")
+    fig.suptitle(rf'$\rm Cloudy~per~ray~line~profiles,~i={i_deg:.0f}'
+                 rf'^\circ;~{tag}$', fontsize=17)
+    fig.tight_layout()
+    fig.savefig(os.path.join(pdir, 'line_profiles.png'), dpi=140,
+                bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {pdir}/spectrum.png, line_profiles.png and "
+          f"{out}/spectrum.npz")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
-                                     'faceon'])
+                                     'faceon', 'spectrum'])
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
     ap.add_argument('--maponly', action='store_true',
@@ -888,6 +983,9 @@ def main():
                           f"elapsed {el / 60:.1f} min, eta "
                           f"{el / done * (len(names) - done) / 60:.0f} min",
                           flush=True)
+
+    elif a.step == 'spectrum':
+        spectrum_plots(a.out, a.dph)
 
     elif a.step == 'faceon':
         faceon_map(a.out, a.dph)

@@ -93,6 +93,8 @@ dlaw table radius
 turbulence = 100 km/s
 stop neutral column density {stop_col:.2f}
 stop temperature 3e3 K
+# default zone limit 1400 stopped ~1% of rays (long mid-latitude paths)
+set nend 4000
 set continuum resolution 0.2
 print last
 save continuum "{name}.conA" units Angstroms last

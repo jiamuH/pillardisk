@@ -34,6 +34,16 @@ Steps (all with --out DIR):
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
            blue, as the RGB line maps) with n_H and T_e
 
+Elevated lamp (write --hlamp H, light days): the lamp sits on the axis at
+z = H, so the rays are no longer the sim's columns. NALPHA straight rays
+per phi, uniform in the polar angle alpha from the lamp between the outer
+top corner of the gas and the bottom of the inner rim, are traced through
+the grid (log n_H trilinear in phi, theta, r, step STEP r0); each starts
+where it first enters the gas (inner rim or upper surface), stretches
+outside the grid get n_H = N_FLOOR, and phi(H) = Q_ION / 4 pi d_in^2 at
+the entry distance d_in from the lamp. Names ray_p<iph>_a<ia>; the
+geometry (alpha, d_in, the ray's solid angle) goes to rays_meta.npz.
+
 Run:  python3 -m transient.cloudy_rays write --out /data2/jhuang/runs/cloudy_rays/edd10
       python3 -m transient.cloudy_rays run --out ... --ncpu 90
       python3 -m transient.cloudy_rays extract --out ...
@@ -114,6 +124,64 @@ def ray_decks(sim, phys, dph):
                 logr_in=np.log10(rf[0]), logr_out=np.log10(rf[-1]),
                 dlaw=dlaw, stop_col=STOP_COL)
             out.append((name, iph, ith, rf[0], deck))
+    return out
+
+
+NALPHA = 40          # elevated lamp: rays per phi
+STEP = 0.003         # ray sampling step [r0] (cells: dr 0.012, r dth 0.010)
+N_FLOOR = 1e2        # n_H [cm^-3] where a ray runs outside the gas grid
+
+
+def traced_decks(sim, phys, dph, h):
+    """Decks for an elevated lamp at z = h [r0] on the axis: (name, iph,
+    ia, alpha, d_in [cm], dOmega [sr], deck)."""
+    from scipy.interpolate import RegularGridInterpolator
+    r0 = CONFIG['R0_LD'] * LD_CM
+    r, th, ph = sim['r'], sim['th'], sim['ph']
+    rf, thf = sim['rf'], sim['thf']
+    logn = np.log10(phys['nH'])                       # (ph, th, r)
+    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    lnp = np.concatenate([logn[-1:], logn, logn[:1]], axis=0)
+    itp = RegularGridInterpolator((php, th, r), lnp)
+    # alpha range: top outer corner of the gas to the bottom of the rim
+    a_lo = np.arctan2(rf[-1] * np.sin(thf[0]), rf[-1] * np.cos(thf[0]) - h)
+    a_hi = np.arctan2(rf[0] * np.sin(thf[-1]), rf[0] * np.cos(thf[-1]) - h)
+    ae = np.linspace(a_lo, a_hi, NALPHA + 1)
+    alpha = 0.5 * (ae[1:] + ae[:-1])
+    dphi = 2 * np.pi / len(ph) * dph
+    dom = (np.cos(ae[:-1]) - np.cos(ae[1:])) * dphi
+    s = np.arange(STEP, 2 * rf[-1] + h, STEP)          # path from the lamp
+    out = []
+    for iph in range(0, len(ph), dph):
+        for ia, al in enumerate(alpha):
+            x = s * np.sin(al) * np.cos(ph[iph])
+            y = s * np.sin(al) * np.sin(ph[iph])
+            z = h + s * np.cos(al)
+            rr = np.sqrt(x * x + y * y + z * z)
+            tt = np.arccos(z / rr)
+            pp = np.mod(np.arctan2(y, x), 2 * np.pi)
+            inside = ((rr >= rf[0]) & (rr <= rf[-1]) & (tt >= thf[0])
+                      & (tt <= thf[-1]))
+            if not inside.any():
+                continue
+            i0 = np.argmax(inside)
+            i1 = len(s) - np.argmax(inside[::-1])     # past the last inside
+            q = np.column_stack([pp, np.clip(tt, th[0], th[-1]),
+                                 np.clip(rr, r[0], r[-1])])[i0:i1]
+            ln = np.where(inside[i0:i1], itp(q), np.log10(N_FLOOR))
+            d = s[i0:i1] * r0
+            ld = np.log10(d)
+            pts = ([(ld[0] - 0.01, ln[0])] + list(zip(ld, ln))
+                   + [(ld[-1] + 0.01, ln[-1])])
+            dlaw = ''.join(f'continue {u:.7f} {v:.4f}\n' for u, v in pts)
+            name = f'ray_p{iph:03d}_a{ia:02d}'
+            deck = DECK.format(
+                name=name, ph=ph[iph], th=al,
+                logphi=np.log10(Q_ION / (4 * np.pi * d[0] ** 2)),
+                logr_in=ld[0], logr_out=ld[-1], dlaw=dlaw,
+                stop_col=STOP_COL).replace(
+                    'theta', f'alpha from the lamp at z = {h:.3f} r0')
+            out.append((name, iph, ia, al, d[0], dom[ia], deck))
     return out
 
 
@@ -301,13 +369,31 @@ def main():
     ap.add_argument('--dph', type=int, default=2,
                     help='take every dph-th phi (sim has 256)')
     ap.add_argument('--ncpu', type=int, default=90)
+    ap.add_argument('--hlamp', type=float, default=0.0,
+                    help='write: lamp height on the axis [light days]; 0 = '
+                         'lamp at the origin (rays = sim columns)')
     ap.add_argument('--only', type=int, default=0,
                     help='run only the first N decks (timing tests)')
     a = ap.parse_args()
     rdir = os.path.join(a.out, 'rays')
     os.makedirs(rdir, exist_ok=True)
 
-    if a.step == 'write':
+    if a.step == 'write' and a.hlamp > 0:
+        sim = load_sim(DUMP)
+        phys = to_physical(sim, CONFIG)
+        h = a.hlamp / CONFIG['R0_LD']
+        decks = traced_decks(sim, phys, a.dph, h)
+        for d in decks:
+            with open(os.path.join(rdir, d[0] + '.in'), 'w') as fh:
+                fh.write(d[-1])
+        cols = list(zip(*[d[:-1] for d in decks]))
+        np.savez(os.path.join(a.out, 'rays_meta.npz'), name=cols[0],
+                 iph=cols[1], ia=cols[2], alpha=cols[3], d_in=cols[4],
+                 domega=cols[5], hlamp_r0=h)
+        print(f"wrote {len(decks)} decks to {rdir}: lamp at z = {h:.3f} r0 "
+              f"({a.hlamp:g} ld), {NALPHA} rays per phi, every {a.dph}. phi")
+
+    elif a.step == 'write':
         sim = load_sim(DUMP)
         phys = to_physical(sim, CONFIG)
         decks = ray_decks(sim, phys, a.dph)
@@ -344,10 +430,22 @@ def main():
         plot_rays(a.out, a.iph)
 
     else:
-        meta = np.load(os.path.join(a.out, 'rays_meta.npy'))
+        # geometry per ray: elevated lamp (rays_meta.npz) or rays = sim
+        # columns (rays_meta.npy: iph, ith, r_in)
+        mz = os.path.join(a.out, 'rays_meta.npz')
+        if os.path.exists(mz):
+            m = dict(np.load(mz))
+            names = list(m.pop('name'))
+            geo = {k: v for k, v in m.items() if np.ndim(v) == 1}
+            extra = {k: v for k, v in m.items() if np.ndim(v) == 0}
+        else:
+            meta = np.load(os.path.join(a.out, 'rays_meta.npy'))
+            names = [f'ray_p{int(i):03d}_t{int(j):02d}' for i, j, _ in meta]
+            geo = dict(iph=meta[:, 0].astype(int),
+                       ith=meta[:, 1].astype(int), r_in=meta[:, 2])
+            extra = {}
         spec, keep = [], []
-        for k, (iph, ith, r_in) in enumerate(meta):
-            name = f'ray_p{int(iph):03d}_t{int(ith):02d}'
+        for k, name in enumerate(names):
             p = os.path.join(rdir, name + '.conA')
             if not os.path.exists(p):
                 continue
@@ -361,12 +459,12 @@ def main():
         out = os.path.join(a.out, 'rays.npz')
         np.savez_compressed(out, wave=wave, out_cont=S[:, :, 1],
                             refl_cont=S[:, :, 2], refl_line=S[:, :, 3],
-                            out_line=S[:, :, 4], iph=meta[keep, 0].astype(int),
-                            ith=meta[keep, 1].astype(int),
-                            r_in=meta[keep, 2])
-        print(f"saved {out}: {len(keep)}/{len(meta)} rays, "
+                            out_line=S[:, :, 4],
+                            name=np.array(names)[keep],
+                            **{k: np.asarray(v)[keep] for k, v in geo.items()},
+                            **extra)
+        print(f"saved {out}: {len(keep)}/{len(names)} rays, "
               f"{len(wave)} wavelengths")
-
 
 if __name__ == '__main__':
     main()

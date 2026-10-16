@@ -401,6 +401,35 @@ def heii_profile(rdir, name, depth):
     return shape * tot / norm if norm > 0 else np.zeros_like(depth)
 
 
+def ray_geometry(out, sim, dph=2):
+    """Geometry of the rays of a run, lamp at the origin (rays = sim
+    columns, names ray_p<iph>_t<ith>) or elevated (rays_meta.npz, names
+    ray_p<iph>_a<ia>): returns (geo, nexp, h) with geo(name) = (s0 [cm],
+    sin a, cos a, dOmega [sr]) - a point at Cloudy depth d sits at distance
+    s = s0 + d from the lamp, R = s sin a, z = h + s cos a - and nexp[iph]
+    the number of rays the phi column should have."""
+    r0 = CONFIG['R0_LD'] * LD_CM
+    mz = os.path.join(out, 'rays_meta.npz')
+    if os.path.exists(mz):
+        m = np.load(mz)
+        tab = {str(n): (d, np.sin(a), np.cos(a), o) for n, d, a, o in
+               zip(m['name'], m['d_in'], m['alpha'], m['domega'])}
+        nexp = {}
+        for n in tab:
+            nexp[int(n[5:8])] = nexp.get(int(n[5:8]), 0) + 1
+        return tab.__getitem__, nexp, float(m['hlamp_r0'])
+    th, thf, phf = sim['th'], sim['thf'], sim['phf']
+    nph = len(sim['ph'])
+    nup = int((th <= np.pi / 2).sum())
+
+    def geo(name):
+        iph, ith = int(name[5:8]), int(name[-2:])
+        dom = (np.cos(thf[ith]) - np.cos(thf[ith + 1])) * \
+            (phf[min(iph + dph, nph)] - phf[iph])
+        return sim['rf'][0] * r0, np.sin(th[ith]), np.cos(th[ith]), dom
+    return geo, {i: nup for i in range(0, nph, dph)}, 0.0
+
+
 def plot_map(out, iph):
     """Meridional maps at phi index iph from the finished rays: the light
     each SEG-long stretch of a ray emits (sum 4 pi j dl [erg/s per cm^2 of
@@ -426,13 +455,14 @@ def plot_map(out, iph):
     MAP_DEX, RGB_DEX, SEG = 4.0, 1.5, 0.004
     rdir = os.path.join(out, 'rays')
     names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
-        os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
+        os.path.join(rdir, f'ray_p{iph:03d}_[ta]*.ems')))
     names = [n for n in names if finished(rdir, n, lenient=True)]
     if not names:
         raise SystemExit(f'no finished rays at iph = {iph}')
     sim = load_sim(DUMP)
     phys = to_physical(sim, CONFIG)
     r0 = CONFIG['R0_LD'] * LD_CM
+    geo, _, hl = ray_geometry(out, sim)
     # .ems columns: depth, Ha, Hb, C IV 1548, 1551, Mg II 2796, 2803,
     # He II 1640, 4686 (the last two only in decks written after 2026-10-16)
     lines = [((1,), r'$\rm H\alpha$', 'Reds'),
@@ -445,15 +475,15 @@ def plot_map(out, iph):
         if e.shape[1] < 9:                   # older deck: rebuild He II
             he = heii_profile(rdir, n, e[:, 0])
             e = np.column_stack([e, he, np.zeros_like(he)])
-        th = sim['th'][int(n[-2:])]
+        s0, sa, ca, _ = geo(n)
         dd = np.gradient(e[:, 0])
         ib = (e[:, 0] / r0 // SEG).astype(int)
         nb = ib.max() + 1
         sg = np.stack([np.bincount(ib, e[:, list(c)].sum(axis=1) * dd, nb)
                        if e.shape[1] > max(c) else np.full(nb, np.nan)
                        for c, _, _ in lines], axis=1)
-        rr = sim['rf'][0] + (np.arange(nb) + 0.5) * SEG
-        pts.append(np.column_stack([rr * np.sin(th), rr * np.cos(th), sg]))
+        ss = s0 / r0 + (np.arange(nb) + 0.5) * SEG      # from the lamp
+        pts.append(np.column_stack([ss * sa, hl + ss * ca, sg]))
     pts = np.vstack(pts)
     with np.errstate(invalid='ignore'):
         lmax = np.nanmax(np.where(np.isfinite(pts[:, 2:]), pts[:, 2:],
@@ -736,24 +766,26 @@ def faceon_map(out, dph):
     L = np.zeros((len(lines), nph, nr))
     seen = np.zeros(nph, bool)
     nray, ncol = 0, {}
-    for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_t*.out'))):
+    geo, nexp, _ = ray_geometry(out, sim, dph)
+    for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out'))):
         name = os.path.basename(o)[:-4]
         if not finished(rdir, name, lenient=True):
             continue
-        iph, ith = int(name[5:8]), int(name[-2:])
+        iph = int(name[5:8])
         e = np.loadtxt(o[:-4] + '.ems')
         if e.ndim < 2 or len(e) < 2:
             continue
         if e.shape[1] < 9:                   # older deck: rebuild He II
             he = heii_profile(rdir, name, e[:, 0])
             e = np.column_stack([e, he, np.zeros_like(he)])
-        rr = rf[0] + e[:, 0] / r0                      # [r0]
+        s0, sa, _, dom = geo(name)
+        ss = s0 + e[:, 0]                              # [cm] from the lamp
         dd = np.gradient(e[:, 0])                      # [cm]
-        dom = (np.cos(thf[ith]) - np.cos(thf[ith + 1])) * \
-            (phf[min(iph + dph, nph)] - phf[iph])
-        ir = np.clip(np.searchsorted(rf, rr) - 1, 0, nr - 1)
+        # face-on: deposit at the cylindrical radius (Cloudy's intensity
+        # dilutes as 1/s^2 about the lamp, so emission at s counts s^2)
+        ir = np.clip(np.searchsorted(rf, ss * sa / r0) - 1, 0, nr - 1)
         for k, (col, _) in enumerate(lines):
-            w = e[:, list(col)].sum(axis=1) * (rr * r0) ** 2 * dom * dd
+            w = e[:, list(col)].sum(axis=1) * ss ** 2 * dom * dd
             np.add.at(L[k, iph], ir, w)
         seen[iph] = True
         nray += 1
@@ -765,10 +797,9 @@ def faceon_map(out, dph):
     # only complete columns (all upper-hemisphere rays done): a partial
     # one misses whichever rays are still running - often its dense rim
     # rays - and would read as dark, the more so once spread over a gap
-    nup = int((sim['th'] <= np.pi / 2).sum())
     seen[:] = False
     for iph, n in ncol.items():
-        seen[iph] = n == nup
+        seen[iph] = n == nexp.get(iph, -1)
     L[:, ~seen] = 0.0
     cols = np.nonzero(seen)[0]
     for j, iph in enumerate(cols):

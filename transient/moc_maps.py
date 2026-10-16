@@ -276,8 +276,21 @@ def view_maps(d, view):
         for k, v in qty.items():
             out[k] = np.where(a, v[sl], np.nan)
         for k, v in lines.items():
-            out[k] = v[sl]
+            out[k] = np.where(a, v[sl], np.nan)
         out['nH'] = np.where(a, nH[sl], np.nan)
+        # display fill: gas cells masked as failed (black, or Te < TE_FAIL)
+        # get the median of their active 3x3 neighbours in every panel;
+        # the cells Rin emptied (nH = 0) stay blank
+        holes = (nH[sl] > 0) & ~a
+        for jj, ii in zip(*np.nonzero(holes)):
+            nb = a[max(jj - 1, 0):jj + 2, max(ii - 1, 0):ii + 2]
+            if nb.sum() < 3:
+                continue
+            for k in out:
+                blk = out[k][max(jj - 1, 0):jj + 2, max(ii - 1, 0):ii + 2]
+                out[k][jj, ii] = np.median(blk[nb])
+        for k in lines:
+            out[k] = np.nan_to_num(out[k])
     return out, h, v_, labels
 
 

@@ -117,7 +117,9 @@ def photosphere_T(sim, phys, cfg):
 def temperature_maps(sim, phys, cfg, path):
     """Face-on (phi, r) maps: photosphere T (the green thermal curve),
     midplane T (both the rescaled sim T) and the hotspot T_eff
-    (hotspot_thermal), on one colour scale."""
+    (hotspot_thermal), on one colour scale. The hotspot T_eff radiates
+    only the heat in EXCESS of the phi-median at each (r, theta): it adds
+    to the disk (T^4 sum); grey = no excess heat."""
     from matplotlib.colors import LogNorm
     from transient.sim_spectrum import add_colorbar, mark_star
     jm = np.argmin(np.abs(sim['th'] - np.pi / 2))
@@ -131,8 +133,11 @@ def temperature_maps(sim, phys, cfg, path):
     norm = LogNorm(1e3, max(m.max() for m, _ in maps))
     fig, axs = plt.subplots(1, 3, figsize=(21, 6.6))
     for n, (ax, (m, title)) in enumerate(zip(axs, maps)):
-        pc = ax.pcolormesh(X, Y, np.clip(m, 1e3, None), norm=norm,
-                           cmap='inferno', shading='flat', rasterized=True)
+        cmap = plt.get_cmap('inferno').copy()
+        cmap.set_bad('0.8')
+        val = np.where(m > 0, np.clip(m, 1e3, None), np.nan)
+        pc = ax.pcolormesh(X, Y, val, norm=norm, cmap=cmap, shading='flat',
+                           rasterized=True)
         ax.set_aspect('equal')
         ax.set_title(title, fontsize=17)
         ax.set_xlabel(r'$x~[r_0]$', fontsize=16)

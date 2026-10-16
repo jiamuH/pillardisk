@@ -53,7 +53,8 @@ from matplotlib.ticker import ScalarFormatter, NullFormatter  # noqa: E402
 from transient.sim_spectrum import (  # noqa: E402
     load_sim, to_physical, vlos_cube, CONFIG, C_KMS, LD_CM)
 from transient.sim_cloudy_spectrum import load_grid, compute_rays  # noqa: E402
-from transient.sim_full_spectrum import thermal_and_agn, hotspot_thermal  # noqa: E402
+from transient.sim_full_spectrum import (  # noqa: E402
+    thermal_and_agn, hotspot_thermal, temperature_maps)
 from transient.cmi_convert import resample  # noqa: E402
 from transient.moc_convert import grid_half  # noqa: E402
 from transient.moc_maps import load_run, DEFAULT_RUN  # noqa: E402
@@ -385,6 +386,8 @@ def main():
     # ---- profiles ----
     pdir = os.path.join(a.run, 'plots')
     os.makedirs(pdir, exist_ok=True)
+    temperature_maps(sim, phys, CONFIG,
+                     os.path.join(pdir, 'sim_temperature_faceon.png'))
     fig, axs = plt.subplots(1, len(PANELS), figsize=(5.2 * len(PANELS), 5))
     # MOCASSIN all-sky: every active cell, both sides, rest frame
     M_all = {n: d['lines'][n][act].sum() * 1e36 + M_in.get(n, 0.0)

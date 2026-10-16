@@ -221,9 +221,19 @@ def view_maps(d, view):
         zside[np.argmin(np.abs(zc))] = 0.5
         area = np.outer(np.diff(edges(d['axes'][0])),
                         np.diff(edges(d['axes'][1])))       # [cm^2]
+        # emission-measure weights (Peimbert 1967): T0 = <Te> over
+        # n_e n(H+) dV, the temperature of the recombining gas; each ion
+        # fraction over n_e n(ion) dV, the conditions in that ion's own
+        # zone (the abundance cancels). Observer side, as the lines; an
+        # n_H weight only reports the cold neutral interior. Columns
+        # without the ion stay empty.
+        ne = np.where(act, d['Ne'], 0.0) * zside[None, None, :]
+        wts = {'Te': ne * w * qty['xH'], 'xH': ne * w * qty['xH'],
+               'xC4': ne * w * qty['xC4'], 'xMg2': ne * w * qty['xMg2']}
         for k, v in qty.items():
-            out[k] = np.where(wsum > 0, (v * w).sum(axis=2)
-                              / np.where(wsum > 0, wsum, 1), np.nan)
+            ws = wts[k].sum(axis=2)
+            out[k] = np.where(ws > 0, (v * wts[k]).sum(axis=2)
+                              / np.where(ws > 0, ws, 1), np.nan)
         for k, v in lines.items():
             # observer side only (z > 0, plus half the midplane cell): the
             # far side is hidden behind the N_H ~ 1e24-25 cm^-2 midplane,
@@ -366,7 +376,9 @@ def panels(view):
     # face-on: observer-side surface brightness; slices: per-cell L
     line = (r'$S(\rm %s)\,[\rm erg\,s^{-1}\,cm^{-2}]$' if view == 'faceon'
             else r'$L(\rm %s)\,[10^{36}\,\rm erg\,s^{-1}]$')
-    return [('Te', r'$T_e\,[\rm K]$', 'logT'),
+    temp = (r'$T_0({\rm H^+})\,[\rm K]$' if view == 'faceon'
+            else r'$T_e\,[\rm K]$')
+    return [('Te', temp, 'logT'),
             ('xH', r'$x(\rm H^+)$', 'lin01'),
             ('xC4', r'$x(\rm C^{3+})$', 'lin01'),
             ('xMg2', r'$x(\rm Mg^{+})$', 'lin01'),
@@ -395,6 +407,10 @@ def plot_view(maps, h, v, labels, title, path, view):
         m = maps[key].T
         if kind == 'lin01':
             im = ax.pcolormesh(he, ve, m, vmin=0, vmax=1, cmap='viridis')
+        elif kind == 'logT' and view == 'faceon':
+            # T0 of the ionized skin spans ~1-2e4 K: linear, 2-98%
+            lo, hi = np.nanpercentile(m, [2, 98])
+            im = ax.pcolormesh(he, ve, m, vmin=lo, vmax=hi, cmap='inferno')
         elif kind == 'logT':
             im = ax.pcolormesh(he, ve, m, norm=LogNorm(5e2, 1e5),
                                cmap='inferno')
@@ -463,7 +479,7 @@ def main():
         w = taper(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) / d['r0_cm'],
                   {'rf': [R_IN]}, a.taper)
         d['lines'] = {k: v * w for k, v in d['lines'].items()}
-    titles = {'faceon': r'$\rm face\mbox{-}on\ (lines:\ observer\ side\ z>0;\ x,\ T_e:\ n_H\mbox{-}weighted)$',
+    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ T_0,\ x:\ weighted\ by\ n_e\,n_{\rm ion})$',
               'midplane': r'$\rm midplane\ slice\ (z=0)$',
               'vertical': r'$\rm vertical\ slice\ (y=0)$'}
     if 'lines' in d:

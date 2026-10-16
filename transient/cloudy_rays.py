@@ -688,9 +688,9 @@ def faceon_map(out, dph):
     r0 = CONFIG['R0_LD'] * LD_CM
     rf, thf, phf = sim['rf'], sim['thf'], sim['phf']
     nph, nr = len(sim['ph']), len(sim['r'])
-    lines = [((1,), r'$S(\rm H\alpha)$'), ((5, 6), r'$S(\rm Mg\,II)$'),
-             ((3, 4), r'$S(\rm C\,IV)$')]
-    L = np.zeros((3, nph, nr))
+    lines = [((1,), r'$S(\rm H\alpha)$'), ((7,), r'$S(\rm He\,II\,1640)$'),
+             ((3, 4), r'$S(\rm C\,IV)$'), ((5, 6), r'$S(\rm Mg\,II)$')]
+    L = np.zeros((len(lines), nph, nr))
     seen = np.zeros(nph, bool)
     nray, ncol = 0, {}
     for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_t*.out'))):
@@ -701,6 +701,9 @@ def faceon_map(out, dph):
         e = np.loadtxt(o[:-4] + '.ems')
         if e.ndim < 2 or len(e) < 2:
             continue
+        if e.shape[1] < 9:                   # older deck: rebuild He II
+            he = heii_profile(rdir, name, e[:, 0])
+            e = np.column_stack([e, he, np.zeros_like(he)])
         rr = rf[0] + e[:, 0] / r0                      # [r0]
         dd = np.gradient(e[:, 0])                      # [cm]
         dom = (np.cos(thf[ith]) - np.cos(thf[ith + 1])) * \
@@ -742,15 +745,16 @@ def faceon_map(out, dph):
     norm = LogNorm(smax * 1e-5, smax)
     cmap = plt.get_cmap('magma').copy()
     cmap.set_bad('white')
-    fig, axs = plt.subplots(1, 3, figsize=(21, 6.6))
-    for k, (ax, (_, lab)) in enumerate(zip(axs, lines)):
+    fig, axs = plt.subplots(2, 3, figsize=(21, 13.4))
+    axs[1, 2].set_visible(False)
+    for k, (ax, (_, lab)) in enumerate(zip(axs.ravel(), lines)):
         m = np.where(seen[:, None], np.maximum(S[k], norm.vmin), np.nan)
         pc = ax.pcolormesh(X, Y, m, norm=norm, cmap=cmap, shading='flat',
                            rasterized=True)
         ax.set_aspect('equal')
         ax.set_title(lab + r'$\,[\rm erg\,s^{-1}\,cm^{-2}]$', fontsize=17)
         ax.set_xlabel(r'$x\,[r_0]$')
-        if k == 0:
+        if k % 3 == 0:
             ax.set_ylabel(r'$y\,[r_0]$')
         ax.set_xlim(-rf[-1], rf[-1])
         ax.set_ylim(-rf[-1], rf[-1])
@@ -758,6 +762,39 @@ def faceon_map(out, dph):
         cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
                                                   pad=0.1)
         fig.colorbar(pc, cax=cax)
+    # composite of the three ionization zones: R = Mg II, G = C IV, B =
+    # He II; hue from the local balance (each line relative to its own
+    # maximum, then to the pixel's strongest, over RGB_DEX), brightness
+    # from the strongest over MAP_DEX, on black; as plot_map
+    RGB_DEX, MAP_DEX = 1.5, 4.0
+    ax = axs[1, 1]
+    x = np.stack([S[3], S[2], S[1]], axis=-1)            # (nph, nr, 3)
+    x = np.nan_to_num(x / np.nanmax(x.reshape(-1, 3), axis=0))
+    xm = x.max(axis=-1)
+    hue = np.clip(1 + np.log10(x / np.maximum(xm, 1e-300)[..., None]
+                               + 1e-300) / RGB_DEX, 0, 1)
+    bri = np.clip(1 + np.log10(np.maximum(xm, 1e-300)) / MAP_DEX, 0, 1)
+    rgb = hue * bri[..., None]
+    from matplotlib.colors import ListedColormap
+    img = np.where(seen[:, None, None], rgb, 1.0)        # white = no data
+    # pcolormesh with per-cell colours: draw via a dummy array + facecolors
+    pcm = ax.pcolormesh(X, Y, np.zeros((nph, nr)), shading='flat',
+                        cmap=ListedColormap(['k']), rasterized=True)
+    pcm.set_array(None)
+    pcm.set_facecolor(img.reshape(-1, 3))
+    ax.set_aspect('equal')
+    ax.set_xlim(-rf[-1], rf[-1])
+    ax.set_ylim(-rf[-1], rf[-1])
+    ax.set_xlabel(r'$x\,[r_0]$')
+    ax.tick_params(which='both', direction='in', labelsize=13)
+    ax.set_title(r'$\rm Mg\,II~/~C\,IV~/~He\,II~(R/G/B)$', fontsize=17)
+    for i, (t, c) in enumerate(((r'$\rm Mg\,II$', 'crimson'),
+                                (r'$\rm C\,IV$', 'seagreen'),
+                                (r'$\rm He\,II$', 'royalblue'))):
+        ax.text(0.03, 0.97 - 0.07 * i, t, color=c, transform=ax.transAxes,
+                va='top', fontsize=15)
+    make_axes_locatable(ax).append_axes('right', size='4.5%',
+                                        pad=0.1).set_visible(False)
     fig.tight_layout()
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)

@@ -225,9 +225,9 @@ def plot_map(out, iph):
     each SEG-long stretch of a ray emits (sum 4 pi j dl [erg/s per cm^2 of
     ray cross-section]) for H alpha, Mg II, C IV, one panel and colour
     scale each (MAP_DEX decades below the line's largest stretch), plus an
-    RGB composite (R = H alpha, G = Mg II, B = C IV) stretched over only
-    RGB_DEX decades, so a channel lights only near its own peak and the hue
-    shows which line is relatively strongest. Zoom on the inner rim in
+    RGB composite (R = H alpha, G = Mg II, B = C IV) whose hue is the
+    local balance of the three lines (each relative to its own maximum,
+    over RGB_DEX decades) and whose opacity is the brightness. Zoom on the inner rim in
     every panel; the sim's n_H in grey underneath."""
     import matplotlib
     matplotlib.use('Agg')
@@ -310,19 +310,25 @@ def plot_map(out, iph):
             fontsize=15)
     ax = axs[1, 1]
     z = base(ax)
-    rgb = np.clip(1 + np.log10(pts[:, 2:] / lmax + 1e-300) / RGB_DEX, 0, 1)
-    al = rgb.max(axis=1)
-    m = al > 0
-    o = np.argsort(al[m])
-    cols = np.column_stack([rgb[m][o] / al[m][o, None], al[m][o]])
-    for x, sz in ((ax, 40), (z, 90)):
-        x.scatter(pts[m, 0][o], pts[m, 1][o], c=cols, s=sz, marker='s',
-                  edgecolors='none', zorder=5)
+    # hue from the local balance of the three lines (each normalized to
+    # its own maximum, then relative to the point's strongest one, over
+    # RGB_DEX); opacity from that strongest one over MAP_DEX - so every
+    # emitting stretch shows, coloured by which line dominates it
+    x = pts[:, 2:] / lmax
+    xm = x.max(axis=1)
+    m = xm > 10 ** -MAP_DEX
+    rgb = np.clip(1 + np.log10(x[m] / xm[m, None] + 1e-300) / RGB_DEX, 0, 1)
+    al = np.clip(1 + np.log10(xm[m]) / MAP_DEX, 0.15, 1)
+    o = np.argsort(al)
+    cols = np.column_stack([rgb[o], al[o]])
+    for xa, sz in ((ax, 40), (z, 90)):
+        xa.scatter(pts[m, 0][o], pts[m, 1][o], c=cols, s=sz, marker='s',
+                   edgecolors='none', zorder=5)
     for i, (_, lab, cm) in enumerate(lines):
         ax.text(0.03, 0.95 - 0.09 * i, lab,
                 color=('crimson', 'seagreen', 'royalblue')[i],
                 transform=ax.transAxes, va='top', fontsize=16)
-    ax.text(0.03, 0.62, rf'$\rm RGB,~{RGB_DEX:g}~dex$',
+    ax.text(0.03, 0.62, rf'$\rm hue:~line~balance~({RGB_DEX:g}~dex)$',
             transform=ax.transAxes, va='top', fontsize=14)
     make_axes_locatable(ax).append_axes('right', size='2.5%',
                                         pad=0.08).set_visible(False)

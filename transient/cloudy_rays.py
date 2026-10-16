@@ -190,11 +190,30 @@ def traced_decks(sim, phys, dph, h):
     return out
 
 
+def finished(rdir, name):
+    """True when the ray's Cloudy run completed: 'Cloudy exited OK', or
+    'something went wrong' when the ONLY warning is the electron-scattering
+    optical depth one (rays crossing ~7e24 cm^-2 of ionized gas before the
+    arm reach tau_es ~ 5: Cloudy completes them but flags the regime, as it
+    does not redistribute the scattered photons - the spectrum reaching
+    the arm is approximate there)."""
+    o = os.path.join(rdir, name + '.out')
+    if not (os.path.exists(o) and
+            os.path.exists(os.path.join(rdir, name + '.conA'))):
+        return False
+    txt = open(o, errors='ignore').read()
+    if 'Cloudy exited OK' in txt[-3000:]:
+        return True
+    if 'something went wrong' not in txt[-3000:]:
+        return False
+    warn = [ln for ln in txt.splitlines() if ln.lstrip().startswith('W-')]
+    return bool(warn) and all('optically thick to electron scattering' in w
+                              for w in warn) and 'Cloudy ends:' in txt
+
+
 def run_one(args):
     rdir, name = args
-    if os.path.exists(os.path.join(rdir, name + '.conA')) and \
-            'Cloudy exited OK' in open(os.path.join(rdir, name + '.out'),
-                                       errors='ignore').read()[-3000:]:
+    if finished(rdir, name):
         return name, 0.0, 'skip'
     t = time.time()
     with open(os.path.join(rdir, name + '.in')) as fi, \
@@ -267,8 +286,7 @@ def plot_map(out, iph):
     rdir = os.path.join(out, 'rays')
     names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
         os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
-    names = [n for n in names if 'Cloudy exited OK' in open(
-        os.path.join(rdir, n + '.out'), errors='ignore').read()[-3000:]]
+    names = [n for n in names if finished(rdir, n)]
     if not names:
         raise SystemExit(f'no finished rays at iph = {iph}')
     sim = load_sim(DUMP)
@@ -405,8 +423,7 @@ def plot_rays(out, iph, maponly=False):
     rdir = os.path.join(out, 'rays')
     names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
         os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
-    names = [n for n in names if 'Cloudy exited OK' in open(
-        os.path.join(rdir, n + '.out'), errors='ignore').read()[-3000:]]
+    names = [n for n in names if finished(rdir, n)]
     if not names:
         raise SystemExit(f'no finished rays at iph = {iph}')
     sim = load_sim(DUMP)
@@ -579,9 +596,9 @@ def faceon_map(out, dph):
     seen = np.zeros(nph, bool)
     nray, ncol = 0, {}
     for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_t*.out'))):
-        if 'Cloudy exited OK' not in open(o, errors='ignore').read()[-3000:]:
-            continue
         name = os.path.basename(o)[:-4]
+        if not finished(rdir, name):
+            continue
         iph, ith = int(name[5:8]), int(name[-2:])
         e = np.loadtxt(o[:-4] + '.ems')
         if e.ndim < 2 or len(e) < 2:
@@ -764,10 +781,7 @@ def main():
         spec, keep = [], []
         for k, name in enumerate(names):
             p = os.path.join(rdir, name + '.conA')
-            o = os.path.join(rdir, name + '.out')
-            if not (os.path.exists(p) and os.path.exists(o)
-                    and 'Cloudy exited OK' in open(
-                        o, errors='ignore').read()[-3000:]):
+            if not finished(rdir, name):
                 continue                     # not run, running or failed
             spec.append(read_conA(p))
             keep.append(k)

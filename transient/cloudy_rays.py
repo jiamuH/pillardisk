@@ -447,8 +447,11 @@ def main():
         spec, keep = [], []
         for k, name in enumerate(names):
             p = os.path.join(rdir, name + '.conA')
-            if not os.path.exists(p):
-                continue
+            o = os.path.join(rdir, name + '.out')
+            if not (os.path.exists(p) and os.path.exists(o)
+                    and 'Cloudy exited OK' in open(
+                        o, errors='ignore').read()[-3000:]):
+                continue                     # not run, running or failed
             spec.append(read_conA(p))
             keep.append(k)
         wave = spec[0][:, 0]

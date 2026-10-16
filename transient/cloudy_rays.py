@@ -376,8 +376,8 @@ def faceon_map(out, dph):
     emissivity 4 pi j along its depth, times r^2 dOmega dr, summed into the
     sim's (phi, r) cells (a ray covers dph phi cells) over theta, divided by
     the cell's face-on area r dr dphi. All the emitted light (no observer
-    side or viewing angle). Unfinished rays leave their share out; phi
-    columns with no finished ray are blank."""
+    side or viewing angle). Only complete phi columns are used, each
+    filling the cells up to the next complete one; the rest are blank."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -421,6 +421,14 @@ def faceon_map(out, dph):
     # finished column (dph when all are done; wider on a coarse first
     # pass of the run), its luminosity spread evenly over them; its rays'
     # dOmega above counted dph cells, so rescale to the real width
+    # only complete columns (all upper-hemisphere rays done): a partial
+    # one misses whichever rays are still running - often its dense rim
+    # rays - and would read as dark, the more so once spread over a gap
+    nup = int((sim['th'] <= np.pi / 2).sum())
+    seen[:] = False
+    for iph, n in ncol.items():
+        seen[iph] = n == nup
+    L[:, ~seen] = 0.0
     cols = np.nonzero(seen)[0]
     for j, iph in enumerate(cols):
         nxt = cols[(j + 1) % len(cols)] + (nph if j + 1 == len(cols) else 0)
@@ -432,8 +440,7 @@ def faceon_map(out, dph):
     area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
         np.diff(phf)[:, None]
     S = np.where(seen[None, :, None], L / area[None], np.nan)
-    nfull = sum(v == int((sim['th'] <= np.pi / 2).sum())
-                for v in ncol.values())
+    nfull = len(cols)
     R, P = np.meshgrid(rf, phf)
     X, Y = R * np.cos(P), R * np.sin(P)
     smax = np.nanmax(S)

@@ -220,6 +220,125 @@ def read_conA(path):
     return np.array(rows)[::-1]
 
 
+def plot_map(out, iph):
+    """Meridional maps at phi index iph from the finished rays: the light
+    each SEG-long stretch of a ray emits (sum 4 pi j dl [erg/s per cm^2 of
+    ray cross-section]) for H alpha, Mg II, C IV, one panel and colour
+    scale each (MAP_DEX decades below the line's largest stretch), plus an
+    RGB composite (R = H alpha, G = Mg II, B = C IV) stretched over only
+    RGB_DEX decades, so a channel lights only near its own peak and the hue
+    shows which line is relatively strongest. Zoom on the inner rim in
+    every panel; the sim's n_H in grey underneath."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    MAP_DEX, RGB_DEX, SEG = 4.0, 1.5, 0.004
+    rdir = os.path.join(out, 'rays')
+    names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
+        os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
+    names = [n for n in names if 'Cloudy exited OK' in open(
+        os.path.join(rdir, n + '.out'), errors='ignore').read()[-3000:]]
+    if not names:
+        raise SystemExit(f'no finished rays at iph = {iph}')
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    lines = [((1,), r'$\rm H\alpha$', 'Reds'),
+             ((5, 6), r'$\rm Mg\,II$', 'Greens'),
+             ((3, 4), r'$\rm C\,IV$', 'Blues')]
+    pts = []                                  # (R, z, L_Ha, L_MgII, L_CIV)
+    for n in names:
+        e = np.loadtxt(os.path.join(rdir, n + '.ems'))
+        th = sim['th'][int(n[-2:])]
+        dd = np.gradient(e[:, 0])
+        ib = (e[:, 0] / r0 // SEG).astype(int)
+        nb = ib.max() + 1
+        sg = np.stack([np.bincount(ib, e[:, list(c)].sum(axis=1) * dd, nb)
+                       for c, _, _ in lines], axis=1)
+        rr = sim['rf'][0] + (np.arange(nb) + 0.5) * SEG
+        pts.append(np.column_stack([rr * np.sin(th), rr * np.cos(th), sg]))
+    pts = np.vstack(pts)
+    lmax = pts[:, 2:].max(axis=0)
+    R, T = np.meshgrid(sim['rf'], sim['thf'])
+    nup = int((sim['th'] <= np.pi / 2).sum())
+    X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
+    fig, axs = plt.subplots(2, 2, figsize=(22, 10.5))
+
+    # light, opaque grey for the density underneath (alpha < 1 draws the
+    # cell edges as seams)
+    from matplotlib.colors import LinearSegmentedColormap
+    grey = LinearSegmentedColormap.from_list('lg', ['1.0', '0.55'])
+
+    def base(ax):
+        ax.pcolormesh(X, Z, phys['nH'][iph][:nup], norm=LogNorm(),
+                      cmap=grey, shading='flat', rasterized=True,
+                      edgecolors='face')
+        ax.set_aspect('equal')
+        ax.tick_params(which='both', direction='in', labelsize=12)
+        z = ax.inset_axes([0.6, 0.38, 0.38, 0.58])
+        z.pcolormesh(X, Z, phys['nH'][iph][:nup], norm=LogNorm(),
+                     cmap=grey, shading='flat', rasterized=True,
+                     edgecolors='face')
+        z.set_xlim(0.47, 0.62)
+        z.set_ylim(-0.005, 0.09)
+        z.set_aspect('equal')
+        z.tick_params(which='both', direction='in', labelsize=10)
+        ax.indicate_inset_zoom(z, edgecolor='purple')
+        return z
+
+    for k, (ax, (_, lab, cm)) in enumerate(zip(axs.ravel(), lines)):
+        z = base(ax)
+        v = pts[:, 2 + k]
+        m = v > lmax[k] * 10 ** -MAP_DEX
+        o = np.argsort(v[m])
+        norm = LogNorm(lmax[k] * 10 ** -MAP_DEX, lmax[k])
+        for x, sz in ((ax, 40), (z, 90)):
+            sc = x.scatter(pts[m, 0][o], pts[m, 1][o], c=v[m][o], s=sz,
+                           marker='s', cmap=cm, norm=norm,
+                           edgecolors='none', zorder=5)
+        cax = make_axes_locatable(ax).append_axes('right', size='2.5%',
+                                                  pad=0.08)
+        fig.colorbar(sc, cax=cax).set_label(
+            lab + r'$\,\int 4\pi j\,dl\,[\rm erg\,s^{-1}\,cm^{-2}]$',
+            fontsize=15)
+    ax = axs[1, 1]
+    z = base(ax)
+    rgb = np.clip(1 + np.log10(pts[:, 2:] / lmax + 1e-300) / RGB_DEX, 0, 1)
+    al = rgb.max(axis=1)
+    m = al > 0
+    o = np.argsort(al[m])
+    cols = np.column_stack([rgb[m][o] / al[m][o, None], al[m][o]])
+    for x, sz in ((ax, 40), (z, 90)):
+        x.scatter(pts[m, 0][o], pts[m, 1][o], c=cols, s=sz, marker='s',
+                  edgecolors='none', zorder=5)
+    for i, (_, lab, cm) in enumerate(lines):
+        ax.text(0.03, 0.95 - 0.09 * i, lab,
+                color=('crimson', 'seagreen', 'royalblue')[i],
+                transform=ax.transAxes, va='top', fontsize=16)
+    ax.text(0.03, 0.62, rf'$\rm RGB,~{RGB_DEX:g}~dex$',
+            transform=ax.transAxes, va='top', fontsize=14)
+    make_axes_locatable(ax).append_axes('right', size='2.5%',
+                                        pad=0.08).set_visible(False)
+    for ax in axs[1]:
+        ax.set_xlabel(r'$R\,[r_0]$')
+    for ax in axs[:, 0]:
+        ax.set_ylabel(r'$z\,[r_0]$')
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, f'rays_map_phi{iph:03d}.png')
+    fig.savefig(path, dpi=120, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path} ({len(names)} rays)")
+
+
 def plot_rays(out, iph, maponly=False):
     """Meridional n_H slice at phi index iph with the finished rays, and
     per ray the line emissivity, n_H and T_e against depth."""
@@ -571,7 +690,10 @@ def main():
         faceon_map(a.out, a.dph)
 
     elif a.step == 'plot':
-        plot_rays(a.out, a.iph, a.maponly)
+        if a.maponly:
+            plot_map(a.out, a.iph)
+        else:
+            plot_rays(a.out, a.iph)
 
     else:
         # geometry per ray: elevated lamp (rays_meta.npz) or rays = sim

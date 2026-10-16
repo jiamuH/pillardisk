@@ -124,7 +124,8 @@ def load_run(run):
     # mask them with the empty cells
     d = dict(axes=ax, active=(cell[..., 0] > 0) & (cell[..., 2] == 0),
              conv=cell[..., 1] > 0, black=cell[..., 2] != 0,
-             Te=g1[..., 0], Ne=g1[..., 1], nH=g1[..., 2], ions=ions)
+             Te=g1[..., 0], Ne=g1[..., 1], nH=g1[..., 2], ions=ions,
+             abun=abun)
 
     pfile = os.path.join(out, 'plot.out')
     if os.path.exists(pfile):
@@ -221,19 +222,23 @@ def view_maps(d, view):
         zside[np.argmin(np.abs(zc))] = 0.5
         area = np.outer(np.diff(edges(d['axes'][0])),
                         np.diff(edges(d['axes'][1])))       # [cm^2]
-        # emission-measure weights (Peimbert 1967): T0 = <Te> over
-        # n_e n(H+) dV, the temperature of the recombining gas; each ion
-        # fraction over n_e n(ion) dV, the conditions in that ion's own
-        # zone (the abundance cancels). Observer side, as the lines; an
-        # n_H weight only reports the cold neutral interior. Columns
-        # without the ion stay empty.
+        # emission-measure weight (Peimbert 1967): n_e n(H+) dV, the
+        # recombining gas. T0 = <Te> is its temperature; the ion fractions
+        # are each ion's share within that same emitting gas. Observer
+        # side, as the lines (an n_H weight only reports the cold neutral
+        # interior); columns without H+ stay empty.
         ne = np.where(act, d['Ne'], 0.0) * zside[None, None, :]
-        wts = {'Te': ne * w * qty['xH'], 'xH': ne * w * qty['xH'],
-               'xC4': ne * w * qty['xC4'], 'xMg2': ne * w * qty['xMg2']}
+        wt = ne * w * qty['xH']
+        ws = wt.sum(axis=2)
         for k, v in qty.items():
-            ws = wts[k].sum(axis=2)
-            out[k] = np.where(ws > 0, (v * wts[k]).sum(axis=2)
+            out[k] = np.where(ws > 0, (v * wt).sum(axis=2)
                               / np.where(ws > 0, ws, 1), np.nan)
+        # observer-side ion columns N(ion) = sum x A n_H dz [cm^-2]
+        dzw = np.diff(edges(zc)) * zside
+        for k, z in (('NH1', 1), ('NC4', 6), ('NMg2', 12)):
+            col = (qty[{'NH1': 'xH', 'NC4': 'xC4', 'NMg2': 'xMg2'}[k]] * w
+                   * dzw[None, None, :]).sum(axis=2) * d['abun'][z - 1]
+            out[k] = np.where(col > 0, col, np.nan)
         for k, v in lines.items():
             # observer side only (z > 0, plus half the midplane cell): the
             # far side is hidden behind the N_H ~ 1e24-25 cm^-2 midplane,
@@ -369,7 +374,7 @@ def add_colorbar(pc, ax):
     return cb
 
 
-def panels(view):
+def panels(view, columns=False):
     """Row 1: Te and ion fractions; row 2: density and line emission."""
     dens = (r'$N_{\rm H}\,[\rm cm^{-2}]$' if view == 'faceon'
             else r'$n_{\rm H}\,[\rm cm^{-3}]$')
@@ -378,27 +383,32 @@ def panels(view):
             else r'$L(\rm %s)\,[10^{36}\,\rm erg\,s^{-1}]$')
     temp = (r'$T_0({\rm H^+})\,[\rm K]$' if view == 'faceon'
             else r'$T_e\,[\rm K]$')
-    return [('Te', temp, 'logT'),
-            ('xH', r'$x(\rm H^+)$', 'lin01'),
-            ('xC4', r'$x(\rm C^{3+})$', 'lin01'),
-            ('xMg2', r'$x(\rm Mg^{+})$', 'lin01'),
+    if columns:          # face-on ion columns instead of fractions
+        ion = [('NH1', r'$N(\rm H^+)\,[\rm cm^{-2}]$', 'logcol'),
+               ('NC4', r'$N(\rm C^{3+})\,[\rm cm^{-2}]$', 'logcol'),
+               ('NMg2', r'$N(\rm Mg^{+})\,[\rm cm^{-2}]$', 'logcol')]
+    else:
+        ion = [('xH', r'$x(\rm H^+)$', 'lin01'),
+               ('xC4', r'$x(\rm C^{3+})$', 'lin01'),
+               ('xMg2', r'$x(\rm Mg^{+})$', 'lin01')]
+    return [('Te', temp, 'logT')] + ion + [
             ('nH', dens, 'logn'),
             ('Ha', line % r'H\alpha', 'loglum'),
             ('CIV', line % r'C\,IV\,1549', 'loglum'),
             ('MgII', line % r'Mg\,II\,2798', 'loglum')]
 
 
-def plot_view(maps, h, v, labels, title, path, view):
+def plot_view(maps, h, v, labels, title, path, view, columns=False):
     he, ve = edges(h), edges(v)
     aspect = (ve[-1] - ve[0]) / (he[-1] - he[0])
     # map width per panel ~4.4 in (24 in / 4 minus colorbar and labels);
     # rows get that times the aspect plus ~1.4 in for title and x label
     fig, axs = plt.subplots(2, 4, figsize=(24, 2 * (4.4 * aspect + 1.4) + 0.6))
     # one shared colour range for all line maps, so they compare directly
-    lmax = max([np.nanmax(maps[k]) for k, _, kind in panels(view)
+    lmax = max([np.nanmax(maps[k]) for k, _, kind in panels(view, columns)
                 if kind == 'loglum' and k in maps] or [1.0])
     lnorm = LogNorm(lmax * 1e-5, lmax)
-    for n, (ax, (key, lab, kind)) in enumerate(zip(axs.ravel(), panels(view))):
+    for n, (ax, (key, lab, kind)) in enumerate(zip(axs.ravel(), panels(view, columns))):
         if key not in maps:
             ax.text(0.5, 0.5, r'$\rm run\ mocassinPlot$', ha='center',
                     va='center', transform=ax.transAxes)
@@ -414,6 +424,13 @@ def plot_view(maps, h, v, labels, title, path, view):
         elif kind == 'logT':
             im = ax.pcolormesh(he, ve, m, norm=LogNorm(5e2, 1e5),
                                cmap='inferno')
+        elif kind == 'logcol':
+            # ion columns: nearly empty rim columns would stretch the
+            # scale over 20 decades; floor at 1/100 of the median
+            m = np.where(m > 0, m, np.nan)
+            lo = np.nanmedian(m) / 100
+            im = ax.pcolormesh(he, ve, np.maximum(m, lo),
+                               norm=LogNorm(lo, np.nanmax(m)), cmap='viridis')
         elif kind == 'logn':
             m = np.where(m > 0, m, np.nan)
             im = ax.pcolormesh(he, ve, m, norm=LogNorm(np.nanmin(m),
@@ -479,7 +496,8 @@ def main():
         w = taper(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) / d['r0_cm'],
                   {'rf': [R_IN]}, a.taper)
         d['lines'] = {k: v * w for k, v in d['lines'].items()}
-    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ T_0,\ x:\ weighted\ by\ n_e\,n_{\rm ion})$',
+    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ T_0,\ x:\ weighted\ by\ n_e\,n(\rm H^+))$',
+              'faceon_columns': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ ion\ columns;\ T_0:\ weighted\ by\ n_e\,n(H^+))$',
               'midplane': r'$\rm midplane\ slice\ (z=0)$',
               'vertical': r'$\rm vertical\ slice\ (y=0)$'}
     if 'lines' in d:
@@ -498,6 +516,11 @@ def main():
         path = os.path.join(pdir, f'moc_maps_{view}.png')
         plot_view(fill(maps), h, v, labels, titles[view], path, view)
         print(f'  wrote {path}')
+        if view == 'faceon':
+            path = os.path.join(pdir, 'moc_maps_faceon_columns.png')
+            plot_view(fill(maps), h, v, labels, titles['faceon_columns'],
+                      path, view, columns=True)
+            print(f'  wrote {path}')
         if view == 'faceon' and 'faceon_smooth' in titles:
             path = os.path.join(pdir, 'moc_maps_faceon_smooth.png')
             plot_view(fill(smooth_faceon(d, maps, dr)), h, v, labels,

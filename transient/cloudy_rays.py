@@ -29,6 +29,8 @@ Steps (all with --out DIR):
   write    decks for the upper-hemisphere rays (every --dph-th phi)
   run      run the decks in parallel (--ncpu), skipping finished rays
   extract  collect the spectra into rays.npz
+  faceon   face-on H alpha, Mg II, C IV surface brightness maps from the
+           finished rays (plots/faceon_lines.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -367,9 +369,101 @@ def plot_rays(out, iph, maponly=False):
     print(f"wrote {path} ({len(names)} rays)")
 
 
+def faceon_map(out, dph):
+    """Face-on surface brightness [erg/s/cm^2] of H alpha, Mg II, C IV from
+    the finished rays (lamp at the origin: rays = sim columns): each ray's
+    emissivity 4 pi j along its depth, times r^2 dOmega dr, summed into the
+    sim's (phi, r) cells (a ray covers dph phi cells) over theta, divided by
+    the cell's face-on area r dr dphi. All the emitted light (no observer
+    side or viewing angle). Unfinished rays leave their share out; phi
+    columns with no finished ray are blank."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    rdir = os.path.join(out, 'rays')
+    sim = load_sim(DUMP)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, thf, phf = sim['rf'], sim['thf'], sim['phf']
+    nph, nr = len(sim['ph']), len(sim['r'])
+    lines = [((1,), r'$S(\rm H\alpha)$'), ((5, 6), r'$S(\rm Mg\,II)$'),
+             ((3, 4), r'$S(\rm C\,IV)$')]
+    L = np.zeros((3, nph, nr))
+    seen = np.zeros(nph, bool)
+    nray, ncol = 0, {}
+    for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_t*.out'))):
+        if 'Cloudy exited OK' not in open(o, errors='ignore').read()[-3000:]:
+            continue
+        name = os.path.basename(o)[:-4]
+        iph, ith = int(name[5:8]), int(name[-2:])
+        e = np.loadtxt(o[:-4] + '.ems')
+        if e.ndim < 2 or len(e) < 2:
+            continue
+        rr = rf[0] + e[:, 0] / r0                      # [r0]
+        dd = np.gradient(e[:, 0])                      # [cm]
+        dom = (np.cos(thf[ith]) - np.cos(thf[ith + 1])) * \
+            (phf[min(iph + dph, nph)] - phf[iph])
+        ir = np.clip(np.searchsorted(rf, rr) - 1, 0, nr - 1)
+        for k, (col, _) in enumerate(lines):
+            w = e[:, list(col)].sum(axis=1) * (rr * r0) ** 2 * dom * dd
+            np.add.at(L[k, iph], ir, w)
+        seen[iph] = True
+        nray += 1
+        ncol[iph] = ncol.get(iph, 0) + 1
+    # spread each ray's phi column over the dph sim cells it stands for
+    for iph in np.nonzero(seen)[0]:
+        for j in range(1, dph):
+            if iph + j < nph:
+                L[:, iph + j] = L[:, iph] / dph
+        L[:, iph] /= dph
+        seen[iph:iph + dph] = True
+    area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
+        np.diff(phf)[:, None]
+    S = np.where(seen[None, :, None], L / area[None], np.nan)
+    nfull = sum(v == int((sim['th'] <= np.pi / 2).sum())
+                for v in ncol.values())
+    R, P = np.meshgrid(rf, phf)
+    X, Y = R * np.cos(P), R * np.sin(P)
+    smax = np.nanmax(S)
+    norm = LogNorm(smax * 1e-5, smax)
+    cmap = plt.get_cmap('magma').copy()
+    cmap.set_bad('white')
+    fig, axs = plt.subplots(1, 3, figsize=(21, 6.6))
+    for k, (ax, (_, lab)) in enumerate(zip(axs, lines)):
+        m = np.where(seen[:, None], np.maximum(S[k], norm.vmin), np.nan)
+        pc = ax.pcolormesh(X, Y, m, norm=norm, cmap=cmap, shading='flat',
+                           rasterized=True)
+        ax.set_aspect('equal')
+        ax.set_title(lab + r'$\,[\rm erg\,s^{-1}\,cm^{-2}]$', fontsize=17)
+        ax.set_xlabel(r'$x\,[r_0]$')
+        if k == 0:
+            ax.set_ylabel(r'$y\,[r_0]$')
+        ax.set_xlim(-rf[-1], rf[-1])
+        ax.set_ylim(-rf[-1], rf[-1])
+        ax.tick_params(which='both', direction='in', labelsize=13)
+        cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
+                                                  pad=0.1)
+        fig.colorbar(pc, cax=cax)
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'faceon_lines.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}: {nray} finished rays in {len(ncol)} phi columns "
+          f"({nfull} complete)")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('step', choices=['write', 'run', 'extract', 'plot'])
+    ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
+                                     'faceon'])
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
     ap.add_argument('--maponly', action='store_true',
@@ -435,6 +529,9 @@ def main():
                           f"elapsed {el / 60:.1f} min, eta "
                           f"{el / done * (len(names) - done) / 60:.0f} min",
                           flush=True)
+
+    elif a.step == 'faceon':
+        faceon_map(a.out, a.dph)
 
     elif a.step == 'plot':
         plot_rays(a.out, a.iph, a.maponly)

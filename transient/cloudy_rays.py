@@ -479,6 +479,9 @@ def main():
     ap.add_argument('--dph', type=int, default=2,
                     help='take every dph-th phi (sim has 256)')
     ap.add_argument('--ncpu', type=int, default=90)
+    ap.add_argument('--every', type=int, default=1,
+                    help='run: only rays at every N-th sim phi column '
+                         '(4 = half of the dph=2 decks)')
     ap.add_argument('--hlamp', type=float, default=0.0,
                     help='write: lamp height on the axis [light days]; 0 = '
                          'lamp at the origin (rays = sim columns)')
@@ -528,6 +531,8 @@ def main():
             return next(k for k, m in enumerate((16, 8, 4, 2, 1))
                         if iph % m == 0)
         names.sort(key=lambda n: (level(n), n))
+        if a.every > 1:              # only every N-th phi column
+            names = [n for n in names if int(n[5:8]) % a.every == 0]
         if a.only:
             names = names[:a.only]
         print(f"running {len(names)} rays on {a.ncpu} cores with {EXE}",

@@ -334,7 +334,7 @@ def main():
     ax.set_yscale('log')
     ax.set_xlim(1000, 11000)
     msel = (wave >= 1000) & (wave <= 11000)
-    ymax = (wave * (base + np.maximum(P['line'], L_moc)))[msel].max()
+    ymax = np.nanmax((wave * (base + np.maximum(P["line"], L_moc)))[msel])
     ax.set_ylim(ymax / 3e3, ymax * 3)
     ax.set_xticks([1000, 2000, 3000, 5000, 10000])
     ax.xaxis.set_major_formatter(ScalarFormatter())

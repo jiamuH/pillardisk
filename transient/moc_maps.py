@@ -58,6 +58,10 @@ NSTAGES = 7
 # (moc_edd10: 5 half-ionized cells at Te = 1-2 K on the irradiated outer
 # rim, which the ~1/T recombination fits turn into 72% of all H alpha)
 TE_FAIL = 10.0
+# MOCASSIN's He I recombination fits diverge in cold neutral gas (moc_edd10:
+# He I 5877 = 1e31 x H beta in a 113 K cell, 1e11 x the H beta total); He I
+# lines are zeroed below this Te (the cells hold <1e-6 of H beta)
+TE_HE1 = 1000.0
 # plot.out columns of the original seven-line plot.in (used when there is
 # no input/plot_lines.txt); the first seven of moc_plotin's list too
 PLOT_COLS = ['Ha', 'Hb', 'CIV1551', 'CIV1548', 'MgII2804', 'MgII2796',
@@ -139,7 +143,8 @@ def load_run(run):
         raw = {name: pl[:, i].reshape(shape)
                for i, name in enumerate(names)}
         # failed cold cells join the masked black cells; non-finite cell
-        # values (He I fits overflowing in ~100 K neutral gas) are zero
+        # values (He I fits overflowing in ~100 K neutral gas) are zero, and
+        # He I lines are zero below TE_HE1
         cold = d['active'] & (d['Te'] < TE_FAIL)
         d['active'] &= ~cold
         nbad = sum(int((~np.isfinite(v)).sum()) for v in raw.values())
@@ -149,6 +154,10 @@ def load_run(run):
         d['lines_raw'] = raw
         d['lines'] = {k: np.where(np.isfinite(v) & ~cold, v, 0.0)
                       for k, v in raw.items()}
+        he1 = d['Te'] < TE_HE1
+        for k in d['lines']:
+            if k.startswith('HeI_'):
+                d['lines'][k] = np.where(he1, 0.0, d['lines'][k])
 
     # r0 in cm: grid.npz stores the same cell centres in units of r0
     npz = np.load(os.path.join(run, 'grid.npz'))

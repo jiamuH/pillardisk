@@ -167,10 +167,10 @@ def plot_rays(out, iph):
     sim = load_sim(DUMP)
     phys = to_physical(sim, CONFIG)
     r0 = CONFIG['R0_LD'] * LD_CM
-    fig = plt.figure(figsize=(8 + 4.6 * len(names), 9))
-    gs = fig.add_gridspec(2, 1 + len(names), width_ratios=[1.9] +
-                          [1] * len(names), wspace=0.42, hspace=0.08)
-    ax = fig.add_subplot(gs[:, 0])
+    fig = plt.figure(figsize=(4.6 * len(names) + 1, 15))
+    gs = fig.add_gridspec(3, len(names), height_ratios=[1.25, 1, 1],
+                          wspace=0.42, hspace=0.25)
+    ax = fig.add_subplot(gs[0, :])
     R, T = np.meshgrid(sim['rf'], sim['thf'])
     nup = int((sim['th'] <= np.pi / 2).sum())        # upper cells
     pc = ax.pcolormesh((R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1],
@@ -184,6 +184,24 @@ def plot_rays(out, iph):
     lines = [((1,), 'crimson', r'$\rm H\alpha$'),
              ((5, 6), 'seagreen', r'$\rm Mg\,II$'),
              ((3, 4), 'royalblue', r'$\rm C\,IV$')]
+    # RGB code of each ray point: R = H alpha, G = Mg II, B = C IV, each
+    # line's emissivity as log over RGB_DEX below its maximum over all the
+    # plotted rays; opacity = the brightest channel, so non-emitting gas
+    # (the hot, thin layers) is not drawn
+    RGB_DEX = 4.0
+    # zoom on the inner rim, where the dense rays emit
+    axz = ax.inset_axes([0.6, 0.38, 0.38, 0.58])
+    axz.pcolormesh((R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1],
+                   phys['nH'][iph][:nup], norm=pc.norm, cmap='Greys',
+                   shading='flat', rasterized=True)
+    axz.set_xlim(0.47, 0.62)
+    axz.set_ylim(-0.005, 0.09)
+    axz.set_aspect('equal')
+    axz.tick_params(which='both', direction='in', labelsize=10)
+    ax.indicate_inset_zoom(axz, edgecolor='purple')
+    allems = {n: np.loadtxt(os.path.join(rdir, n + '.ems')) for n in names}
+    jmax = [max(e[:, list(col)].sum(axis=1).max() for e in allems.values())
+            for col, _, _ in lines]
     for k, name in enumerate(names):
         ith = int(name[-2:])
         th = sim['th'][ith]
@@ -193,13 +211,28 @@ def plot_rays(out, iph):
         r_end = (sim['rf'][0] * r0 + depth[-1]) / r0
         ax.plot([sim['rf'][0] * np.sin(th), r_end * np.sin(th)],
                 [sim['rf'][0] * np.cos(th), r_end * np.cos(th)], '-',
-                color='purple', lw=2)
+                color='purple', lw=0.8)
+        e = allems[name]
+        rgb = np.stack([np.clip(1 + np.log10(
+            e[:, list(col)].sum(axis=1) / jm + 1e-300) / RGB_DEX, 0, 1)
+            for (col, _, _), jm in zip(lines, jmax)], axis=1)
+        alpha = rgb.max(axis=1)
+        m = alpha > 0
+        rr = (sim['rf'][0] * r0 + e[m, 0]) / r0
+        o = np.argsort(alpha[m])                  # brightest on top
+        cols = np.column_stack([rgb[m][o] / alpha[m][o, None], alpha[m][o]])
+        for x in (ax, axz):
+            x.scatter((rr * np.sin(th))[o], (rr * np.cos(th))[o], s=90,
+                      c=cols, edgecolors='none', zorder=5)
+        axz.plot([sim['rf'][0] * np.sin(th), r_end * np.sin(th)],
+                 [sim['rf'][0] * np.cos(th), r_end * np.cos(th)], '-',
+                 color='purple', lw=0.8)
         ax.text(r_end * np.sin(th) + 0.03, r_end * np.cos(th),
                 rf'$\rm {ith}$', color='purple', fontsize=14,
                 va='center')
         ems = np.loadtxt(os.path.join(rdir, name + '.ems'))
-        a = fig.add_subplot(gs[0, 1 + k])
-        b = fig.add_subplot(gs[1, 1 + k], sharex=a)
+        a = fig.add_subplot(gs[1, k])
+        b = fig.add_subplot(gs[2, k], sharex=a)
         d = ems[:, 0]
         for col, c, lab in lines:
             a.plot(d, ems[:, list(col)].sum(axis=1), '-', color=c, lw=2,
@@ -228,6 +261,9 @@ def plot_rays(out, iph):
         for x in (a, b, c):
             x.tick_params(which='both', direction='in', labelsize=12)
         c.tick_params(axis='y', colors='darkorange')
+    for i, (_, c, lab) in enumerate(lines):
+        ax.text(0.03, 0.95 - 0.08 * i, lab, color=c, transform=ax.transAxes,
+                va='top', fontsize=15)
     ax.set_aspect('equal')
     ax.set_xlabel(r'$R\,[r_0]$')
     ax.set_ylabel(r'$z\,[r_0]$')

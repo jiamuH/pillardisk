@@ -29,6 +29,10 @@ Steps (all with --out DIR):
   write    decks for the upper-hemisphere rays (every --dph-th phi)
   run      run the decks in parallel (--ncpu), skipping finished rays
   extract  collect the spectra into rays.npz
+  plot     finished rays of one phi column (--iph): their paths over the
+           sim's n_H in the meridional plane, and per ray the depth
+           profiles of the H alpha, Mg II, C IV emissivities (red, green,
+           blue, as the RGB line maps) with n_H and T_e
 
 Run:  python3 -m transient.cloudy_rays write --out /data2/jhuang/runs/cloudy_rays/edd10
       python3 -m transient.cloudy_rays run --out ... --ncpu 90
@@ -141,9 +145,106 @@ def read_conA(path):
     return np.array(rows)[::-1]
 
 
+def plot_rays(out, iph):
+    """Meridional n_H slice at phi index iph with the finished rays, and
+    per ray the line emissivity, n_H and T_e against depth."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    rdir = os.path.join(out, 'rays')
+    names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
+        os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
+    names = [n for n in names if 'Cloudy exited OK' in open(
+        os.path.join(rdir, n + '.out'), errors='ignore').read()[-3000:]]
+    if not names:
+        raise SystemExit(f'no finished rays at iph = {iph}')
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    fig = plt.figure(figsize=(8 + 4.6 * len(names), 9))
+    gs = fig.add_gridspec(2, 1 + len(names), width_ratios=[1.9] +
+                          [1] * len(names), wspace=0.42, hspace=0.08)
+    ax = fig.add_subplot(gs[:, 0])
+    R, T = np.meshgrid(sim['rf'], sim['thf'])
+    nup = int((sim['th'] <= np.pi / 2).sum())        # upper cells
+    pc = ax.pcolormesh((R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1],
+                       phys['nH'][iph][:nup],
+                       norm=LogNorm(), cmap='Greys', shading='flat',
+                       rasterized=True)
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    cax = make_axes_locatable(ax).append_axes('right', size='4%', pad=0.08)
+    fig.colorbar(pc, cax=cax).set_label(r'$n_{\rm H}\,[\rm cm^{-3}]$')
+    # .ems columns: depth, Ha, Hb, C IV 1548, 1551, Mg II 2796, 2803
+    lines = [((1,), 'crimson', r'$\rm H\alpha$'),
+             ((5, 6), 'seagreen', r'$\rm Mg\,II$'),
+             ((3, 4), 'royalblue', r'$\rm C\,IV$')]
+    for k, name in enumerate(names):
+        ith = int(name[-2:])
+        th = sim['th'][ith]
+        ovr = np.loadtxt(os.path.join(rdir, name + '.ovr'),
+                         usecols=(0, 1, 3))           # depth, Te, hden
+        depth, Te, nh = ovr.T
+        r_end = (sim['rf'][0] * r0 + depth[-1]) / r0
+        ax.plot([sim['rf'][0] * np.sin(th), r_end * np.sin(th)],
+                [sim['rf'][0] * np.cos(th), r_end * np.cos(th)], '-',
+                color='purple', lw=2)
+        ax.text(r_end * np.sin(th) + 0.03, r_end * np.cos(th),
+                rf'$\rm {ith}$', color='purple', fontsize=14,
+                va='center')
+        ems = np.loadtxt(os.path.join(rdir, name + '.ems'))
+        a = fig.add_subplot(gs[0, 1 + k])
+        b = fig.add_subplot(gs[1, 1 + k], sharex=a)
+        d = ems[:, 0]
+        for col, c, lab in lines:
+            a.plot(d, ems[:, list(col)].sum(axis=1), '-', color=c, lw=2,
+                   label=lab)
+        a.set_xscale('log')
+        a.set_yscale('log')
+        top = max(ems[:, list(col)].sum(axis=1).max()
+                  for col, _, _ in lines)
+        a.set_ylim(top * 1e-4, top * 3)
+        plt.setp(a.get_xticklabels(), visible=False)
+        if k == 0:
+            a.set_ylabel(r'$4\pi j\,[\rm erg\,s^{-1}\,cm^{-3}]$')
+            a.legend(fontsize=13, frameon=False, loc='lower left')
+        a.set_title(rf'$\rm ray~{ith}:~\theta={np.degrees(th):.1f}^\circ$',
+                    fontsize=16)
+        b.plot(depth, nh, '-', color='0.3', lw=2)
+        b.set_yscale('log')
+        b.set_xlabel(r'$\rm depth\,[cm]$')
+        c = b.twinx()
+        c.plot(depth, Te, '-', color='darkorange', lw=2)
+        c.set_yscale('log')
+        if k == 0:
+            b.set_ylabel(r'$n_{\rm H}\,[\rm cm^{-3}]$')
+        if k == len(names) - 1:
+            c.set_ylabel(r'$T_e\,[\rm K]$', color='darkorange')
+        for x in (a, b, c):
+            x.tick_params(which='both', direction='in', labelsize=12)
+        c.tick_params(axis='y', colors='darkorange')
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'$R\,[r_0]$')
+    ax.set_ylabel(r'$z\,[r_0]$')
+    ax.tick_params(which='both', direction='in', labelsize=12)
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, f'rays_phi{iph:03d}.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path} ({len(names)} rays)")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('step', choices=['write', 'run', 'extract'])
+    ap.add_argument('step', choices=['write', 'run', 'extract', 'plot'])
+    ap.add_argument('--iph', type=int, default=0,
+                    help='plot: phi index of the rays')
     ap.add_argument('--out', required=True)
     ap.add_argument('--dph', type=int, default=2,
                     help='take every dph-th phi (sim has 256)')
@@ -186,6 +287,9 @@ def main():
                           f"elapsed {el / 60:.1f} min, eta "
                           f"{el / done * (len(names) - done) / 60:.0f} min",
                           flush=True)
+
+    elif a.step == 'plot':
+        plot_rays(a.out, a.iph)
 
     else:
         meta = np.load(os.path.join(a.out, 'rays_meta.npy'))

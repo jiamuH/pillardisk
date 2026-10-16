@@ -444,8 +444,29 @@ def plot_view(maps, h, v, labels, title, path, view, columns=None):
             # scale over 20 decades; floor at 1/100 of the median
             m = np.where(m > 0, m, np.nan)
             lo = np.nanmedian(m) / 100
-            im = ax.pcolormesh(he, ve, np.maximum(m, lo),
+            # display fill: an ionized column whose ion layer is thinner
+            # than a cell can jump past it (moc_edd10: 13 lamp-facing rim
+            # columns go from C4+ straight to neutral, N(C3+) ~1e-4 of
+            # their neighbours); show the median of the valid 3x3
+            # neighbours there, marked with a white dot. Display only.
+            hc, vc = 0.5 * (he[1:] + he[:-1]), 0.5 * (ve[1:] + ve[:-1])
+            ion = np.isfinite(maps['NH1'].T)
+            low = ion & ~(m >= lo)
+            fill = m.copy()
+            for jj, ii in zip(*np.nonzero(low)):
+                nb = m[max(jj - 1, 0):jj + 2, max(ii - 1, 0):ii + 2]
+                nb = nb[nb >= lo]
+                # an outer-edge pixel (partial gas column, really low)
+                # has <= 5 valid neighbours: need 6 there; next to the
+                # inner hole 3 suffice
+                rr = np.hypot(hc[ii], vc[jj])
+                if nb.size >= (3 if rr < 0.5 * hc.max() else 6):
+                    fill[jj, ii] = np.median(nb)
+            filled = low & (fill >= lo)
+            im = ax.pcolormesh(he, ve, np.maximum(fill, lo),
                                norm=LogNorm(lo, np.nanmax(m)), cmap='viridis')
+            jj, ii = np.nonzero(filled)
+            ax.plot(hc[ii], vc[jj], 'o', ms=2.5, mfc='white', mec='none')
         elif kind == 'logn':
             m = np.where(m > 0, m, np.nan)
             im = ax.pcolormesh(he, ve, m, norm=LogNorm(np.nanmin(m),

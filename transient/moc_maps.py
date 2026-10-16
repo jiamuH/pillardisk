@@ -418,7 +418,7 @@ def plot_view(maps, h, v, labels, title, path, view, columns=None):
     aspect = (ve[-1] - ve[0]) / (he[-1] - he[0])
     # map width per panel ~4.4 in (24 in / 4 minus colorbar and labels);
     # rows get that times the aspect plus ~1.4 in for title and x label
-    fig, axs = plt.subplots(2, 4, figsize=(24, 2 * (4.4 * aspect + 1.4) + 0.6))
+    fig, axs = plt.subplots(2, 4, figsize=(24, 2 * (4.4 * aspect + 1.0)))
     # one shared colour range for all line maps, so they compare directly
     lmax = max([np.nanmax(maps[k]) for k, _, kind in panels(view, columns)
                 if kind == 'loglum' and k in maps] or [1.0])
@@ -468,8 +468,7 @@ def plot_view(maps, h, v, labels, title, path, view, columns=None):
         if n % 4 == 0:                       # y label on the left column only
             ax.set_ylabel(labels[1])
         add_colorbar(im, ax)
-    fig.suptitle(title)
-    fig.tight_layout()
+    fig.tight_layout()           # no figure title (title kept for the log)
     fig.savefig(path, dpi=100)
     plt.close(fig)
 

@@ -353,7 +353,12 @@ def ray_spectra(out, sim, phys, cfg, wave, dph=2):
             ir = max(min(np.searchsorted(rf, rem[i, t]) - 1,
                          len(sim['r']) - 1), 0)
             line = w_ref[i, t] * s[:, 3] + w_out[i, t] * s[:, 4]
-            cont = w_ref[i, t] * s[:, 2] + w_out[i, t] * s[:, 1]
+            # Cloudy's DiffOut (col 4) and reflc (col 6) INCLUDE the lines
+            # (Hazy: "outward ... continuum and line emission"; reflc =
+            # continuum + reflin in the data): subtract them, else
+            # continuum + lines counts every line twice
+            cont = (w_ref[i, t] * (s[:, 2] - s[:, 3])
+                    + w_out[i, t] * (s[:, 1] - s[:, 4]))
             # the column stands for wid[c] sim phi cells: spread its light
             # evenly over them, each at its own v_los (one velocity per
             # column left the summed profiles a comb of spikes ~500 km/s
@@ -873,7 +878,7 @@ def spectrum_plots(out, dph):
     ax.plot(wave, wave * (R['line'] + R['cont']), '-', color='k', lw=2,
             drawstyle='steps-mid', label=r'$\rm reprocessed~(lines + continuum)$')
     ax.plot(wave, wave * R['cont'], '-', color='darkorange', lw=1.8,
-            label=r'$\rm diffuse~continuum$')
+            label=r'$\rm diffuse~continuum~(lines~removed)$')
     ax.plot(wave, wave * np.where(R['line'] > 0, R['line'], np.nan), '-',
             color='royalblue', lw=1.4, drawstyle='steps-mid',
             label=r'$\rm lines$')

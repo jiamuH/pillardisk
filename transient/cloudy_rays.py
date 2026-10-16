@@ -196,7 +196,7 @@ def traced_decks(sim, phys, dph, h):
     return out
 
 
-def finished(rdir, name):
+def finished(rdir, name, lenient=False):
     """True when the ray's Cloudy run completed: 'Cloudy exited OK', or
     'something went wrong' when the ONLY warning is the electron-scattering
     optical depth one (rays crossing ~7e24 cm^-2 of ionized gas before the
@@ -213,8 +213,11 @@ def finished(rdir, name):
     if 'something went wrong' not in txt[-3000:]:
         return False
     warn = [ln for ln in txt.splitlines() if ln.lstrip().startswith('W-')]
-    return bool(warn) and all('optically thick to electron scattering' in w
-                              for w in warn) and 'Cloudy ends:' in txt
+    ok = ['optically thick to electron scattering']
+    if lenient:          # plots: also rays cut by the zone limit (valid
+        ok += ['number of zones', 'Default limit can be']   # but short)
+    return bool(warn) and all(any(k in w for k in ok) for w in warn) \
+        and 'Cloudy ends:' in txt
 
 
 def run_one(args):
@@ -247,6 +250,22 @@ def read_conA(path):
     return np.array(rows)[::-1]
 
 
+def edges_of(w):
+    m = 0.5 * (w[1:] + w[:-1])
+    return np.concatenate([[1.5 * w[0] - 0.5 * w[1]], m,
+                           [1.5 * w[-1] - 0.5 * w[-2]]])
+
+
+def rebin(e_new, e_old, f_old):
+    """Flux-conserving rebin of a per-A density f_old on bin edges e_old
+    onto edges e_new (cumulative integral, differenced). np.interp of a
+    Doppler-shifted spectrum whose lines are 1-2 bins wide gains or loses
+    flux with the sub-bin shift: a comb in the summed profiles."""
+    cum = np.concatenate([[0.0], np.cumsum(f_old * np.diff(e_old))])
+    c = np.interp(e_new, e_old, cum, left=0.0, right=cum[-1])
+    return np.diff(c) / np.diff(e_new)
+
+
 def ray_spectra(out, sim, phys, cfg, wave, dph=2):
     """Observed spectra at cfg['INCL_DEG'] from the finished in-plane rays
     (lamp at the origin, rays = sim columns), on the wavelength grid wave:
@@ -273,7 +292,7 @@ def ray_spectra(out, sim, phys, cfg, wave, dph=2):
     rays = {}
     for o in glob.glob(os.path.join(rdir, 'ray_p*_t*.out')):
         n = os.path.basename(o)[:-4]
-        if finished(rdir, n):
+        if finished(rdir, n, lenient=True):
             rays.setdefault(int(n[5:8]), []).append(int(n[-2:]))
     cols = sorted(c for c, t in rays.items() if len(t) == nup)
     if not cols:
@@ -324,21 +343,30 @@ def ray_spectra(out, sim, phys, cfg, wave, dph=2):
     _, (r_o, t_o, p_o) = vlos_cube(sim, cfg['INCL_DEG'])
     vlos = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
     L_line, L_cont, L_all = (np.zeros(nw) for _ in range(3))
+    e_new, e0 = edges_of(wave), edges_of(w0)
     for i, c in enumerate(cols):
         dphi = (ph[1] - ph[0]) * wid[c]
         for t in range(nup):
             s = spec[i, t]
             dom = (np.cos(sim['thf'][t]) - np.cos(sim['thf'][t + 1])) * dphi
             A = (rf[0] * r0) ** 2 * dom
-            ir = min(np.searchsorted(rf, rem[i, t]) - 1, len(sim['r']) - 1)
-            v = vlos[c, t, max(ir, 0)]
-            ws = w0 * (1.0 - v / C_KMS)
+            ir = max(min(np.searchsorted(rf, rem[i, t]) - 1,
+                         len(sim['r']) - 1), 0)
             line = w_ref[i, t] * s[:, 3] + w_out[i, t] * s[:, 4]
             cont = w_ref[i, t] * s[:, 2] + w_out[i, t] * s[:, 1]
-            L_line += A * np.interp(wave, ws, line / ws, left=0, right=0)
-            L_cont += A * np.interp(wave, ws, cont / ws, left=0, right=0)
-            L_all += 2 * A * np.interp(wave, w0, (s[:, 3] + s[:, 4]) / w0,
-                                       left=0, right=0)
+            # the column stands for wid[c] sim phi cells: spread its light
+            # evenly over them, each at its own v_los (one velocity per
+            # column left the summed profiles a comb of spikes ~500 km/s
+            # apart, as Cloudy's lines are one ~200 km/s bin wide).
+            # nu F_nu / lambda = F_lambda; a Doppler shift keeps the
+            # luminosity per bin, so rebin the shifted density
+            for k in range(wid[c]):
+                v = vlos[(c + k) % nph, t, ir]
+                sh = 1.0 - v / C_KMS
+                ws, es = w0 * sh, e0 * sh
+                L_line += A / wid[c] * rebin(e_new, es, line / ws)
+                L_cont += A / wid[c] * rebin(e_new, es, cont / ws)
+            L_all += 2 * A * rebin(e_new, e0, (s[:, 3] + s[:, 4]) / w0)
     cover = sum(wid.values()) / nph            # fraction of phi covered
     return dict(line=L_line, cont=L_cont, line_all=L_all, ncol=len(cols),
                 nray=len(cols) * nup, ntot=nph // dph * nup, cover=cover)
@@ -389,7 +417,7 @@ def plot_map(out, iph):
     rdir = os.path.join(out, 'rays')
     names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
         os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
-    names = [n for n in names if finished(rdir, n)]
+    names = [n for n in names if finished(rdir, n, lenient=True)]
     if not names:
         raise SystemExit(f'no finished rays at iph = {iph}')
     sim = load_sim(DUMP)
@@ -526,7 +554,7 @@ def plot_rays(out, iph, maponly=False):
     rdir = os.path.join(out, 'rays')
     names = sorted(os.path.basename(p)[:-4] for p in glob.glob(
         os.path.join(rdir, f'ray_p{iph:03d}_t*.ems')))
-    names = [n for n in names if finished(rdir, n)]
+    names = [n for n in names if finished(rdir, n, lenient=True)]
     if not names:
         raise SystemExit(f'no finished rays at iph = {iph}')
     sim = load_sim(DUMP)
@@ -700,7 +728,7 @@ def faceon_map(out, dph):
     nray, ncol = 0, {}
     for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_t*.out'))):
         name = os.path.basename(o)[:-4]
-        if not finished(rdir, name):
+        if not finished(rdir, name, lenient=True):
             continue
         iph, ith = int(name[5:8]), int(name[-2:])
         e = np.loadtxt(o[:-4] + '.ems')
@@ -829,7 +857,7 @@ def spectrum_plots(out, dph):
     phys = to_physical(sim, CONFIG)
     rdir = os.path.join(out, 'rays')
     first = next(n for n in sorted(glob.glob(os.path.join(rdir, '*.conA')))
-                 if finished(rdir, os.path.basename(n)[:-5]))
+                 if finished(rdir, os.path.basename(n)[:-5], lenient=True))
     wave = read_conA(first)[:, 0]
     R = ray_spectra(out, sim, phys, CONFIG, wave, dph)
     i_deg = CONFIG['INCL_DEG']

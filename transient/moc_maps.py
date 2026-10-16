@@ -454,6 +454,9 @@ def main():
     sfx = f'_taper{a.taper:g}' if a.taper > 0 else ''
     if a.inner > 0:
         sfx += f'_in{a.inner:g}q{a.q:g}'
+    if sfx:                       # variants in their own folder, plots/<tag>
+        pdir = os.path.join(pdir, sfx[1:])
+        os.makedirs(pdir, exist_ok=True)
     if 'lines' in d and a.taper > 0:
         from transient.moc_spectrum import taper
         X, Y, Z = np.meshgrid(*d['axes'], indexing='ij')
@@ -476,11 +479,11 @@ def main():
             fill = lambda m: inner_fill(d, m, a.taper, a.inner, a.q)
         else:
             fill = lambda m: m
-        path = os.path.join(pdir, f'moc_maps_{view}{sfx}.png')
+        path = os.path.join(pdir, f'moc_maps_{view}.png')
         plot_view(fill(maps), h, v, labels, titles[view], path, view)
         print(f'  wrote {path}')
         if view == 'faceon' and 'faceon_smooth' in titles:
-            path = os.path.join(pdir, f'moc_maps_faceon_smooth{sfx}.png')
+            path = os.path.join(pdir, 'moc_maps_faceon_smooth.png')
             plot_view(fill(smooth_faceon(d, maps, dr)), h, v, labels,
                       titles['faceon_smooth'], path, view)
             print(f'  wrote {path}')

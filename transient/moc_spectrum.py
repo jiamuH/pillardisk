@@ -388,6 +388,9 @@ def main():
     os.makedirs(pdir, exist_ok=True)
     temperature_maps(sim, phys, CONFIG,
                      os.path.join(pdir, 'sim_temperature_faceon.png'))
+    # taper / inner-ring variants go to their own folder, plots/<tag>
+    odir = os.path.join(pdir, sfx[1:]) if sfx else pdir
+    os.makedirs(odir, exist_ok=True)
     fig, axs = plt.subplots(1, len(PANELS), figsize=(5.2 * len(PANELS), 5))
     # MOCASSIN all-sky: every active cell, both sides, rest frame
     M_all = {n: d['lines'][n][act].sum() * 1e36 + M_in.get(n, 0.0)
@@ -437,7 +440,7 @@ def main():
     fig.suptitle(rf'$\rm line~profiles,~i={i_deg:.0f}^\circ~'
                  rf'(observer~side;~+v=\rm redshift)$')
     fig.tight_layout()
-    out = os.path.join(pdir, f'moc_line_profiles{sfx}.png')
+    out = os.path.join(odir, 'moc_line_profiles.png')
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"wrote {out}")
@@ -482,7 +485,7 @@ def main():
                  r'(no~Ly\alpha,~no~Fe)$', fontsize=16)
     ax.legend(fontsize=12, frameon=False, loc='upper right')
     ticks(ax)
-    out = os.path.join(pdir, f'moc_full_spectrum{sfx}.png')
+    out = os.path.join(odir, 'moc_full_spectrum.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {out}")
@@ -519,7 +522,7 @@ def main():
     ax.legend(fontsize=13, frameon=False, loc='upper right',
               bbox_to_anchor=(1.0, 0.86))
     ticks(ax)
-    out = os.path.join(pdir, f'moc_line_spectrum{sfx}.png')
+    out = os.path.join(odir, 'moc_line_spectrum.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {out}")

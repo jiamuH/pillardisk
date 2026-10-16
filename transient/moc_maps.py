@@ -54,6 +54,10 @@ plt.rcParams['text.latex.preamble'] = r'\usepackage{amsmath} \usepackage{bm} \bo
 
 DEFAULT_RUN = '/data2/jhuang/runs/mocassin/moc_coarse'
 NSTAGES = 7
+# cells whose thermal balance collapsed to MOCASSIN's temperature floor
+# (moc_edd10: 5 half-ionized cells at Te = 1-2 K on the irradiated outer
+# rim, which the ~1/T recombination fits turn into 72% of all H alpha)
+TE_FAIL = 10.0
 # plot.out columns of the original seven-line plot.in (used when there is
 # no input/plot_lines.txt); the first seven of moc_plotin's list too
 PLOT_COLS = ['Ha', 'Hb', 'CIV1551', 'CIV1548', 'MgII2804', 'MgII2796',
@@ -132,8 +136,19 @@ def load_run(run):
             raise SystemExit(f'plot.out has {pl.shape[1]} lines, matching '
                              'neither input/plot_lines.txt nor the original '
                              'seven: rerun mocassinPlot')
-        d['lines'] = {name: pl[:, i].reshape(shape)
-                      for i, name in enumerate(names)}
+        raw = {name: pl[:, i].reshape(shape)
+               for i, name in enumerate(names)}
+        # failed cold cells join the masked black cells; non-finite cell
+        # values (He I fits overflowing in ~100 K neutral gas) are zero
+        cold = d['active'] & (d['Te'] < TE_FAIL)
+        d['active'] &= ~cold
+        nbad = sum(int((~np.isfinite(v)).sum()) for v in raw.values())
+        if cold.any() or nbad:
+            print(f"  masked {cold.sum()} cells with Te < {TE_FAIL:g} K; "
+                  f"zeroed {nbad} non-finite cell line values")
+        d['lines_raw'] = raw
+        d['lines'] = {k: np.where(np.isfinite(v) & ~cold, v, 0.0)
+                      for k, v in raw.items()}
 
     # r0 in cm: grid.npz stores the same cell centres in units of r0
     npz = np.load(os.path.join(run, 'grid.npz'))
@@ -150,7 +165,8 @@ def check_totals(d, run):
     that each plot.out column is the line its code claims."""
     txt = open(os.path.join(run, 'output', 'lineFlux.out')).read()
     hb_ref = float(re.search(r'Hbeta \[E36 erg/s\]:\s+(\S+)', txt).group(1))
-    hb = d['lines']['Hb'].sum()
+    lines = d['lines_raw']                 # as written, failed cells too
+    hb = lines['Hb'].sum()
     print(f"  H beta: plot.out {hb:.5g}, lineFlux.out {hb_ref:.5g} "
           f"[1e36 erg/s]")
     fs = txt[txt.index('Formal Solution'):txt.index('Component:')]
@@ -158,7 +174,9 @@ def check_totals(d, run):
     for r in d['line_table']:
         m = re.search(rf'\s(\S+)\s+{r["code"]}\s*\n', fs)
         ref = float(m.group(1)) if m else np.nan
-        val = d['lines'][r['name']].sum() / hb
+        val = lines[r['name']].sum() / hb
+        if not (np.isfinite(val) and np.isfinite(ref)):
+            continue                       # overflowed in both, see TE_FAIL
         dev.append((abs(val / ref - 1) if ref > 0 else np.inf, r['name'],
                     val, ref))
     dev.sort(reverse=True)

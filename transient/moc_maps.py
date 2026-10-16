@@ -58,6 +58,7 @@ NSTAGES = 7
 # (moc_edd10: 5 half-ionized cells at Te = 1-2 K on the irradiated outer
 # rim, which the ~1/T recombination fits turn into 72% of all H alpha)
 TE_FAIL = 10.0
+T0_SIGMA = 1.0     # face-on T0 pooling, Gaussian sigma [pixels]
 R_IN = 0.5        # sim inner boundary [r0] (athdf RootGridX1[0])
 # MOCASSIN's He I recombination fits diverge in cold neutral gas (moc_edd10:
 # He I 5877 = 1e31 x H beta in a 113 K cell, 1e11 x the H beta total); He I
@@ -233,6 +234,15 @@ def view_maps(d, view):
         for k, v in qty.items():
             out[k] = np.where(ws > 0, (v * wt).sum(axis=2)
                               / np.where(ws > 0, ws, 1), np.nan)
+        # T0 per pixel rests on ~2 cells (40% of the weight unconverged in
+        # moc_edd10; adjacent columns differ by ~2000 K): pool the weight
+        # over a patch - Gaussian (sigma = T0_SIGMA px) of sum(T w) and
+        # sum(w) separately, still an n_e n(H+)-weighted mean
+        from scipy.ndimage import gaussian_filter
+        num = gaussian_filter((qty['Te'] * wt).sum(axis=2), T0_SIGMA)
+        den = gaussian_filter(ws, T0_SIGMA)
+        out['Te'] = np.where((ws > 0) & (den > 0),
+                             num / np.where(den > 0, den, 1), np.nan)
         # observer-side ion columns N(ion) = sum x A n_H dz [cm^-2]
         dzw = np.diff(edges(zc)) * zside
         for k, z in (('NH1', 1), ('NC4', 6), ('NMg2', 12)):
@@ -501,7 +511,7 @@ def main():
         w = taper(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) / d['r0_cm'],
                   {'rf': [R_IN]}, a.taper)
         d['lines'] = {k: v * w for k, v in d['lines'].items()}
-    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ ion\ columns;\ T_0:\ weighted\ by\ n_e\,n(\rm H^+))$',
+    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ ion\ columns;\ T_0:\ n_e\,n(\rm H^+)\mbox{-}weighted,\ pooled\ over\ \sigma=1\,px)$',
               'midplane': r'$\rm midplane\ slice\ (z=0)$',
               'vertical': r'$\rm vertical\ slice\ (y=0)$'}
     if 'lines' in d:

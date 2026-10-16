@@ -61,7 +61,8 @@ from multiprocessing import Pool
 
 import numpy as np
 
-from transient.sim_spectrum import load_sim, to_physical, CONFIG, LD_CM
+from transient.sim_spectrum import (load_sim, to_physical, CONFIG, LD_CM,
+                                    C_KMS)
 from transient.sim_cloudy_spectrum import Q_ION
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -239,6 +240,103 @@ def read_conA(path):
                 rows.append((w, float(f[3]), float(f[5]), float(f[7]),
                              float(f[8])))
     return np.array(rows)[::-1]
+
+
+def ray_spectra(out, sim, phys, cfg, wave, dph=2):
+    """Observed spectra at cfg['INCL_DEG'] from the finished in-plane rays
+    (lamp at the origin, rays = sim columns), on the wavelength grid wave:
+    returns dict(line, cont [erg/s/A, observer side], line_all [all-sky,
+    rest frame], ncol, nray, ntot).
+      ray luminosity = Cloudy nu F_nu at the inner face x r_in^2 dOmega
+        (no tilt factor: a tilted surface is resolved along the radial ray)
+      face: the surface traced by each ray's emission-weighted radius r_em
+        (H alpha + C IV + Mg II) gives the normal; the observer sees the
+        lit face (reflected) or the back (outward) with the pipeline's
+        tanh blend and Lambert 4|cos| projection (compute_rays); rays that
+        never turn opaque (stopped at the outer radius) emit both
+        components isotropically
+      v_los of the sim cell at r_em, as compute_rays' per-ray velocity
+      only complete phi columns, each standing for the phi range up to the
+        next one; all-sky = twice the upper hemisphere (the lamp lights
+        both sides alike)."""
+    from transient.sim_spectrum import vlos_cube
+    rdir = os.path.join(out, 'rays')
+    r0 = cfg['R0_LD'] * LD_CM
+    th, ph, rf = sim['th'], sim['ph'], sim['rf']
+    nph = len(ph)
+    nup = int((th <= np.pi / 2).sum())
+    rays = {}
+    for o in glob.glob(os.path.join(rdir, 'ray_p*_t*.out')):
+        n = os.path.basename(o)[:-4]
+        if finished(rdir, n):
+            rays.setdefault(int(n[5:8]), []).append(int(n[-2:]))
+    cols = sorted(c for c, t in rays.items() if len(t) == nup)
+    if not cols:
+        raise SystemExit('no complete phi column yet')
+    # phi width each column stands for (to the next complete one)
+    nxt = cols[1:] + [cols[0] + nph]
+    wid = {c: (min(n2 - c, 16) if len(cols) > 1 else dph)
+           for c, n2 in zip(cols, nxt)}
+    nw = len(wave)
+    spec = {}
+    rem = np.full((len(cols), nup), rf[-1])
+    stop_out = np.zeros((len(cols), nup), bool)
+    for i, c in enumerate(cols):
+        for t in range(nup):
+            n = f'ray_p{c:03d}_t{t:02d}'
+            s = read_conA(os.path.join(rdir, n + '.conA'))
+            e = np.loadtxt(os.path.join(rdir, n + '.ems'))
+            w = (e[:, 1] + e[:, 3:7].sum(axis=1)) * np.gradient(e[:, 0])
+            if w.sum() > 0:
+                rem[i, t] = rf[0] + (w * e[:, 0]).sum() / w.sum() / r0
+            txt = open(os.path.join(rdir, n + '.out'), errors='ignore').read()
+            stop_out[i, t] = 'outer radius reached' in txt
+            spec[i, t] = s
+    w0 = spec[0, 0][:, 0]
+    # face normal of the r_em surface (theta from the grid, phi across
+    # the complete columns, periodic)
+    lnf = np.log(rem)
+    phc = ph[cols]
+    dth = np.gradient(lnf, th[:nup], axis=1)
+    if len(cols) > 2:
+        php = np.concatenate([[phc[-1] - 2 * np.pi], phc, [phc[0] + 2 * np.pi]])
+        lp = np.concatenate([lnf[-1:], lnf, lnf[:1]], axis=0)
+        dph_ = np.gradient(lp, php, axis=0)[1:-1]
+    else:
+        dph_ = np.zeros_like(lnf)
+    a, b = dth, dph_ / np.sin(th[:nup])[None, :]
+    st, ct = np.sin(th[:nup])[None, :], np.cos(th[:nup])[None, :]
+    sp, cp = np.sin(phc)[:, None], np.cos(phc)[:, None]
+    nx = st * cp - a * ct * cp + b * sp
+    nz = ct + a * st
+    nn = np.sqrt(nx ** 2 + (st * sp - a * ct * sp - b * cp) ** 2 + nz ** 2)
+    i_obs = np.radians(cfg['INCL_DEG'])
+    cosv = (nx * np.sin(i_obs) + nz * np.cos(i_obs)) / nn
+    s_out = 0.5 * (1.0 + np.tanh(cosv / 0.3))
+    proj = 4.0 * np.abs(cosv)
+    w_out = np.where(stop_out, 1.0, s_out * proj)
+    w_ref = np.where(stop_out, 1.0, (1.0 - s_out) * proj)
+    _, (r_o, t_o, p_o) = vlos_cube(sim, cfg['INCL_DEG'])
+    vlos = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
+    L_line, L_cont, L_all = (np.zeros(nw) for _ in range(3))
+    for i, c in enumerate(cols):
+        dphi = (ph[1] - ph[0]) * wid[c]
+        for t in range(nup):
+            s = spec[i, t]
+            dom = (np.cos(sim['thf'][t]) - np.cos(sim['thf'][t + 1])) * dphi
+            A = (rf[0] * r0) ** 2 * dom
+            ir = min(np.searchsorted(rf, rem[i, t]) - 1, len(sim['r']) - 1)
+            v = vlos[c, t, max(ir, 0)]
+            ws = w0 * (1.0 - v / C_KMS)
+            line = w_ref[i, t] * s[:, 3] + w_out[i, t] * s[:, 4]
+            cont = w_ref[i, t] * s[:, 2] + w_out[i, t] * s[:, 1]
+            L_line += A * np.interp(wave, ws, line / ws, left=0, right=0)
+            L_cont += A * np.interp(wave, ws, cont / ws, left=0, right=0)
+            L_all += 2 * A * np.interp(wave, w0, (s[:, 3] + s[:, 4]) / w0,
+                                       left=0, right=0)
+    cover = sum(wid.values()) / nph            # fraction of phi covered
+    return dict(line=L_line, cont=L_cont, line_all=L_all, ncol=len(cols),
+                nray=len(cols) * nup, ntot=nph // dph * nup, cover=cover)
 
 
 def heii_profile(rdir, name, depth):

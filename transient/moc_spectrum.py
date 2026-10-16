@@ -343,6 +343,10 @@ def main():
                          '(InnerRings), both codes; figures get _in')
     ap.add_argument('--q', type=float, default=2.0,
                     help='surface-brightness slope r^-q of --inner')
+    ap.add_argument('--rays', default=None, metavar='DIR',
+                    help='add the per-ray Cloudy spectra of a '
+                         'transient.cloudy_rays run (in-plane lamp; '
+                         'complete phi columns; no taper or inner rings)')
     a = ap.parse_args()
     d = load_run(a.run)
     if 'lines' not in d:
@@ -379,6 +383,15 @@ def main():
               f"({ib.sum()} cells); v_K sin i at {a.inner:g} r0 = "
               f"{np.sqrt(6.674e-8 * 1.989e33 * CONFIG['MBH_MSUN'] / (a.inner * CONFIG['R0_LD'] * LD_CM)) / 1e5 * np.sin(np.radians(CONFIG['INCL_DEG'])):.0f} km/s")
     wave, P = pipeline(sim, phys, a.taper, inner)
+    RY = None
+    if a.rays:
+        from transient.cloudy_rays import ray_spectra
+        RY = ray_spectra(a.rays, sim, phys, CONFIG, wave)
+        print(f"per-ray Cloudy: {RY['ncol']} complete phi columns, "
+              f"{RY['nray']}/{RY['ntot']} rays, covering "
+              f"{100 * RY['cover']:.0f}% of phi"
+              + ("" if RY['cover'] > 0.999 else
+                 " - INCOMPLETE: totals low, profiles lopsided"))
     M = moc_lines(d, v, sig, wave,
                   None if inner is None else (r_cell, inner))
     i_deg = CONFIG['INCL_DEG']
@@ -421,6 +434,16 @@ def main():
         print(f"{name:12s} {Lm:9.2e} {Lp:9.2e} {Lm / Lp:6.2f}   "
               f"{Am:9.2e} {Ap:9.2e} {Am / Ap:6.2f}   "
               f"{pm[0]:+6.0f} {pm[1]:+6.0f} / {pp[0]:+6.0f} {pp[1]:+6.0f}")
+        if RY is not None:
+            Lr = np.sum((RY['line'] * dl)[wi])
+            Ar = np.sum((RY['line_all'] * dl)[wi])
+            pr = peaks(vel[wi], RY['line'][wi])
+            print(f"{'  per ray':12s} {Lr:9.2e} {'(MOC/ray':>9s} "
+                  f"{Lm / Lr:5.2f})   {Ar:9.2e} {'(MOC/ray':>9s} "
+                  f"{Am / Ar:5.2f})   ray peaks {pr[0]:+6.0f} {pr[1]:+6.0f}")
+            ax.plot(vel[win], RY['line'][win], '-', color='royalblue',
+                    lw=2, drawstyle='steps-mid',
+                    label=r'$\rm Cloudy~per~ray$')
         ax.plot(vel[win], P['line'][win], '-', color='gray', lw=2,
                 drawstyle='steps-mid', label=r'$\rm pipeline~(Cloudy)$')
         ax.plot(vel[win], m[win], '-', color='crimson', lw=2,
@@ -498,6 +521,10 @@ def main():
     ax.plot(wave, wave * np.where(L_moc > 0, L_moc, np.nan), '-',
             color='dodgerblue', lw=1.8, alpha=0.85, drawstyle='steps-mid',
             label=rf'$\rm MOCASSIN~lines~({len(M)})$')
+    if RY is not None:
+        ax.plot(wave, wave * np.where(RY['line'] > 0, RY['line'], np.nan),
+                '-', color='darkgreen', lw=1.6, alpha=0.85,
+                drawstyle='steps-mid', label=r'$\rm Cloudy~per~ray~lines$')
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.set_xlim(1000, 11000)

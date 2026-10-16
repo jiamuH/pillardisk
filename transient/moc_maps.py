@@ -448,7 +448,7 @@ def plot_view(maps, h, v, labels, title, path, view, columns=None):
             # than a cell can jump past it (moc_edd10: 13 lamp-facing rim
             # columns go from C4+ straight to neutral, N(C3+) ~1e-4 of
             # their neighbours); show the median of the valid 3x3
-            # neighbours there, marked with a white dot. Display only.
+            # neighbours there. Display only.
             hc, vc = 0.5 * (he[1:] + he[:-1]), 0.5 * (ve[1:] + ve[:-1])
             ion = np.isfinite(maps['NH1'].T)
             low = ion & ~(m >= lo)
@@ -462,11 +462,9 @@ def plot_view(maps, h, v, labels, title, path, view, columns=None):
                 rr = np.hypot(hc[ii], vc[jj])
                 if nb.size >= (3 if rr < 0.5 * hc.max() else 6):
                     fill[jj, ii] = np.median(nb)
-            filled = low & (fill >= lo)
             im = ax.pcolormesh(he, ve, np.maximum(fill, lo),
                                norm=LogNorm(lo, np.nanmax(m)), cmap='viridis')
-            jj, ii = np.nonzero(filled)
-            ax.plot(hc[ii], vc[jj], 'o', ms=2.5, mfc='white', mec='none')
+
         elif kind == 'logn':
             m = np.where(m > 0, m, np.nan)
             im = ax.pcolormesh(he, ve, m, norm=LogNorm(np.nanmin(m),

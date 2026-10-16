@@ -58,6 +58,7 @@ NSTAGES = 7
 # (moc_edd10: 5 half-ionized cells at Te = 1-2 K on the irradiated outer
 # rim, which the ~1/T recombination fits turn into 72% of all H alpha)
 TE_FAIL = 10.0
+R_IN = 0.5        # sim inner boundary [r0] (athdf RootGridX1[0])
 # MOCASSIN's He I recombination fits diverge in cold neutral gas (moc_edd10:
 # He I 5877 = 1e31 x H beta in a 113 K cell, 1e11 x the H beta total); He I
 # lines are zeroed below this Te (the cells hold <1e-6 of H beta)
@@ -311,6 +312,38 @@ def smooth_faceon(d, maps, dr):
     return out
 
 
+def inner_fill(d, maps, dr, rmin, q, nphi=64):
+    """Face-on line maps inside the sim's inner boundary R_IN, as
+    moc_spectrum's InnerRings: per azimuth bin, the anchor band's mean
+    S r^q continues inward as S ~ r^-q down to rmin, weighted by
+    1 - taper(r) and added to the (tapered) sim emission. Cylindrical r
+    (the spectrum uses spherical r per cell); Te, ion and N_H panels stay
+    empty there."""
+    from transient.moc_spectrum import InnerRings, taper
+    sim = {'rf': [R_IN]}
+    ir = InnerRings(sim, dr, rmin, q)
+    x, y, _ = (a / d['r0_cm'] for a in d['axes'])
+    X, Y = np.meshgrid(x, y, indexing='ij')
+    R = np.hypot(X, Y)
+    ib = ((np.arctan2(Y, X) + np.pi) / (2 * np.pi) * nphi).astype(int) % nphi
+    inside = (R >= rmin) & (R < ir.band[0])
+    out = dict(maps)
+    for key in ('Ha', 'CIV', 'MgII'):
+        if key not in maps:
+            continue
+        m = maps[key]
+        band = ir.in_band(R) & np.isfinite(m)
+        cnt = np.bincount(ib[band], None, nphi)
+        Sq = np.bincount(ib[band], (m * R ** q)[band], nphi) / \
+            np.maximum(cnt, 1)
+        # bins the coarse band misses: periodic interpolation
+        k = np.arange(nphi)
+        Sq = np.interp(k, k[cnt > 0], Sq[cnt > 0], period=nphi)
+        fill = Sq[ib] * R ** -q * (1.0 - taper(R, sim, dr))
+        out[key] = np.where(inside, np.nan_to_num(m) + fill, m)
+    return out
+
+
 def add_colorbar(pc, ax):
     """Colorbar with exactly the height of the parent axes (same as
     transient.sim_spectrum.add_colorbar, which cannot be imported on the
@@ -374,8 +407,10 @@ def plot_view(maps, h, v, labels, title, path, view):
             # cells with gas but (near) zero emission get the bottom
             # colour (cold neutral gas underflows to exactly 0 in
             # MOCASSIN's single precision); white is left for no gas
-            # and the masked black cells, as in the other panels
-            gas = np.isfinite(maps['nH'].T) & (maps['nH'].T > 0)
+            # and the masked black cells, as in the other panels (the
+            # inner_fill rings are emission without sim gas: kept)
+            gas = (np.isfinite(maps['nH'].T) & (maps['nH'].T > 0)) | \
+                (np.nan_to_num(m) > 0)
             m = np.where(gas, np.maximum(np.nan_to_num(m), lnorm.vmin),
                          np.nan)
             im = ax.pcolormesh(he, ve, m, norm=lnorm, cmap='magma')
@@ -394,6 +429,13 @@ def plot_view(maps, h, v, labels, title, path, view):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--run', default=DEFAULT_RUN)
+    ap.add_argument('--taper', type=float, default=0.0, metavar='DR',
+                    help='inner-edge taper of the line maps [r0], as '
+                         'moc_spectrum')
+    ap.add_argument('--inner', type=float, default=0.0, metavar='RMIN',
+                    help='fill the face-on line maps inward to RMIN [r0] '
+                         '(moc_spectrum InnerRings)')
+    ap.add_argument('--q', type=float, default=2.0)
     a = ap.parse_args()
     d = load_run(a.run)
     nact = d['active'].sum()
@@ -409,6 +451,15 @@ def main():
         print('  no output/plot.out yet: line panels left empty')
     pdir = os.path.join(a.run, 'plots')
     os.makedirs(pdir, exist_ok=True)
+    sfx = f'_taper{a.taper:g}' if a.taper > 0 else ''
+    if a.inner > 0:
+        sfx += f'_in{a.inner:g}q{a.q:g}'
+    if 'lines' in d and a.taper > 0:
+        from transient.moc_spectrum import taper
+        X, Y, Z = np.meshgrid(*d['axes'], indexing='ij')
+        w = taper(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) / d['r0_cm'],
+                  {'rf': [R_IN]}, a.taper)
+        d['lines'] = {k: v * w for k, v in d['lines'].items()}
     titles = {'faceon': r'$\rm face\mbox{-}on\ (lines:\ observer\ side\ z>0;\ x,\ T_e:\ n_H\mbox{-}weighted)$',
               'midplane': r'$\rm midplane\ slice\ (z=0)$',
               'vertical': r'$\rm vertical\ slice\ (y=0)$'}
@@ -421,12 +472,16 @@ def main():
             + f'{dr / 2:.2f}' + r'\,r_0)$')
     for view in ('faceon', 'midplane', 'vertical'):
         maps, h, v, labels = view_maps(d, view)
-        path = os.path.join(pdir, f'moc_maps_{view}.png')
-        plot_view(maps, h, v, labels, titles[view], path, view)
+        if view == 'faceon' and 'lines' in d and a.inner > 0:
+            fill = lambda m: inner_fill(d, m, a.taper, a.inner, a.q)
+        else:
+            fill = lambda m: m
+        path = os.path.join(pdir, f'moc_maps_{view}{sfx}.png')
+        plot_view(fill(maps), h, v, labels, titles[view], path, view)
         print(f'  wrote {path}')
         if view == 'faceon' and 'faceon_smooth' in titles:
-            path = os.path.join(pdir, 'moc_maps_faceon_smooth.png')
-            plot_view(smooth_faceon(d, maps, dr), h, v, labels,
+            path = os.path.join(pdir, f'moc_maps_faceon_smooth{sfx}.png')
+            plot_view(fill(smooth_faceon(d, maps, dr)), h, v, labels,
                       titles['faceon_smooth'], path, view)
             print(f'  wrote {path}')
 

@@ -27,7 +27,8 @@ sr is F r_in^2.
 
 Steps (all with --out DIR):
   write    decks for the upper-hemisphere rays (every --dph-th phi)
-  run      run the decks in parallel (--ncpu), skipping finished rays
+  run      run the decks in parallel (--ncpu), skipping finished rays,
+           coarse to fine in phi (every 16th column first, then 8th, ...)
   extract  collect the spectra into rays.npz
   faceon   face-on H alpha, Mg II, C IV surface brightness maps from the
            finished rays (plots/faceon_lines.png)
@@ -416,13 +417,18 @@ def faceon_map(out, dph):
         seen[iph] = True
         nray += 1
         ncol[iph] = ncol.get(iph, 0) + 1
-    # spread each ray's phi column over the dph sim cells it stands for
-    for iph in np.nonzero(seen)[0]:
-        for j in range(1, dph):
-            if iph + j < nph:
-                L[:, iph + j] = L[:, iph] / dph
-        L[:, iph] /= dph
-        seen[iph:iph + dph] = True
+    # each finished phi column stands for the sim cells up to the next
+    # finished column (dph when all are done; wider on a coarse first
+    # pass of the run), its luminosity spread evenly over them; its rays'
+    # dOmega above counted dph cells, so rescale to the real width
+    cols = np.nonzero(seen)[0]
+    for j, iph in enumerate(cols):
+        nxt = cols[(j + 1) % len(cols)] + (nph if j + 1 == len(cols) else 0)
+        wdt = int(min(nxt - iph, 16)) if len(cols) > 1 else dph
+        tot = L[:, iph] * wdt / dph
+        for c in range(iph, iph + wdt):
+            L[:, c % nph] = tot / wdt
+            seen[c % nph] = True
     area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
         np.diff(phf)[:, None]
     S = np.where(seen[None, :, None], L / area[None], np.nan)
@@ -513,6 +519,15 @@ def main():
     elif a.step == 'run':
         names = sorted(os.path.basename(p)[:-3]
                        for p in glob.glob(os.path.join(rdir, 'ray_*.in')))
+
+        # coarse to fine in phi: all rays at every 16th phi column first,
+        # then every 8th, 4th, ... so that stopping at any point leaves an
+        # evenly sampled disk (a full map and spectrum at coarser phi)
+        def level(n):
+            iph = int(n[5:8])
+            return next(k for k, m in enumerate((16, 8, 4, 2, 1))
+                        if iph % m == 0)
+        names.sort(key=lambda n: (level(n), n))
         if a.only:
             names = names[:a.only]
         print(f"running {len(names)} rays on {a.ncpu} cores with {EXE}",

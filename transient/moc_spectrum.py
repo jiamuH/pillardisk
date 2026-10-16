@@ -53,7 +53,7 @@ from matplotlib.ticker import ScalarFormatter, NullFormatter  # noqa: E402
 from transient.sim_spectrum import (  # noqa: E402
     load_sim, to_physical, vlos_cube, CONFIG, C_KMS, LD_CM)
 from transient.sim_cloudy_spectrum import load_grid, compute_rays  # noqa: E402
-from transient.sim_full_spectrum import thermal_and_agn  # noqa: E402
+from transient.sim_full_spectrum import thermal_and_agn, hotspot_thermal  # noqa: E402
 from transient.cmi_convert import resample  # noqa: E402
 from transient.moc_convert import grid_half  # noqa: E402
 from transient.moc_maps import load_run, DEFAULT_RUN  # noqa: E402
@@ -283,6 +283,8 @@ def pipeline(sim, phys, dr=0.0, inner=None):
                     wave, ws, rays['F_line'][i] / ws, left=0, right=0)
     L_th_base, L_agn = thermal_and_agn(sim, phys, CONFIG, wave)
     L_th = 4.0 * np.cos(np.radians(CONFIG['INCL_DEG'])) * L_th_base
+    L_hot = 4.0 * np.cos(np.radians(CONFIG['INCL_DEG'])) * \
+        hotspot_thermal(sim, phys, CONFIG, wave)[0]
     # angle-integrated (all-sky) rest-frame line power: every slab face
     # counted once, with no face selection, Lambert 4|cos| or observer-side
     # cut - the quantity to set against MOCASSIN's whole-grid totals
@@ -294,6 +296,7 @@ def pipeline(sim, phys, dr=0.0, inner=None):
         L_in_all = ((A_all[ib] * inner.factor(r_if[ib]).sum(axis=1))
                     @ F_all[ib]) / wave
     return wave, dict(cont=L_cont, line=L_line + L_in, th=L_th, agn=L_agn,
+                      hot=L_hot,
                       line_all=L_all + L_in_all, line_in=L_in,
                       line_in_all=L_in_all)
 
@@ -457,6 +460,8 @@ def main():
             label=r'$\rm MOCASSIN~lines~alone$')
     ax.plot(wave, wave * P['th'], '-', color='seagreen', lw=2.2, alpha=0.9,
             label=r'${\rm thermal~(sim~}T_{\rm eff}{\rm ,~disk+TDE+arms)}$')
+    ax.plot(wave, wave * P['hot'], '-.', color='teal', lw=2.2,
+            label=r'${\rm TDE~hotspot~(excess~heat/}t_{\rm diff}{\rm ,~not~in~totals)}$')
     ax.plot(wave, wave * P['agn'], '--', color='royalblue', lw=2.2,
             alpha=0.9, label=r'$\rm AGN~direct~(Cloudy~incident~SED)$')
     ax.set_xscale('log')

@@ -137,6 +137,52 @@ def thermal_and_agn(sim, phys, cfg, wave):
     return L_th_base, L_agn
 
 
+def hotspot_thermal(sim, phys, cfg, wave, gamma=5.0 / 3.0, hfrac=0.2):
+    """Thermal emission of the TDE hotspot from its ENERGY, not the sim
+    temperature (the sim is adiabatic, without cooling, so P/rho keeps
+    every bit of dissipated heat). Per (phi, r) column: excess thermal
+    energy E = sum (P - P_bg)/(gamma - 1) dV, P = rho (P/rho)_code v0^2
+    (literal, set by the orbital speed), P_bg = phi-median at the same
+    (r, theta); radiated over the photon diffusion time t = max(tau_es, 1)
+    h / c (tau_es of the half column, h = hfrac r): L = E / t, two faces,
+    T_eff = (L / 2 sigma A)^(1/4). E and tau both scale with n_mid, so L
+    and T_eff do not depend on the density or temperature anchors. An
+    upper bound: E is the heat stored over the whole run, which a cooling
+    hotspot would have radiated. Returns (L_base as thermal_and_agn's,
+    T_eff (phi, r), L_col)."""
+    r, th = sim['r'], sim['th']
+    r0 = cfg['R0_LD'] * LD_CM
+    v0 = np.sqrt(6.674e-8 * cfg['MBH_MSUN'] * 1.989e33 / r0)
+    rho = phys['nH'] * 1.4 * 1.6726e-24
+    P = rho * sim['press'] / sim['rho'] * v0 ** 2
+    dth = np.diff(sim['thf'])
+    vol = (np.diff(sim['phf'])[:, None, None]
+           * (np.sin(th) * dth)[None, :, None]
+           * ((r * r0) ** 2 * np.diff(sim['rf']) * r0)[None, None, :])
+    E = (np.clip(P - np.median(P, axis=0, keepdims=True), 0, None)
+         / (gamma - 1) * vol).sum(axis=1)
+    tau = 0.34 * (rho * (r * r0)[None, None, :]
+                  * dth[None, :, None]).sum(axis=1) / 2
+    L_col = E / (np.maximum(tau, 1.0) * hfrac * r * r0 / C_CGS)
+    dA = (r * r0 * np.diff(sim['rf']) * r0)[None, :] * \
+        np.diff(sim['phf'])[:, None]
+    T = (L_col / (2 * SB * dA)) ** 0.25
+    L_base = np.zeros_like(wave)
+    hot = T > 1000.0
+    tb = np.linspace(3.0, np.log10(T.max()) + 1e-6, 41)    # as thermal_and_agn
+    ib = np.digitize(np.log10(T[hot]), tb) - 1
+    for k in range(40):
+        sel = ib == k
+        if sel.any():
+            L_base += dA[hot][sel].sum() * np.pi * b_lambda(
+                wave, 10 ** (0.5 * (tb[k] + tb[k + 1])))
+    Lt = L_col.sum()
+    print(f"hotspot (excess heat / diffusion time, gamma = {gamma:.3g}): "
+          f"L = {Lt:.2e} erg/s, T_eff L-weighted {np.sum(T * L_col) / Lt:.0f}"
+          f" K, max {T.max():.0f} K")
+    return L_base, T, L_col
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else \
         os.path.join(HERE, 'data', 'sim', 'disk.out1.00012.athdf')

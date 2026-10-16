@@ -392,7 +392,12 @@ def heii_profile(rdir, name, depth):
     if m is None:
         return np.zeros_like(depth)
     tot = 10 ** float(m.group(1))
-    norm = (shape * np.gradient(depth)).sum()
+    # the .out intensity is per cm^2 of the ray's inner face: emission at
+    # radius r counts (r / r_in)^2 (radius set: spherical dilution)
+    r_in = 10 ** float(re.search(r'\nradius +(-?[0-9.]+)',
+                                 open(os.path.join(rdir, name + '.in')).read()
+                                 ).group(1))
+    norm = (shape * ((r_in + depth) / r_in) ** 2 * np.gradient(depth)).sum()
     return shape * tot / norm if norm > 0 else np.zeros_like(depth)
 
 

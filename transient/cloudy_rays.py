@@ -222,6 +222,25 @@ def read_conA(path):
     return np.array(rows)[::-1]
 
 
+def heii_profile(rdir, name, depth):
+    """He II 1640 emissivity 4 pi j at the given depths for a ray run
+    before the decks saved it: a recombination line, so j ~ n_e n_H
+    x(He++) T_e^-0.8 from the ray's overview (zones), scaled so its depth
+    integral equals the ray's intrinsic He II 1640 in the .out file. No
+    rerun needed; checked against rays that save He II directly."""
+    import re
+    o = np.loadtxt(os.path.join(rdir, name + '.ovr'), usecols=(0, 1, 3, 4, 10))
+    d, T, nh, ne, x3 = o.T
+    shape = np.interp(depth, d, ne * nh * x3 * T ** -0.8)
+    txt = open(os.path.join(rdir, name + '.out'), errors='ignore').read()
+    m = re.search(r'He 2 +1640\.41A +(-?[0-9.]+)', txt)  # intrinsic first
+    if m is None:
+        return np.zeros_like(depth)
+    tot = 10 ** float(m.group(1))
+    norm = (shape * np.gradient(depth)).sum()
+    return shape * tot / norm if norm > 0 else np.zeros_like(depth)
+
+
 def plot_map(out, iph):
     """Meridional maps at phi index iph from the finished rays: the light
     each SEG-long stretch of a ray emits (sum 4 pi j dl [erg/s per cm^2 of
@@ -232,8 +251,7 @@ def plot_map(out, iph):
     ionized gas and reddens everything) whose hue is the local balance of
     the three lines (each relative to its own maximum, over RGB_DEX
     decades) and whose opacity is the brightness. Rays run before He II
-    was added to the decks lack it: left out of the He II panel and the
-    composite. Zoom on the inner rim in
+    was added to the decks get it from heii_profile (no rerun). Zoom on the inner rim in
     every panel; the sim's n_H in grey underneath."""
     import matplotlib
     matplotlib.use('Agg')
@@ -265,6 +283,9 @@ def plot_map(out, iph):
     pts = []                        # (R, z, L_Ha, L_HeII, L_CIV, L_MgII)
     for n in names:
         e = np.loadtxt(os.path.join(rdir, n + '.ems'))
+        if e.shape[1] < 9:                   # older deck: rebuild He II
+            he = heii_profile(rdir, n, e[:, 0])
+            e = np.column_stack([e, he, np.zeros_like(he)])
         th = sim['th'][int(n[-2:])]
         dd = np.gradient(e[:, 0])
         ib = (e[:, 0] / r0 // SEG).astype(int)

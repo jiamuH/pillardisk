@@ -185,19 +185,34 @@ def moc_lines(d, v, sig, wave):
     return spec
 
 
-def pipeline(sim, phys):
+def taper(r, sim, dr):
+    """Inner-edge taper of the line emission: sin^2 ramp in spherical r
+    [r0] from 0 at the sim's inner boundary to 1 at dr outside it (1
+    everywhere when dr <= 0). A post-processing weight standing in for
+    gas inside the boundary that would shield the lamp-facing rim wall
+    (62-86% of the lines at r < 0.6 r0 in moc_edd10); the rim's shadow on
+    the outer disk is kept as computed."""
+    if dr <= 0:
+        return np.ones_like(r)
+    x = np.clip((r - sim['rf'][0]) / dr, 0.0, 1.0)
+    return np.sin(0.5 * np.pi * x) ** 2
+
+
+def pipeline(sim, phys, dr=0.0):
     """Pipeline spectra at INCL_DEG: reprocessed continuum and lines
-    (Doppler-assembled per ray as sim_full_spectrum), thermal, AGN."""
+    (Doppler-assembled per ray as sim_full_spectrum), thermal, AGN. The
+    line spectra of each ray are weighted by taper(r_IF, dr)."""
     grid = load_grid()
     wave = grid[0]
     rays = compute_rays(sim, phys, CONFIG, grid)
+    wt = taper(rays['r_if'].reshape(-1), sim, dr)
     dA, shift = rays['dA'], 1.0 - rays['v_ray'] / C_KMS
     L_cont, L_line = np.zeros_like(wave), np.zeros_like(wave)
     for i in np.nonzero(dA)[0]:
         ws = wave * shift[i]
         L_cont += dA[i] * np.interp(wave, ws, rays['F_cont'][i] / ws,
                                     left=0, right=0)
-        L_line += dA[i] * np.interp(wave, ws, rays['F_line'][i] / ws,
+        L_line += wt[i] * dA[i] * np.interp(wave, ws, rays['F_line'][i] / ws,
                                     left=0, right=0)
     L_th_base, L_agn = thermal_and_agn(sim, phys, CONFIG, wave)
     L_th = 4.0 * np.cos(np.radians(CONFIG['INCL_DEG'])) * L_th_base
@@ -205,7 +220,7 @@ def pipeline(sim, phys):
     # counted once, with no face selection, Lambert 4|cos| or observer-side
     # cut - the quantity to set against MOCASSIN's whole-grid totals
     F_all = rays['F_raw']['refl_line'] + rays['F_raw']['out_line']
-    L_all = (slab_area_all(sim, rays['r_if']) @ F_all) / wave
+    L_all = ((wt * slab_area_all(sim, rays['r_if'])) @ F_all) / wave
     return wave, dict(cont=L_cont, line=L_line, th=L_th, agn=L_agn,
                       line_all=L_all)
 
@@ -243,6 +258,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--run', default=DEFAULT_RUN)
     ap.add_argument('--dump', default=DUMP)
+    ap.add_argument('--taper', type=float, default=0.0, metavar='DR',
+                    help='inner-edge sin^2 taper width of the line '
+                         'emission [r0], both codes; figures get _taper')
     a = ap.parse_args()
     d = load_run(a.run)
     if 'lines' not in d:
@@ -254,7 +272,17 @@ def main():
     print(f"cell v_los: |v| median {np.median(np.abs(v[act])):.0f} km/s, "
           f"max {np.abs(v[act]).max():.0f}; sub-cell sigma median "
           f"{np.median(sig[act]):.0f} km/s")
-    wave, P = pipeline(sim, phys)
+    if a.taper > 0:
+        x, y, z = np.meshgrid(*d['axes'], indexing='ij')
+        w = taper(np.sqrt(x ** 2 + y ** 2 + z ** 2) / d['r0_cm'], sim,
+                  a.taper)
+        L0 = {n: d['lines'][n][act].sum() for n in ('Ha', 'Hb')}
+        d['lines'] = {n: L * w for n, L in d['lines'].items()}
+        print(f"taper {a.taper:g} r0 from r = {sim['rf'][0]:g} r0: MOCASSIN "
+              + ', '.join(f"{n} x{d['lines'][n][act].sum() / L0[n]:.3f}"
+                          for n in L0))
+    sfx = f'_taper{a.taper:g}' if a.taper > 0 else ''
+    wave, P = pipeline(sim, phys, a.taper)
     M = moc_lines(d, v, sig, wave)
     i_deg = CONFIG['INCL_DEG']
 
@@ -302,7 +330,7 @@ def main():
     fig.suptitle(rf'$\rm line~profiles,~i={i_deg:.0f}^\circ~'
                  rf'(observer~side;~+v=\rm redshift)$')
     fig.tight_layout()
-    out = os.path.join(pdir, 'moc_line_profiles.png')
+    out = os.path.join(pdir, f'moc_line_profiles{sfx}.png')
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"wrote {out}")
@@ -345,7 +373,7 @@ def main():
                  r'(no~Ly\alpha,~no~Fe)$', fontsize=16)
     ax.legend(fontsize=12, frameon=False, loc='upper right')
     ticks(ax)
-    out = os.path.join(pdir, 'moc_full_spectrum.png')
+    out = os.path.join(pdir, f'moc_full_spectrum{sfx}.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {out}")
@@ -382,7 +410,7 @@ def main():
     ax.legend(fontsize=13, frameon=False, loc='upper right',
               bbox_to_anchor=(1.0, 0.86))
     ticks(ax)
-    out = os.path.join(pdir, 'moc_line_spectrum.png')
+    out = os.path.join(pdir, f'moc_line_spectrum{sfx}.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {out}")

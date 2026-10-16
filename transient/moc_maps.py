@@ -374,7 +374,7 @@ def add_colorbar(pc, ax):
     return cb
 
 
-def panels(view, columns=False):
+def panels(view, columns=None):
     """Row 1: Te and ion fractions; row 2: density and line emission."""
     dens = (r'$N_{\rm H}\,[\rm cm^{-2}]$' if view == 'faceon'
             else r'$n_{\rm H}\,[\rm cm^{-3}]$')
@@ -383,7 +383,12 @@ def panels(view, columns=False):
             else r'$L(\rm %s)\,[10^{36}\,\rm erg\,s^{-1}]$')
     temp = (r'$T_0({\rm H^+})\,[\rm K]$' if view == 'faceon'
             else r'$T_e\,[\rm K]$')
-    if columns:          # face-on ion columns instead of fractions
+    if columns is None:
+        columns = view == 'faceon'
+    # face-on: ion columns, not fractions - the ionized skin is 1-2 cells
+    # thick, so any column-averaged fraction mostly maps which z layer it
+    # crosses (grid moire), while the columns keep the real structure
+    if columns:
         ion = [('NH1', r'$N(\rm H^+)\,[\rm cm^{-2}]$', 'logcol'),
                ('NC4', r'$N(\rm C^{3+})\,[\rm cm^{-2}]$', 'logcol'),
                ('NMg2', r'$N(\rm Mg^{+})\,[\rm cm^{-2}]$', 'logcol')]
@@ -398,7 +403,7 @@ def panels(view, columns=False):
             ('MgII', line % r'Mg\,II\,2798', 'loglum')]
 
 
-def plot_view(maps, h, v, labels, title, path, view, columns=False):
+def plot_view(maps, h, v, labels, title, path, view, columns=None):
     he, ve = edges(h), edges(v)
     aspect = (ve[-1] - ve[0]) / (he[-1] - he[0])
     # map width per panel ~4.4 in (24 in / 4 minus colorbar and labels);
@@ -496,8 +501,7 @@ def main():
         w = taper(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) / d['r0_cm'],
                   {'rf': [R_IN]}, a.taper)
         d['lines'] = {k: v * w for k, v in d['lines'].items()}
-    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ T_0,\ x:\ weighted\ by\ n_e\,n(\rm H^+))$',
-              'faceon_columns': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ ion\ columns;\ T_0:\ weighted\ by\ n_e\,n(H^+))$',
+    titles = {'faceon': r'$\rm face\mbox{-}on\ (observer\ side\ z>0;\ ion\ columns;\ T_0:\ weighted\ by\ n_e\,n(\rm H^+))$',
               'midplane': r'$\rm midplane\ slice\ (z=0)$',
               'vertical': r'$\rm vertical\ slice\ (y=0)$'}
     if 'lines' in d:
@@ -516,11 +520,6 @@ def main():
         path = os.path.join(pdir, f'moc_maps_{view}.png')
         plot_view(fill(maps), h, v, labels, titles[view], path, view)
         print(f'  wrote {path}')
-        if view == 'faceon':
-            path = os.path.join(pdir, 'moc_maps_faceon_columns.png')
-            plot_view(fill(maps), h, v, labels, titles['faceon_columns'],
-                      path, view, columns=True)
-            print(f'  wrote {path}')
         if view == 'faceon' and 'faceon_smooth' in titles:
             path = os.path.join(pdir, 'moc_maps_faceon_smooth.png')
             plot_view(fill(smooth_faceon(d, maps, dr)), h, v, labels,

@@ -166,14 +166,21 @@ def line_data(d):
                         r['mass']) for r in t}
 
 
-def moc_lines(d, v, sig, wave):
-    """Observer-side MOCASSIN line spectra on wave, per plot.out column."""
+def moc_lines(d, v, sig, wave, inner=None):
+    """Observer-side MOCASSIN line spectra on wave, per plot.out column.
+    inner = (r_cell [r0], InnerRings): the band cells' lines are copied
+    onto the inner rings (deposited into the bins; their thermal and
+    sub-cell widths are far below a bin)."""
     z = d['axes'][2]
     zside = np.where(z > 0, 1.0, 0.0)
     zside[np.argmin(np.abs(z))] = 0.5
     sel = d['active'] & (zside[None, None, :] > 0)
     wz = np.broadcast_to(zside[None, None, :], sel.shape)[sel]
     vv, ss, Te = v[sel], sig[sel], d['Te'][sel]
+    if inner is not None:
+        rb = inner[0][sel]
+        ib = inner[1].in_band(rb)
+        rb = rb[ib]
     spec = {}
     for name, (lam0, mass) in line_data(d).items():
         L = d['lines'][name][sel] * 1e36 * wz                 # erg/s
@@ -182,6 +189,8 @@ def moc_lines(d, v, sig, wave):
         spec[name] = binned_lines(wave, L[keep],
                                   lam0 * (1 - vv[keep] / C_KMS),
                                   lam0 * s_kms[keep] / C_KMS)
+        if inner is not None:
+            spec[name] += inner[1].deposit(wave, lam0, L[ib], vv[ib], rb)
     return spec
 
 
@@ -193,15 +202,62 @@ def taper(r, sim, dr):
     (62-86% of the lines at r < 0.6 r0 in moc_edd10); the rim's shadow on
     the outer disk is kept as computed."""
     if dr <= 0:
-        return np.ones_like(r)
+        return (r >= sim['rf'][0]).astype(float)
     x = np.clip((r - sim['rf'][0]) / dr, 0.0, 1.0)
     return np.sin(0.5 * np.pi * x) ** 2
 
 
-def pipeline(sim, phys, dr=0.0):
+class InnerRings:
+    """Line emission extrapolated inside the sim's inner boundary r_in,
+    down to rmin [r0]: the gas that would shield the rim wall (see taper)
+    would itself emit. Every emitter (MOCASSIN cell, pipeline ray) in the
+    anchor band [r_in + dr, r_in + dr + BAND] is copied onto NK log-spaced
+    rings rmin..r_in + dr with
+      L_k = L_e (r_k / r_e)^-q A_k / A_band (1 - taper(r_k)),
+    A = face-on annulus area (so the band's surface brightness, azimuth by
+    azimuth, continues inward as r^-q and blends into the tapered sim gas),
+    and v_k = v_e sqrt(r_e / r_k) (Keplerian, the emitter's own projection
+    and sign). The copies keep the band's line ratios: no new ionization
+    structure. r is spherical, as in taper."""
+    BAND, NK = 0.1, 48
+
+    def __init__(self, sim, dr, rmin, q):
+        r_in = sim['rf'][0]
+        self.band = (r_in + dr, r_in + dr + self.BAND)
+        e = np.geomspace(rmin, r_in + dr, self.NK + 1)
+        self.rk = np.sqrt(e[1:] * e[:-1])
+        self.ak = ((e[1:] ** 2 - e[:-1] ** 2)
+                   * (1.0 - taper(self.rk, sim, dr))
+                   / (self.band[1] ** 2 - self.band[0] ** 2))
+        self.q = q
+
+    def in_band(self, r):
+        return (r >= self.band[0]) & (r < self.band[1])
+
+    def factor(self, r_e):
+        """(n_e, NK) luminosity factors L_k / L_e."""
+        return (self.rk[None, :] / r_e[:, None]) ** -self.q * self.ak
+
+    def shift(self, v_e, r_e):
+        """(n_e, NK) Doppler factors 1 - v_k / c (v > 0 approaching)."""
+        return 1.0 - v_e[:, None] * np.sqrt(r_e[:, None] / self.rk) / C_KMS
+
+    def deposit(self, wave, lam0, L_e, v_e, r_e):
+        """Copies of lines lam0 [A] with luminosities L_e, binned [erg/s/A]."""
+        e = np.concatenate([[1.5 * wave[0] - 0.5 * wave[1]],
+                            0.5 * (wave[1:] + wave[:-1]),
+                            [1.5 * wave[-1] - 0.5 * wave[-2]]])
+        h, _ = np.histogram((lam0 * self.shift(v_e, r_e)).ravel(), bins=e,
+                            weights=(L_e[:, None] * self.factor(r_e)).ravel())
+        return h / np.diff(e)
+
+
+def pipeline(sim, phys, dr=0.0, inner=None):
     """Pipeline spectra at INCL_DEG: reprocessed continuum and lines
     (Doppler-assembled per ray as sim_full_spectrum), thermal, AGN. The
-    line spectra of each ray are weighted by taper(r_IF, dr)."""
+    line spectra of each ray are weighted by taper(r_IF, dr); with inner
+    (InnerRings), the rays whose r_IF is in its band are copied inward.
+    Returns also the inner rings' share of the line spectra."""
     grid = load_grid()
     wave = grid[0]
     rays = compute_rays(sim, phys, CONFIG, grid)
@@ -214,15 +270,32 @@ def pipeline(sim, phys, dr=0.0):
                                     left=0, right=0)
         L_line += wt[i] * dA[i] * np.interp(wave, ws, rays['F_line'][i] / ws,
                                     left=0, right=0)
+    r_if = rays['r_if'].reshape(-1)
+    L_in, L_in_all = np.zeros_like(wave), np.zeros_like(wave)
+    if inner is not None:
+        ib = np.nonzero(inner.in_band(r_if) & (dA > 0))[0]
+        fac = inner.factor(r_if[ib])
+        sh = inner.shift(rays['v_ray'][ib], r_if[ib])
+        for j, i in enumerate(ib):
+            for k in range(inner.NK):
+                ws = wave * sh[j, k]
+                L_in += fac[j, k] * dA[i] * np.interp(
+                    wave, ws, rays['F_line'][i] / ws, left=0, right=0)
     L_th_base, L_agn = thermal_and_agn(sim, phys, CONFIG, wave)
     L_th = 4.0 * np.cos(np.radians(CONFIG['INCL_DEG'])) * L_th_base
     # angle-integrated (all-sky) rest-frame line power: every slab face
     # counted once, with no face selection, Lambert 4|cos| or observer-side
     # cut - the quantity to set against MOCASSIN's whole-grid totals
     F_all = rays['F_raw']['refl_line'] + rays['F_raw']['out_line']
-    L_all = ((wt * slab_area_all(sim, rays['r_if'])) @ F_all) / wave
-    return wave, dict(cont=L_cont, line=L_line, th=L_th, agn=L_agn,
-                      line_all=L_all)
+    A_all = slab_area_all(sim, rays['r_if'])
+    L_all = ((wt * A_all) @ F_all) / wave
+    if inner is not None:
+        ib = np.nonzero(inner.in_band(r_if))[0]
+        L_in_all = ((A_all[ib] * inner.factor(r_if[ib]).sum(axis=1))
+                    @ F_all[ib]) / wave
+    return wave, dict(cont=L_cont, line=L_line + L_in, th=L_th, agn=L_agn,
+                      line_all=L_all + L_in_all, line_in=L_in,
+                      line_in_all=L_in_all)
 
 
 def slab_area_all(sim, r_if):
@@ -261,6 +334,11 @@ def main():
     ap.add_argument('--taper', type=float, default=0.0, metavar='DR',
                     help='inner-edge sin^2 taper width of the line '
                          'emission [r0], both codes; figures get _taper')
+    ap.add_argument('--inner', type=float, default=0.0, metavar='RMIN',
+                    help='extend the line emission inward to RMIN [r0] '
+                         '(InnerRings), both codes; figures get _in')
+    ap.add_argument('--q', type=float, default=2.0,
+                    help='surface-brightness slope r^-q of --inner')
     a = ap.parse_args()
     d = load_run(a.run)
     if 'lines' not in d:
@@ -282,8 +360,23 @@ def main():
               + ', '.join(f"{n} x{d['lines'][n][act].sum() / L0[n]:.3f}"
                           for n in L0))
     sfx = f'_taper{a.taper:g}' if a.taper > 0 else ''
-    wave, P = pipeline(sim, phys, a.taper)
-    M = moc_lines(d, v, sig, wave)
+    inner, vwin, M_in = None, VWIN, {}
+    if a.inner > 0:
+        inner = InnerRings(sim, a.taper, a.inner, a.q)
+        sfx += f'_in{a.inner:g}q{a.q:g}'
+        vwin = 1.5 * VWIN
+        x, y, z = np.meshgrid(*d['axes'], indexing='ij')
+        r_cell = np.sqrt(x ** 2 + y ** 2 + z ** 2) / d['r0_cm']
+        ib = act & inner.in_band(r_cell)
+        G = inner.factor(r_cell[ib]).sum(axis=1)
+        M_in = {n: (L[ib] * G).sum() * 1e36 for n, L in d['lines'].items()}
+        print(f"inner rings {a.inner:g}-{inner.band[0]:g} r0 (q = {a.q:g}), "
+              f"anchor band {inner.band[0]:g}-{inner.band[1]:g} r0 "
+              f"({ib.sum()} cells); v_K sin i at {a.inner:g} r0 = "
+              f"{np.sqrt(6.674e-8 * 1.989e33 * CONFIG['MBH_MSUN'] / (a.inner * CONFIG['R0_LD'] * LD_CM)) / 1e5 * np.sin(np.radians(CONFIG['INCL_DEG'])):.0f} km/s")
+    wave, P = pipeline(sim, phys, a.taper, inner)
+    M = moc_lines(d, v, sig, wave,
+                  None if inner is None else (r_cell, inner))
     i_deg = CONFIG['INCL_DEG']
 
     # ---- profiles ----
@@ -291,7 +384,15 @@ def main():
     os.makedirs(pdir, exist_ok=True)
     fig, axs = plt.subplots(1, len(PANELS), figsize=(5.2 * len(PANELS), 5))
     # MOCASSIN all-sky: every active cell, both sides, rest frame
-    M_all = {n: d['lines'][n][act].sum() * 1e36 for n in d['lines']}
+    M_all = {n: d['lines'][n][act].sum() * 1e36 + M_in.get(n, 0.0)
+             for n in d['lines']}
+    if inner is not None:
+        dl = np.gradient(wave)
+        for n, lam0 in (('Ha', 6562.8), ('Hb', 4861.3)):
+            wi = np.abs(wave / lam0 - 1) * C_KMS < VINT
+            print(f"  inner rings' share of all-sky {n}: MOCASSIN "
+                  f"{M_in[n] / M_all[n]:.2f}, pipeline "
+                  f"{np.sum((P['line_in_all'] * dl)[wi]) / np.sum((P['line_all'] * dl)[wi]):.2f}")
     print(f"line luminosities [erg/s], |v| < {VINT:.0f} km/s:")
     print(f"{'':12s} {'--- observed, i = 45 deg ---':>30s}   "
           f"{'---- all-sky (angle-integrated) ----':>36s}")
@@ -299,7 +400,7 @@ def main():
           f"{'MOC':>9s} {'pipe':>9s} {'ratio':>6s}   peaks MOC / pipe [km/s]")
     for n, (ax, (title, cols, lam_ref)) in enumerate(zip(axs, PANELS)):
         vel = (wave - lam_ref) / lam_ref * C_KMS            # + = redshift
-        win = np.abs(vel) < VWIN
+        win = np.abs(vel) < vwin
         m = sum(M[c] for c in cols)
         dl = np.gradient(wave)
         wi = np.abs(vel) < VINT
@@ -324,7 +425,7 @@ def main():
         if n == 0:
             ax.set_ylabel(r'$L_\lambda~[\rm erg~s^{-1}~\AA^{-1}]$')
             ax.legend(fontsize=13, frameon=False, loc='upper left')
-        ax.set_xlim(-VWIN, VWIN)
+        ax.set_xlim(-vwin, vwin)
         ax.set_ylim(0, None)
         ticks(ax)
     fig.suptitle(rf'$\rm line~profiles,~i={i_deg:.0f}^\circ~'

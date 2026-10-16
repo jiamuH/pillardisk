@@ -97,28 +97,69 @@ def b_lambda(wave_A, T):
     return 2 * H_CGS * C_CGS ** 2 / lam ** 5 / (np.exp(x) - 1.0) * 1e-8
 
 
+def photosphere_T(sim, phys, cfg):
+    """(phi, r) map of the sim temperature at the photosphere: the first
+    cell from the top where the vertical column reaches N_PHOT (the
+    midplane T where it never does)."""
+    r, th = sim['r'], sim['th']
+    r0_cm = cfg['R0_LD'] * LD_CM
+    jm = np.argmin(np.abs(th - np.pi / 2))
+    up = th <= np.pi / 2
+    ds = (r[None, None, :] * r0_cm) * np.diff(sim['thf'])[None, :, None]
+    Ncum = np.cumsum(phys['nH'][:, up, :] * ds[:, up, :], axis=1)
+    above = Ncum >= N_PHOT
+    j = np.argmax(above, axis=1)
+    T_phot = np.take_along_axis(phys['T'][:, up, :], j[:, None, :],
+                                axis=1)[:, 0, :]
+    return np.where(above.any(axis=1), T_phot, phys['T'][:, jm, :])
+
+
+def temperature_maps(sim, phys, cfg, path):
+    """Face-on (phi, r) maps: photosphere T (the green thermal curve),
+    midplane T (both the rescaled sim T) and the hotspot T_eff
+    (hotspot_thermal), on one colour scale."""
+    from matplotlib.colors import LogNorm
+    from transient.sim_spectrum import add_colorbar, mark_star
+    jm = np.argmin(np.abs(sim['th'] - np.pi / 2))
+    T_ph = photosphere_T(sim, phys, cfg)
+    T_hot = hotspot_thermal(sim, phys, cfg, np.array([5000.0, 5001.0]))[1]
+    maps = [(T_ph, r'$\rm photosphere~T~(N_H=10^{24},~green~curve)$'),
+            (phys['T'][:, jm, :], r'$\rm midplane~T$'),
+            (T_hot, r'$\rm hotspot~T_{\rm eff}~(excess~heat/t_{\rm diff})$')]
+    R, P = np.meshgrid(sim['rf'], sim['phf'])
+    X, Y = R * np.cos(P), R * np.sin(P)
+    norm = LogNorm(1e3, max(m.max() for m, _ in maps))
+    fig, axs = plt.subplots(1, 3, figsize=(21, 6.6))
+    for n, (ax, (m, title)) in enumerate(zip(axs, maps)):
+        pc = ax.pcolormesh(X, Y, np.clip(m, 1e3, None), norm=norm,
+                           cmap='inferno', shading='flat', rasterized=True)
+        ax.set_aspect('equal')
+        ax.set_title(title, fontsize=17)
+        ax.set_xlabel(r'$x~[r_0]$', fontsize=16)
+        if n == 0:
+            ax.set_ylabel(r'$y~[r_0]$', fontsize=16)
+        mark_star(ax, sim)
+        ax.tick_params(which='both', direction='in', top=True, right=True,
+                       labelsize=13)
+        ax.minorticks_on()
+        add_colorbar(pc, ax, r'$T~[\rm K]$')
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}")
+
+
 def thermal_and_agn(sim, phys, cfg, wave):
     """The ONE thermal component in 'sim_teff' mode - the sim temperature
     sampled at the tau~1 photosphere (vertical column N_H >= N_PHOT) of
     each (phi, r) column, disk + TDE + arms together - and the direct-AGN
     power law. Returns (L_th_base, L_agn); multiply L_th_base by
     4 cos(i) for the Lambert-projected observed value."""
-    r, th = sim['r'], sim['th']
+    r = sim['r']
     r0_cm = cfg['R0_LD'] * LD_CM
-    jm = np.argmin(np.abs(th - np.pi / 2))
-    dr = np.diff(sim['rf']) * r0_cm
-    dphv = np.diff(sim['phf'])
-    dth = np.diff(sim['thf'])
-    dA_disk = (r * r0_cm * dr)[None, :] * dphv[:, None]
-    up = th <= np.pi / 2
-    ds = (r[None, None, :] * r0_cm) * dth[None, :, None]
-    Ncum = np.cumsum(phys['nH'][:, up, :] * ds[:, up, :], axis=1)
-    above = Ncum >= N_PHOT
-    j = np.argmax(above, axis=1)
-    found = above.any(axis=1)
-    T_up = phys['T'][:, up, :]
-    T_phot = np.take_along_axis(T_up, j[:, None, :], axis=1)[:, 0, :]
-    T_phot = np.where(found, T_phot, phys['T'][:, jm, :])
+    dA_disk = (r * r0_cm * np.diff(sim['rf']) * r0_cm)[None, :] * \
+        np.diff(sim['phf'])[:, None]
+    T_phot = photosphere_T(sim, phys, cfg)
     L_th_base = np.zeros_like(wave)
     tb = np.linspace(np.log10(T_phot.min()), np.log10(T_phot.max()) + 1e-6,
                      30)
@@ -184,11 +225,16 @@ def hotspot_thermal(sim, phys, cfg, wave, gamma=5.0 / 3.0, hfrac=0.2):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else \
+    args = [x for x in sys.argv[1:] if x != '--tmaps']
+    path = args[0] if args else \
         os.path.join(HERE, 'data', 'sim', 'disk.out1.00012.athdf')
     cfg = CONFIG
     sim = load_sim(path)
     phys = to_physical(sim, cfg)
+    if '--tmaps' in sys.argv:          # temperature maps only
+        temperature_maps(sim, phys, cfg,
+                         os.path.join(PLOTDIR, 'sim_temperature_faceon.png'))
+        return
     grid = load_grid()
     rays = compute_rays(sim, phys, cfg, grid)
     wave = grid[0]

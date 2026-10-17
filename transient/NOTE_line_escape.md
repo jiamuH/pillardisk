@@ -132,5 +132,29 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
    /data2/jhuang/runs/cloudy_rays/vtest` (VTEST_RAYS: t13 and t31 at phi
    index 0, 48 arm, 140 quiet, 240 star; plus t16, t24 at 0; `iterate to
    convergence 4`; saves `.tau`). Run with the `run` step on that dir.
+   RESULT (2026-10-17, all 30 exited OK; sum over the 10 rays relative to
+   the 1-iteration 100 km/s production):
+
+   | run                 | Ha   | Hb   | C IV | Mg II | Mg II/Ha |
+   |---------------------|------|------|------|-------|----------|
+   | production (1 it)   | 1    | 1    | 1    | 1     | 0.47     |
+   | 100 km/s + iterate  | 0.91 | 0.90 | 0.92 | 0.87  | 0.45     |
+   | 10 km/s + iterate   | 0.46 | 0.33 | 0.41 | 0.22  | 0.23     |
+   | 0 km/s + iterate    | 0.44 | 0.30 | 0.32 | 0.13  | 0.14     |
+
+   - `iterate` alone: lines down 3-18% (the deep side is now opaque).
+   - Turbulence dominates: 100 -> 0 km/s cuts Mg II ~8x, C IV ~3x, Ha
+     ~2x (thick-line flux ~ line width, Horne & Marsh eq. 25). He II
+     1640 changes little (0.85-1.4 per ray).
+   - tau0 at 0 / 100 km/s: Lya ~1e11 / 1e10, Ha ~1e6 / 1e5, C IV 1548
+     ~2e7 / 1e6, Mg II 2796 ~1e8 / 2e6: all very thick.
+   - Mg II/Ha falls to 0.14 at 0 km/s: further from MOCASSIN (8), so the
+     gap is on the MOCASSIN side (optically thin Mg II, cell-size
+     partially ionized volume), not Cloudy's turbulence.
+   - Cost: every ray hit 4 iterations ("did not converge in 4", Cloudy's
+     all-lines 5% criterion); CPU 3-5x production (t13 rays 1850-3560 s).
+     The 4 rim rays t31 at phi 0/48/140/240 give near-identical results.
+   - Pending: `vtest --it2` (`/data2/jhuang/runs/cloudy_rays/vtest_it2`,
+     3 rays x vturb 0/100 with `iterate 2`) to see if 2 passes suffice.
 3. Horne & Marsh anisotropic weighting in `ray_spectra` for thick lines,
    using the sim strain tensor; needs the vturb ~ 0 outputs from step 2.

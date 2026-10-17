@@ -196,6 +196,193 @@ def traced_decks(sim, phys, dph, h):
     return out
 
 
+N_SURF = 1e10        # n_H [cm^-3]: a lamp ray "lands" where it first exceeds
+NA_FINE = 600        # alpha directions per phi column for the landing trace
+ARC_CAP = 0.03       # [r0] most arc one fine alpha step counts (a jump in
+                     # the landing point = a shadow edge, no lit gas inside)
+PHI_FLOOR = 0.5      # uniform part of the phi-column weight (in units of
+                     # the median structure change)
+
+
+def landing_surface(sim, phys, h):
+    """Where lamp rays from z = h [r0] first reach n_H > N_SURF, for every
+    sim phi column and NA_FINE directions alpha: (alpha [NA_FINE],
+    R, z [nph, NA_FINE], nan if never)."""
+    from scipy.interpolate import RegularGridInterpolator
+    r, th, ph = sim['r'], sim['th'], sim['ph']
+    rf, thf = sim['rf'], sim['thf']
+    logn = np.log10(phys['nH'])
+    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    lnp = np.concatenate([logn[-1:], logn, logn[:1]], axis=0)
+    itp = RegularGridInterpolator((php, th, r), lnp)
+    a_lo = np.arctan2(rf[-1] * np.sin(thf[0]), rf[-1] * np.cos(thf[0]) - h)
+    a_hi = np.arctan2(rf[0] * np.sin(thf[-1]), rf[0] * np.cos(thf[-1]) - h)
+    alpha = np.linspace(a_lo, a_hi, NA_FINE)
+    s = np.arange(STEP, 2 * rf[-1] + h, STEP)
+    S, A = np.meshgrid(s, alpha)                       # (NA_FINE, ns)
+    Rr, Zz = S * np.sin(A), h + S * np.cos(A)
+    rr = np.hypot(Rr, Zz)
+    tt = np.arccos(Zz / rr)
+    inside = (rr >= rf[0]) & (rr <= rf[-1]) & (tt >= thf[0]) & (tt <= thf[-1])
+    q_t = np.clip(tt, th[0], th[-1])[inside]
+    q_r = np.clip(rr, r[0], r[-1])[inside]
+    Rl = np.full((len(ph), NA_FINE), np.nan)
+    Zl = np.full_like(Rl, np.nan)
+    for j, p in enumerate(ph):
+        ln = np.full(S.shape, -np.inf)
+        ln[inside] = itp(np.column_stack([np.full(q_t.size, p), q_t, q_r]))
+        hit = ln > np.log10(N_SURF)
+        k = np.argmax(hit, axis=1)
+        ok = hit.any(axis=1)
+        Rl[j, ok] = Rr[ok, k[ok]]
+        Zl[j, ok] = Zz[ok, k[ok]]
+    return alpha, Rl, Zl
+
+
+def phi_structure(sim, phys):
+    """How much the disk changes from each sim phi column to the next:
+    mean over R of |d z_surf| (height where n_H first exceeds N_SURF from
+    above) and of |d ln Sigma|, each in units of its median, summed. (The
+    landing points themselves are no good for this: at grazing incidence
+    a tiny change of the surface moves them a lot, everywhere.)"""
+    r, th = sim['r'], sim['th']
+    nup = int((th <= np.pi / 2).sum())
+    hit = phys['nH'][:, :nup, :] > N_SURF
+    k = np.argmax(hit, axis=1)
+    zs = np.where(hit.any(1), r[None, :] * np.cos(th[k]), 0.0)
+    dth = np.diff(sim['thf'])
+    lsig = np.log((sim['rho'] * (r[None, None, :]
+                                 * dth[None, :, None])).sum(1))
+    c = 0.0
+    for f in (zs, lsig):
+        d = np.abs(np.roll(f, -1, 0) - f).mean(axis=1)
+        c = c + d / np.median(d)
+    return c
+
+
+def adaptive_plan(sim, phys, alpha, Rl, Zl, nrays, nphi):
+    """Adaptive ray set: nphi phi columns spaced by phi_structure (plus
+    PHI_FLOOR), and in each column rays at equal steps of landing-surface
+    arc length (each fine alpha step counts at most ARC_CAP), one arc step
+    for all columns, chosen to give ~nrays rays. Returns a list of (iph,
+    wedge [rad], alpha_c [n], alpha_edges [n+1])."""
+    w = PHI_FLOOR + phi_structure(sim, phys)
+    cw = np.concatenate([[0], np.cumsum(w)])
+    tgt = (np.arange(nphi) + 0.5) / nphi * cw[-1]
+    cols = np.unique(np.searchsorted(cw, tgt) - 1)
+    phc = sim['ph'][cols]
+    gap = np.diff(np.concatenate([phc, [phc[0] + 2 * np.pi]]))
+    wedge = 0.5 * (gap + np.roll(gap, 1))
+    # landing arc along alpha per column (no landing: nothing to resolve)
+    arcs = []
+    for j in cols:
+        da = np.hypot(np.diff(Rl[j]), np.diff(Zl[j]))
+        da = np.minimum(np.nan_to_num(da, nan=0.0), ARC_CAP)
+        arcs.append(np.concatenate([[0], np.cumsum(da)]))
+    ds = sum(a[-1] for a in arcs) / nrays
+    plan = []
+    for j, wd, a in zip(cols, wedge, arcs):
+        n = max(int(round(a[-1] / ds)), 1)
+        # invert arc(alpha) (monotone, possibly flat: take the first alpha)
+        ae = np.interp(np.arange(n + 1) / n * a[-1], a, alpha)
+        ae[0], ae[-1] = alpha[0], alpha[-1]
+        ac = np.interp((np.arange(n) + 0.5) / n * a[-1], a, alpha)
+        plan.append((int(j), float(wd), ac, ae))
+    return plan
+
+
+def plan_preview(out, h_ld, nrays, nphi):
+    """Face-on and meridional preview of adaptive_plan's rays (their
+    landing points) next to the uniform set (NALPHA per column, every 4th
+    sim column), over the sim's surface density."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    h = h_ld / CONFIG['R0_LD']
+    t0 = time.time()
+    alpha, Rl, Zl = landing_surface(sim, phys, h)
+    print(f"landing trace: {time.time() - t0:.0f} s")
+    plan = adaptive_plan(sim, phys, alpha, Rl, Zl, nrays, nphi)
+    land = lambda j, a: (np.interp(a, alpha, Rl[j]), np.interp(a, alpha, Zl[j]))
+    ad = [(j, *land(j, ac)) for j, _, ac, _ in plan]
+    ue = np.linspace(alpha[0], alpha[-1], NALPHA + 1)
+    uc = 0.5 * (ue[1:] + ue[:-1])
+    un = [(j, *land(j, uc)) for j in range(0, len(sim['ph']), 4)]
+    nad = sum(len(x[1]) for x in ad)
+    nun = sum(len(x[1]) for x in un)
+    print(f"adaptive: {nad} rays in {len(plan)} phi columns "
+          f"({min(len(x[1]) for x in ad)}-{max(len(x[1]) for x in ad)} per "
+          f"column; phi gaps {np.degrees(min(p[1] for p in plan)):.1f}-"
+          f"{np.degrees(max(p[1] for p in plan)):.1f} deg); uniform: {nun}")
+    # surface density (code units) for the background
+    dth = np.diff(sim['thf'])
+    sig = (sim['rho'] * (sim['r'][None, None, :] * dth[None, :, None])).sum(1)
+    P, Rg = np.meshgrid(sim['phf'], sim['rf'], indexing='ij')
+    fig = plt.figure(figsize=(20, 15))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.75, 1])
+    axs = [fig.add_subplot(gs[0, k]) for k in range(2)]
+    for ax, sets, lab in ((axs[0], un, rf'uniform: {nun} rays'),
+                          (axs[1], ad, rf'adaptive: {nad} rays')):
+        ax.pcolormesh(Rg * np.cos(P), Rg * np.sin(P), sig, norm=LogNorm(),
+                      cmap='Greys', shading='flat', rasterized=True)
+        for j, R, z in sets:
+            p = sim['ph'][j]
+            ax.scatter(R * np.cos(p), R * np.sin(p), c=z, s=4, cmap='plasma',
+                       vmin=-0.2, vmax=0.6, edgecolors='none', zorder=5)
+        ax.set_aspect('equal')
+        ax.set_xlim(-2.05, 2.05)
+        ax.set_ylim(-2.05, 2.05)
+        ax.set_xlabel(r'$x\,[r_0]$')
+        ax.text(0.03, 0.95, r'\textbf{' + lab + '}', transform=ax.transAxes,
+                va='top', fontsize=16)
+        ax.tick_params(which='both', direction='in', labelsize=12)
+    axs[0].set_ylabel(r'$y\,[r_0]$')
+    # meridional: one quiet and one arm column, adaptive rays as lines
+    from transient.sim_spectrum import star_position
+    xs, ys = star_position(sim)
+    ist = int(np.argmin(np.abs(np.angle(np.exp(1j * (
+        sim['ph'] - np.arctan2(ys, xs)))))))
+    cols = np.array([p[0] for p in plan])
+    R, T = np.meshgrid(sim['rf'], sim['thf'])
+    for k, (tgt, lab) in enumerate(((ist, 'star'), (141, 'quiet'))):
+        ax = fig.add_subplot(gs[1, k])
+        ip = int(np.argmin(np.abs(cols - tgt)))
+        j, _, ac, _ = plan[ip]
+        ax.pcolormesh(R * np.sin(T), R * np.cos(T), phys['nH'][j],
+                      norm=LogNorm(1e6, 1e12), cmap='Greys', shading='flat',
+                      rasterized=True)
+        for a in ac:
+            Rx, Zx = land(j, a)
+            if np.isfinite(Rx):
+                ax.plot([0, Rx], [h, Zx], color='crimson', lw=0.5)
+                ax.plot(Rx, Zx, 'o', color='crimson', ms=2)
+        ax.set_xlim(0.45, 2.0)
+        ax.set_ylim(-0.25, 0.65)
+        ax.set_aspect('equal')
+        ax.set_xlabel(r'$R\,[r_0]$')
+        if k == 0:
+            ax.set_ylabel(r'$z\,[r_0]$')
+        ax.text(0.01, 0.9, rf'$\phi = {np.degrees(sim["ph"][j]):.0f}^\circ$ '
+                r'\textbf{(' + lab + f', {len(ac)} rays)' + '}',
+                transform=ax.transAxes, fontsize=16)
+        ax.tick_params(which='both', direction='in', labelsize=12)
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'ray_plan.png')
+    fig.savefig(path, dpi=110, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}")
+
+
 # line-escape test set (transient/NOTE_line_escape.md, step 2): for each
 # column (phi index 0, the arm 48, the quiet column 140, next to the star
 # 240) the H alpha-bright high ray t13 and the Mg II-bright rim ray t31,
@@ -1158,7 +1345,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
-                                     'vtest'])
+                                     'vtest', 'rayplan'])
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
     ap.add_argument('--maponly', action='store_true',
@@ -1174,6 +1361,10 @@ def main():
     ap.add_argument('--hlamp', type=float, default=0.0,
                     help='write: lamp height on the axis [light days]; 0 = '
                          'lamp at the origin (rays = sim columns)')
+    ap.add_argument('--nrays', type=int, default=3000,
+                    help='rayplan: total adaptive rays')
+    ap.add_argument('--nphi', type=int, default=64,
+                    help='rayplan: adaptive phi columns')
     ap.add_argument('--only', type=int, default=0,
                     help='run only the first N decks (timing tests)')
     a = ap.parse_args()
@@ -1256,6 +1447,9 @@ def main():
                 fh.write(d)
         print(f"wrote {len(decks)} test decks to {rdir} ({VTEST_ITER}); "
               f"run them with the run step")
+
+    elif a.step == 'rayplan':
+        plan_preview(a.out, a.hlamp, a.nrays, a.nphi)
 
     elif a.step == 'vmaps':
         # star first (found in velocity_maps); then the strongest Sigma

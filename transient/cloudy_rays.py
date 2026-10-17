@@ -1062,8 +1062,8 @@ def velocity_maps(out, iphs):
             norm = SymLogNorm(linthresh=1.0, vmin=-vmax, vmax=vmax)
         else:
             norm = LogNorm(*np.percentile(f[f > 0], [1, 99.5]))
-        fig, axs = plt.subplots(1, len(iphs),
-                                figsize=(13 * len(iphs), 6.2))
+        fig, axs = plt.subplots(len(iphs), 1, sharex=True,
+                                figsize=(14, 4.6 * len(iphs)))
         axs = np.atleast_1d(axs)
         for j, (ax, iph) in enumerate(zip(axs, iphs)):
             for a, inset in ((ax, False),
@@ -1081,17 +1081,17 @@ def velocity_maps(out, iphs):
                     a.set_xlim(0.47, 0.62)
                     a.set_ylim(-0.005, 0.09)
                     ax.indicate_inset_zoom(a, edgecolor='purple')
-            ax.text(0.03, 0.05, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'
+            ax.set_xlim(sim['rf'][0] - 0.03, sim['rf'][-1])
+            ax.set_ylim(0, 0.64)
+            ax.text(0.03, 0.9, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'
                     r'^\circ$', transform=ax.transAxes, fontsize=16)
-            ax.set_xlabel(r'$R\,[r_0]$')
-            if j == 0:
-                ax.set_ylabel(r'$z\,[r_0]$')
+            if j == len(iphs) - 1:
+                ax.set_xlabel(r'$R\,[r_0]$')
+            ax.set_ylabel(r'$z\,[r_0]$')
             cax = make_axes_locatable(ax).append_axes('right', size='2.5%',
                                                       pad=0.08)
-            cb = fig.colorbar(pc, cax=cax)
-            if j == len(iphs) - 1:
-                cb.set_label(lab, fontsize=15)
-        fig.tight_layout()
+            fig.colorbar(pc, cax=cax).set_label(lab, fontsize=15)
+        fig.tight_layout(h_pad=0.3)
         path = os.path.join(pdir, f'vel_{key}.png')
         fig.savefig(path, dpi=120, bbox_inches='tight')
         plt.close(fig)

@@ -1024,8 +1024,10 @@ def velocity_fields(sim, phys):
 
 
 def velocity_maps(out, iphs):
-    """meridional maps of velocity_fields at the phi indices iphs, one
-    figure per field, n_H contours on top"""
+    """meridional maps of velocity_fields at the phi indices iphs plus
+    the cut through the embedded star (marked), one figure per field,
+    n_H contours (1e9, 1e10, 1e11 cm^-3, thin to thick) on top"""
+    from transient.sim_spectrum import star_position
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -1039,6 +1041,10 @@ def velocity_maps(out, iphs):
     sim = load_sim(DUMP)
     phys = to_physical(sim, CONFIG)
     vf = velocity_fields(sim, phys)
+    xs, ys = star_position(sim)
+    ist = int(np.argmin(np.abs(np.angle(np.exp(1j * (
+        sim['ph'] - np.arctan2(ys, xs)))))))
+    iphs = tuple(iphs) + (ist,)
     R, T = np.meshgrid(sim['rf'], sim['thf'])
     nup = int((sim['th'] <= np.pi / 2).sum())
     X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
@@ -1081,6 +1087,10 @@ def velocity_maps(out, iphs):
                     a.set_xlim(0.47, 0.62)
                     a.set_ylim(-0.005, 0.09)
                     ax.indicate_inset_zoom(a, edgecolor='purple')
+            if iph == ist:
+                ax.plot(np.hypot(xs, ys), 0.0, marker='*', ms=22,
+                        mfc='white', mec='black', mew=1.5, ls='none',
+                        zorder=6, clip_on=False)
             ax.set_xlim(sim['rf'][0] - 0.03, sim['rf'][-1])
             ax.set_ylim(0, 0.64)
             ax.text(0.03, 0.9, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'

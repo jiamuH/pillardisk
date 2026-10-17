@@ -98,12 +98,39 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
   MOCASSIN treats Mg II as optically thin (no trapping/thermalization).
 - Working hypothesis: MOCASSIN, not Cloudy, is off for Mg II.
 
+## Step 1 result: MOCASSIN line totals by x(H+) (2026-10-17)
+
+- All-sky MOCASSIN totals (active cells): Mg II 2796+2804 = 3.0e42, Ha
+  3.7e41, C IV 1.25e42 erg/s -> Mg II/Ha = 8.2 (per-ray Cloudy: 2.0e40,
+  5.1e40, 4.1e41; Mg II/Ha = 0.4).
+- Fraction kept when dropping cells below an x(H+) cut:
+
+  | cut x(H+) >= | Mg II | Ha   | C IV | He II | Mg II/Ha |
+  |--------------|-------|------|------|-------|----------|
+  | 0.01         | 1.00  | 0.99 | 1.00 | 1.00  | 8.2      |
+  | 0.1          | 0.51  | 0.76 | 1.00 | 0.98  | 5.5      |
+  | 0.5          | 0.17  | 0.47 | 1.00 | 0.91  | 2.9      |
+
+- So the truly neutral midplane (x < 0.01) emits ~nothing; half of
+  MOCASSIN's Mg II is from 0.01 < x < 0.1 cells and a third from 0.1-0.5,
+  i.e. partially ionized cells. Removing them does not close the gap
+  (still ~75x at x >= 0.1).
+- New suspicion besides optically thin Mg II: resolution. A MOCASSIN
+  cell (~1e14 cm) straddling the ionization front is given one mean
+  ionization, so its whole volume is "partially ionized" and emits Mg
+  II, whereas in Cloudy the partially ionized zone is ~1e12 cm thick.
+  This volume excess is of the order of the gap (cf. the N(C3+) layer
+  being thinner than a cell).
+
 ## Plan (in order)
 
-1. MOCASSIN line totals excluding cells with x(H+) < 0.1: if Mg II drops
-   toward Cloudy, the gap is a MOCASSIN artifact.
+1. DONE (above): MOCASSIN line totals excluding cells with x(H+) < 0.1.
 2. ~10 test rays (rim, ray 16, skin, star, arm, quiet) with `iterate`, at
    vturb = 0, 10, 100 km/s (~30 runs, user runs); compare with the
    1-iteration 100 km/s outputs; record tau0 per line.
+   Decks: `python3 -m transient.cloudy_rays vtest --out
+   /data2/jhuang/runs/cloudy_rays/vtest` (VTEST_RAYS: t13 and t31 at phi
+   index 0, 48 arm, 140 quiet, 240 star; plus t16, t24 at 0; `iterate to
+   convergence 4`; saves `.tau`). Run with the `run` step on that dir.
 3. Horne & Marsh anisotropic weighting in `ray_spectra` for thick lines,
    using the sim strain tensor; needs the vturb ~ 0 outputs from step 2.

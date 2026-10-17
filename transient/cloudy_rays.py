@@ -196,6 +196,40 @@ def traced_decks(sim, phys, dph, h):
     return out
 
 
+# line-escape test set (transient/NOTE_line_escape.md, step 2): for each
+# column (phi index 0, the arm 48, the quiet column 140, next to the star
+# 240) the H alpha-bright high ray t13 and the Mg II-bright rim ray t31,
+# plus t16 and t24 at phi 0
+VTEST_RAYS = ['ray_p000_t13', 'ray_p000_t16', 'ray_p000_t24',
+              'ray_p000_t31', 'ray_p048_t13', 'ray_p048_t31',
+              'ray_p140_t13', 'ray_p140_t31', 'ray_p240_t13',
+              'ray_p240_t31']
+VTEST_ITER = 'iterate to convergence 4'
+
+
+def vtest_decks(sim, phys, vturbs):
+    """(name, deck) of VTEST_RAYS at each vturb [km/s], with
+    VTEST_ITER (the production decks run one iteration, so the far side
+    of a ray is as transparent as the lamp side) and the line optical
+    depths saved; names ray_pXXX_tYY_vNNN"""
+    out = []
+    for name, _, _, _, deck in ray_decks(sim, phys, 1):
+        if name not in VTEST_RAYS:
+            continue
+        for vt in vturbs:
+            nv = f'{name}_v{vt:03d}'
+            d = deck.replace(name, nv)
+            turb = (f'turbulence = {vt} km/s\n' if vt > 0
+                    else '# no turbulence: thermal line widths\n')
+            d = d.replace('turbulence = 100 km/s\n', turb + VTEST_ITER + '\n')
+            d = d.replace('save lines emissivity',
+                          f'save line optical depths "{nv}.tau" units '
+                          f'Angstroms last\nsave lines emissivity')
+            assert VTEST_ITER in d and f'{nv}.tau' in d
+            out.append((nv, d))
+    return out
+
+
 def finished(rdir, name, lenient=False):
     """True when the ray's Cloudy run completed: 'Cloudy exited OK', or
     'something went wrong' when the ONLY warning is the electron-scattering
@@ -1123,7 +1157,8 @@ def velocity_maps(out, iphs, labels):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
-                                     'faceon', 'spectrum', 'vmaps'])
+                                     'faceon', 'spectrum', 'vmaps',
+                                     'vtest'])
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
     ap.add_argument('--maponly', action='store_true',
@@ -1209,6 +1244,16 @@ def main():
 
     elif a.step == 'faceon':
         faceon_map(a.out, a.dph)
+
+    elif a.step == 'vtest':
+        sim = load_sim(DUMP)
+        phys = to_physical(sim, CONFIG)
+        decks = vtest_decks(sim, phys, (0, 10, 100))
+        for nv, d in decks:
+            with open(os.path.join(rdir, nv + '.in'), 'w') as fh:
+                fh.write(d)
+        print(f"wrote {len(decks)} test decks to {rdir} ({VTEST_ITER}); "
+              f"run them with the run step")
 
     elif a.step == 'vmaps':
         # star first (found in velocity_maps); then the strongest Sigma

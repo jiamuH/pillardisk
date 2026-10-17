@@ -438,25 +438,25 @@ VTEST_RAYS = ['ray_p000_t13', 'ray_p000_t16', 'ray_p000_t24',
 VTEST_ITER = 'iterate to convergence 4'
 
 
-def vtest_decks(sim, phys, vturbs):
-    """(name, deck) of VTEST_RAYS at each vturb [km/s], with
-    VTEST_ITER (the production decks run one iteration, so the far side
-    of a ray is as transparent as the lamp side) and the line optical
-    depths saved; names ray_pXXX_tYY_vNNN"""
+def vtest_decks(sim, phys, vturbs, rays=VTEST_RAYS, iterate=VTEST_ITER):
+    """(name, deck) of the test rays at each vturb [km/s], with `iterate`
+    (the production decks run one iteration, so the far side of a ray is
+    as transparent as the lamp side) and the line optical depths saved;
+    names ray_pXXX_tYY_vNNN"""
     out = []
     for name, _, _, _, deck in ray_decks(sim, phys, 1):
-        if name not in VTEST_RAYS:
+        if name not in rays:
             continue
         for vt in vturbs:
             nv = f'{name}_v{vt:03d}'
             d = deck.replace(name, nv)
             turb = (f'turbulence = {vt} km/s\n' if vt > 0
                     else '# no turbulence: thermal line widths\n')
-            d = d.replace('turbulence = 100 km/s\n', turb + VTEST_ITER + '\n')
+            d = d.replace('turbulence = 100 km/s\n', turb + iterate + '\n')
             d = d.replace('save lines emissivity',
                           f'save line optical depths "{nv}.tau" units '
                           f'Angstroms last\nsave lines emissivity')
-            assert VTEST_ITER in d and f'{nv}.tau' in d
+            assert iterate in d and f'{nv}.tau' in d
             out.append((nv, d))
     return out
 
@@ -1443,6 +1443,9 @@ def main():
     ap.add_argument('--hlamp', type=float, default=0.0,
                     help='write: lamp height on the axis [light days]; 0 = '
                          'lamp at the origin (rays = sim columns)')
+    ap.add_argument('--it2', action='store_true',
+                    help='vtest: the iterate-2 check set (3 rays x vturb '
+                         '0, 100)')
     ap.add_argument('--adaptive', action='store_true',
                     help='write (with --hlamp): adaptive_plan rays')
     ap.add_argument('--nrays', type=int, default=3000,
@@ -1543,11 +1546,19 @@ def main():
     elif a.step == 'vtest':
         sim = load_sim(DUMP)
         phys = to_physical(sim, CONFIG)
-        decks = vtest_decks(sim, phys, (0, 10, 100))
+        if a.it2:
+            # does a 2nd pass suffice? 3 rays (rim t31, mid t24, high t13)
+            # at both vturb extremes, against the 4-pass test set
+            it = 'iterate 2'
+            decks = vtest_decks(sim, phys, (0, 100), rays=(
+                'ray_p000_t31', 'ray_p000_t24', 'ray_p140_t13'), iterate=it)
+        else:
+            it = VTEST_ITER
+            decks = vtest_decks(sim, phys, (0, 10, 100))
         for nv, d in decks:
             with open(os.path.join(rdir, nv + '.in'), 'w') as fh:
                 fh.write(d)
-        print(f"wrote {len(decks)} test decks to {rdir} ({VTEST_ITER}); "
+        print(f"wrote {len(decks)} test decks to {rdir} ({it}); "
               f"run them with the run step")
 
     elif a.step == 'rayplan':

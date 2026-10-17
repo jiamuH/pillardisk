@@ -1095,7 +1095,7 @@ def velocity_maps(out, iphs, labels):
             ax.set_xlim(sim['rf'][0] - 0.03, sim['rf'][-1])
             ax.set_ylim(0, 0.64)
             ax.text(0.03, 0.9, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'
-                    rf'^\circ$ ({tag})', transform=ax.transAxes,
+                    rf'^\circ$ \textbf{{({tag})}}', transform=ax.transAxes,
                     fontsize=16)
             if j == len(iphs) - 1:
                 ax.set_xlabel(r'$R\,[r_0]$')

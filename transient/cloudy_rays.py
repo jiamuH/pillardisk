@@ -242,9 +242,12 @@ def landing_surface(sim, phys, h):
 def phi_structure(sim, phys):
     """How much the disk changes from each sim phi column to the next:
     mean over R of |d z_surf| (height where n_H first exceeds N_SURF from
-    above) and of |d ln Sigma|, each in units of its median, summed. (The
-    landing points themselves are no good for this: at grazing incidence
-    a tiny change of the surface moves them a lot, everywhere.)"""
+    above) and of |d ln Sigma|, each in units of its median, summed, plus
+    the Sigma excess itself (mean over R of ln Sigma above its phi-median
+    at that R, in units of its mean), so smooth but dense structure (the
+    spiral arm) gets columns too. (The landing points themselves are no
+    good for this: at grazing incidence a tiny change of the surface moves
+    them a lot, everywhere.)"""
     r, th = sim['r'], sim['th']
     nup = int((th <= np.pi / 2).sum())
     hit = phys['nH'][:, :nup, :] > N_SURF
@@ -257,7 +260,8 @@ def phi_structure(sim, phys):
     for f in (zs, lsig):
         d = np.abs(np.roll(f, -1, 0) - f).mean(axis=1)
         c = c + d / np.median(d)
-    return c
+    ex = np.clip(lsig - np.median(lsig, axis=0), 0, None).mean(axis=1)
+    return c + ex / ex.mean()
 
 
 def adaptive_plan(sim, phys, alpha, Rl, Zl, nrays, nphi):
@@ -322,6 +326,9 @@ def plan_preview(out, h_ld, nrays, nphi):
           f"({min(len(x[1]) for x in ad)}-{max(len(x[1]) for x in ad)} per "
           f"column; phi gaps {np.degrees(min(p[1] for p in plan)):.1f}-"
           f"{np.degrees(max(p[1] for p in plan)):.1f} deg); uniform: {nun}")
+    print('  phi gap [deg] by 30 deg sector: ' + ' '.join(
+        f"{np.degrees(np.mean([p[1] for p in plan if lo <= np.degrees(sim['ph'][p[0]]) < lo + 30])):.1f}"
+        for lo in range(0, 360, 30)))
     # surface density (code units) for the background
     dth = np.diff(sim['thf'])
     sig = (sim['rho'] * (sim['r'][None, None, :] * dth[None, :, None])).sum(1)

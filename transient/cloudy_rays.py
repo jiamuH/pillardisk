@@ -143,56 +143,99 @@ STEP = 0.003         # ray sampling step [r0] (cells: dr 0.012, r dth 0.010)
 N_FLOOR = 1e2        # n_H [cm^-3] where a ray runs outside the gas grid
 
 
-def traced_decks(sim, phys, dph, h):
-    """Decks for an elevated lamp at z = h [r0] on the axis: (name, iph,
-    ia, alpha, d_in [cm], dOmega [sr], deck)."""
+def density_interp(sim, phys):
+    """log n_H(phi, theta, r) interpolator, phi padded for periodicity."""
     from scipy.interpolate import RegularGridInterpolator
-    r0 = CONFIG['R0_LD'] * LD_CM
-    r, th, ph = sim['r'], sim['th'], sim['ph']
-    rf, thf = sim['rf'], sim['thf']
+    ph = sim['ph']
     logn = np.log10(phys['nH'])                       # (ph, th, r)
     php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
     lnp = np.concatenate([logn[-1:], logn, logn[:1]], axis=0)
-    itp = RegularGridInterpolator((php, th, r), lnp)
-    # alpha range: top outer corner of the gas to the bottom of the rim
-    a_lo = np.arctan2(rf[-1] * np.sin(thf[0]), rf[-1] * np.cos(thf[0]) - h)
-    a_hi = np.arctan2(rf[0] * np.sin(thf[-1]), rf[0] * np.cos(thf[-1]) - h)
-    ae = np.linspace(a_lo, a_hi, NALPHA + 1)
-    alpha = 0.5 * (ae[1:] + ae[:-1])
-    dphi = 2 * np.pi / len(ph) * dph
-    dom = (np.cos(ae[:-1]) - np.cos(ae[1:])) * dphi
+    return RegularGridInterpolator((php, sim['th'], sim['r']), lnp)
+
+
+def alpha_range(sim, h):
+    """lamp-ray directions alpha (from +z) spanning the gas: the top outer
+    corner of the grid to the bottom of the rim."""
+    rf, thf = sim['rf'], sim['thf']
+    return (np.arctan2(rf[-1] * np.sin(thf[0]), rf[-1] * np.cos(thf[0]) - h),
+            np.arctan2(rf[0] * np.sin(thf[-1]), rf[0] * np.cos(thf[-1]) - h))
+
+
+def ray_deck(itp, sim, h, phi, al, name):
+    """(d_in [cm], deck) for the lamp ray from z = h [r0] toward (alpha,
+    phi), its n_H sampled every STEP r0 along the path; None if it misses
+    the gas."""
+    r0 = CONFIG['R0_LD'] * LD_CM
+    r, th, rf, thf = sim['r'], sim['th'], sim['rf'], sim['thf']
     s = np.arange(STEP, 2 * rf[-1] + h, STEP)          # path from the lamp
+    x = s * np.sin(al) * np.cos(phi)
+    y = s * np.sin(al) * np.sin(phi)
+    z = h + s * np.cos(al)
+    rr = np.sqrt(x * x + y * y + z * z)
+    tt = np.arccos(z / rr)
+    pp = np.mod(np.arctan2(y, x), 2 * np.pi)
+    inside = ((rr >= rf[0]) & (rr <= rf[-1]) & (tt >= thf[0])
+              & (tt <= thf[-1]))
+    if not inside.any():
+        return None
+    i0 = np.argmax(inside)
+    i1 = len(s) - np.argmax(inside[::-1])     # past the last inside
+    q = np.column_stack([pp, np.clip(tt, th[0], th[-1]),
+                         np.clip(rr, r[0], r[-1])])[i0:i1]
+    ln = np.where(inside[i0:i1], itp(q), np.log10(N_FLOOR))
+    d = s[i0:i1] * r0
+    ld = np.log10(d)
+    pts = ([(ld[0] - 0.01, ln[0])] + list(zip(ld, ln))
+           + [(ld[-1] + 0.01, ln[-1])])
+    dlaw = ''.join(f'continue {u:.7f} {v:.4f}\n' for u, v in pts)
+    deck = DECK.format(
+        name=name, ph=phi, th=al,
+        logphi=np.log10(Q_ION / (4 * np.pi * d[0] ** 2)),
+        logr_in=ld[0], logr_out=ld[-1], dlaw=dlaw,
+        stop_col=STOP_COL).replace(
+            'theta', f'alpha from the lamp at z = {h:.3f} r0')
+    return d[0], deck
+
+
+def traced_decks(sim, phys, dph, h):
+    """Decks for an elevated lamp at z = h [r0] on the axis, NALPHA rays
+    evenly in alpha at every dph-th sim phi column: (name, iph, ia, alpha,
+    d_in [cm], dOmega [sr], deck)."""
+    itp = density_interp(sim, phys)
+    ae = np.linspace(*alpha_range(sim, h), NALPHA + 1)
+    alpha = 0.5 * (ae[1:] + ae[:-1])
+    dphi = 2 * np.pi / len(sim['ph']) * dph
+    dom = (np.cos(ae[:-1]) - np.cos(ae[1:])) * dphi
     out = []
-    for iph in range(0, len(ph), dph):
+    for iph in range(0, len(sim['ph']), dph):
         for ia, al in enumerate(alpha):
-            x = s * np.sin(al) * np.cos(ph[iph])
-            y = s * np.sin(al) * np.sin(ph[iph])
-            z = h + s * np.cos(al)
-            rr = np.sqrt(x * x + y * y + z * z)
-            tt = np.arccos(z / rr)
-            pp = np.mod(np.arctan2(y, x), 2 * np.pi)
-            inside = ((rr >= rf[0]) & (rr <= rf[-1]) & (tt >= thf[0])
-                      & (tt <= thf[-1]))
-            if not inside.any():
-                continue
-            i0 = np.argmax(inside)
-            i1 = len(s) - np.argmax(inside[::-1])     # past the last inside
-            q = np.column_stack([pp, np.clip(tt, th[0], th[-1]),
-                                 np.clip(rr, r[0], r[-1])])[i0:i1]
-            ln = np.where(inside[i0:i1], itp(q), np.log10(N_FLOOR))
-            d = s[i0:i1] * r0
-            ld = np.log10(d)
-            pts = ([(ld[0] - 0.01, ln[0])] + list(zip(ld, ln))
-                   + [(ld[-1] + 0.01, ln[-1])])
-            dlaw = ''.join(f'continue {u:.7f} {v:.4f}\n' for u, v in pts)
             name = f'ray_p{iph:03d}_a{ia:02d}'
-            deck = DECK.format(
-                name=name, ph=ph[iph], th=al,
-                logphi=np.log10(Q_ION / (4 * np.pi * d[0] ** 2)),
-                logr_in=ld[0], logr_out=ld[-1], dlaw=dlaw,
-                stop_col=STOP_COL).replace(
-                    'theta', f'alpha from the lamp at z = {h:.3f} r0')
-            out.append((name, iph, ia, al, d[0], dom[ia], deck))
+            rd = ray_deck(itp, sim, h, sim['ph'][iph], al, name)
+            if rd is not None:
+                out.append((name, iph, ia, al, rd[0], dom[ia], rd[1]))
+    return out
+
+
+def adaptive_decks(sim, phys, h, nrays, nphi):
+    """Decks for an elevated lamp at z = h [r0] from adaptive_plan: (name,
+    iph, ia, alpha, d_in [cm], dOmega [sr], phi_lo, phi_hi, deck), where
+    [phi_lo, phi_hi) is the column's phi wedge (midpoints to its
+    neighbours, unwrapped about the column's phi)."""
+    itp = density_interp(sim, phys)
+    alpha, Rl, Zl = landing_surface(sim, phys, h)
+    plan = adaptive_plan(sim, phys, alpha, Rl, Zl, nrays, nphi)
+    phc = np.array([sim['ph'][p[0]] for p in plan])
+    gap = np.diff(np.concatenate([phc, [phc[0] + 2 * np.pi]]))
+    out = []
+    for k, (iph, wd, ac, ae) in enumerate(plan):
+        lo, hi = phc[k] - 0.5 * gap[k - 1], phc[k] + 0.5 * gap[k]
+        dom = (np.cos(ae[:-1]) - np.cos(ae[1:])) * (hi - lo)
+        for ia, al in enumerate(ac):
+            name = f'ray_p{iph:03d}_a{ia:02d}'
+            rd = ray_deck(itp, sim, h, sim['ph'][iph], al, name)
+            if rd is not None:
+                out.append((name, iph, ia, al, rd[0], dom[ia], lo, hi,
+                            rd[1]))
     return out
 
 
@@ -208,16 +251,10 @@ def landing_surface(sim, phys, h):
     """Where lamp rays from z = h [r0] first reach n_H > N_SURF, for every
     sim phi column and NA_FINE directions alpha: (alpha [NA_FINE],
     R, z [nph, NA_FINE], nan if never)."""
-    from scipy.interpolate import RegularGridInterpolator
     r, th, ph = sim['r'], sim['th'], sim['ph']
     rf, thf = sim['rf'], sim['thf']
-    logn = np.log10(phys['nH'])
-    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
-    lnp = np.concatenate([logn[-1:], logn, logn[:1]], axis=0)
-    itp = RegularGridInterpolator((php, th, r), lnp)
-    a_lo = np.arctan2(rf[-1] * np.sin(thf[0]), rf[-1] * np.cos(thf[0]) - h)
-    a_hi = np.arctan2(rf[0] * np.sin(thf[-1]), rf[0] * np.cos(thf[-1]) - h)
-    alpha = np.linspace(a_lo, a_hi, NA_FINE)
+    itp = density_interp(sim, phys)
+    alpha = np.linspace(*alpha_range(sim, h), NA_FINE)
     s = np.arange(STEP, 2 * rf[-1] + h, STEP)
     S, A = np.meshgrid(s, alpha)                       # (NA_FINE, ns)
     Rr, Zz = S * np.sin(A), h + S * np.cos(A)
@@ -966,6 +1003,30 @@ def plot_rays(out, iph, maponly=False):
     print(f"wrote {path} ({len(names)} rays)")
 
 
+def phi_wedges(out):
+    """{iph: (phi_lo, phi_hi)} of an adaptive run (rays_meta.npz with
+    phi_lo/phi_hi), else None."""
+    mz = os.path.join(out, 'rays_meta.npz')
+    if not os.path.exists(mz):
+        return None
+    m = np.load(mz)
+    if 'phi_lo' not in m.files:
+        return None
+    return {int(i): (float(a), float(b))
+            for i, a, b in zip(m['iph'], m['phi_lo'], m['phi_hi'])}
+
+
+def cell_overlap(phf, lo, hi):
+    """fraction of each phi cell (edges phf over [0, 2 pi]) inside the
+    wedge [lo, hi), which may wrap past 0 or 2 pi."""
+    f = np.zeros(len(phf) - 1)
+    for sh in (-2 * np.pi, 0.0, 2 * np.pi):
+        a = np.clip(lo + sh, phf[:-1], phf[1:])
+        b = np.clip(hi + sh, phf[:-1], phf[1:])
+        f += np.clip(b - a, 0, None)
+    return f / np.diff(phf)
+
+
 def faceon_map(out, dph):
     """Face-on surface brightness [erg/s/cm^2] of H alpha, Mg II, C IV from
     the finished rays (lamp at the origin: rays = sim columns): each ray's
@@ -1030,6 +1091,19 @@ def faceon_map(out, dph):
         seen[iph] = n == nexp.get(iph, -1)
     L[:, ~seen] = 0.0
     cols = np.nonzero(seen)[0]
+    wedges = phi_wedges(out)
+    if wedges is not None:
+        # adaptive columns: each one's light over the sim cells of its own
+        # wedge [phi_lo, phi_hi) (its rays' dOmega already span it), by
+        # the overlap of each cell with the wedge
+        Lc, seen[:] = L[:, cols].copy(), False
+        L[:] = 0.0
+        for j, iph in enumerate(cols):
+            lo, hi = wedges[iph]
+            f = cell_overlap(phf, lo, hi)
+            L += Lc[:, j][:, None, :] * (f / f.sum())[None, :, None]
+            seen |= f > 0
+        cols = []
     for j, iph in enumerate(cols):
         nxt = cols[(j + 1) % len(cols)] + (nph if j + 1 == len(cols) else 0)
         wdt = int(min(nxt - iph, 16)) if len(cols) > 1 else dph
@@ -1040,7 +1114,7 @@ def faceon_map(out, dph):
     area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
         np.diff(phf)[:, None]
     S = np.where(seen[None, :, None], L / area[None], np.nan)
-    nfull = len(cols)
+    nfull = sum(n == nexp.get(i, -1) for i, n in ncol.items())
     R, P = np.meshgrid(rf, phf)
     X, Y = R * np.cos(P), R * np.sin(P)
     smax = np.nanmax(S)
@@ -1104,7 +1178,8 @@ def faceon_map(out, dph):
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}: {nray} finished rays in {len(ncol)} phi columns "
-          f"({nfull} complete)")
+          f"({nfull} complete); mapped H alpha "
+          f"{np.nansum(S[0] * area):.4g} erg/s")
 
 
 def spectrum_plots(out, dph):
@@ -1368,17 +1443,37 @@ def main():
     ap.add_argument('--hlamp', type=float, default=0.0,
                     help='write: lamp height on the axis [light days]; 0 = '
                          'lamp at the origin (rays = sim columns)')
+    ap.add_argument('--adaptive', action='store_true',
+                    help='write (with --hlamp): adaptive_plan rays')
     ap.add_argument('--nrays', type=int, default=3000,
-                    help='rayplan: total adaptive rays')
+                    help='rayplan / write --adaptive: total rays')
     ap.add_argument('--nphi', type=int, default=64,
-                    help='rayplan: adaptive phi columns')
+                    help='rayplan / write --adaptive: phi columns')
     ap.add_argument('--only', type=int, default=0,
                     help='run only the first N decks (timing tests)')
     a = ap.parse_args()
     rdir = os.path.join(a.out, 'rays')
     os.makedirs(rdir, exist_ok=True)
 
-    if a.step == 'write' and a.hlamp > 0:
+    if a.step == 'write' and a.adaptive:
+        sim = load_sim(DUMP)
+        phys = to_physical(sim, CONFIG)
+        h = a.hlamp / CONFIG['R0_LD']
+        decks = adaptive_decks(sim, phys, h, a.nrays, a.nphi)
+        for d in decks:
+            with open(os.path.join(rdir, d[0] + '.in'), 'w') as fh:
+                fh.write(d[-1])
+        cols = list(zip(*[d[:-1] for d in decks]))
+        np.savez(os.path.join(a.out, 'rays_meta.npz'), name=cols[0],
+                 iph=cols[1], ia=cols[2], alpha=cols[3], d_in=cols[4],
+                 domega=cols[5], phi_lo=cols[6], phi_hi=cols[7],
+                 hlamp_r0=h)
+        print(f"wrote {len(decks)} adaptive decks to {rdir}: lamp at z = "
+              f"{h:.3f} r0 ({a.hlamp:g} ld), {len(set(cols[1]))} phi "
+              f"columns; total dOmega {sum(cols[5]) / (4 * np.pi):.3f} "
+              f"x 4 pi")
+
+    elif a.step == 'write' and a.hlamp > 0:
         sim = load_sim(DUMP)
         phys = to_physical(sim, CONFIG)
         h = a.hlamp / CONFIG['R0_LD']

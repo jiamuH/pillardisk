@@ -971,10 +971,125 @@ def spectrum_plots(out, dph):
           f"{out}/spectrum.npz")
 
 
+def velocity_fields(sim, phys):
+    """three candidate depth profiles for Cloudy's microturbulence, on the
+    sim grid (ph, th, r), for rays from a lamp at the origin (ray
+    direction = r):
+      grad  dv_r/dr                           [km/s per 0.01 r0], signed
+      shear |sigma| = sqrt(2 sigma_ij sigma_ij), sigma the traceless
+            strain-rate tensor in spherical polars (includes the
+            Keplerian r dOmega/dr)        [km/s per 0.01 r0]
+      disp  1D velocity dispersion of (v_r, v_th, v_ph) over the 3x3x3
+            neighbouring cells (local basis, so the turning of v_ph
+            around the axis does not count)            [km/s]"""
+    from scipy.ndimage import uniform_filter
+    r = sim['r'][None, None, :]
+    th = sim['th'][None, :, None]
+    st, ct = np.sin(th), np.cos(th)
+    vr, vt, vp = phys['vr'], phys['vt'], phys['vp']        # km/s
+
+    def d(f, ax):                                 # per r0 / per radian
+        if ax == 0:                               # phi: periodic
+            dp = sim['ph'][1] - sim['ph'][0]
+            return (np.roll(f, -1, 0) - np.roll(f, 1, 0)) / (2 * dp)
+        return np.gradient(f, (sim['ph'], sim['th'], sim['r'])[ax],
+                           axis=ax)
+    err = d(vr, 2)
+    ett = d(vt, 1) / r + vr / r
+    epp = d(vp, 0) / (r * st) + vr / r + vt * ct / (r * st)
+    ert = 0.5 * (r * d(vt / r, 2) + d(vr, 1) / r)
+    erp = 0.5 * (d(vr, 0) / (r * st) + r * d(vp / r, 2))
+    etp = 0.5 * (st / r * d(vp / st, 1) + d(vt, 0) / (r * st))
+    tr3 = (err + ett + epp) / 3
+    s2 = ((err - tr3) ** 2 + (ett - tr3) ** 2 + (epp - tr3) ** 2
+          + 2 * (ert ** 2 + erp ** 2 + etp ** 2))
+    mode = ('wrap', 'nearest', 'nearest')
+    var = 0.0
+    for v in (vr, vt, vp):
+        var = var + (uniform_filter(v * v, 3, mode=mode)
+                     - uniform_filter(v, 3, mode=mode) ** 2)
+    return dict(grad=err * 0.01, shear=np.sqrt(2 * s2) * 0.01,
+                disp=np.sqrt(np.clip(var, 0, None) / 3))
+
+
+def velocity_maps(out, iphs):
+    """meridional maps of velocity_fields at the phi indices iphs, one
+    figure per field, n_H contours on top"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm, SymLogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    vf = velocity_fields(sim, phys)
+    R, T = np.meshgrid(sim['rf'], sim['thf'])
+    nup = int((sim['th'] <= np.pi / 2).sum())
+    X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
+    Rc, Tc = np.meshgrid(sim['r'], sim['th'][:nup])
+    Xc, Zc = Rc * np.sin(Tc), Rc * np.cos(Tc)
+    up = np.s_[:, :nup]
+    figs = [('grad', r'$dv_r/dr\,[\rm km\,s^{-1}\,(0.01\,r_0)^{-1}]$',
+             'RdBu_r'),
+            ('shear', r'$|\sigma|\,[\rm km\,s^{-1}\,(0.01\,r_0)^{-1}]$',
+             'viridis'),
+            ('disp', r'$\sigma_v\,(3^3~{\rm cells})\,[\rm km\,s^{-1}]$',
+             'magma')]
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    for key, lab, cm in figs:
+        f = vf[key][up]
+        if key == 'grad':
+            vmax = np.percentile(np.abs(f), 99)
+            norm = SymLogNorm(linthresh=1.0, vmin=-vmax, vmax=vmax)
+        else:
+            norm = LogNorm(*np.percentile(f[f > 0], [1, 99.5]))
+        fig, axs = plt.subplots(1, len(iphs),
+                                figsize=(13 * len(iphs), 6.2))
+        axs = np.atleast_1d(axs)
+        for j, (ax, iph) in enumerate(zip(axs, iphs)):
+            for a, inset in ((ax, False),
+                             (ax.inset_axes([0.6, 0.38, 0.38, 0.58]), True)):
+                pc = a.pcolormesh(X, Z, vf[key][iph][:nup], norm=norm,
+                                  cmap=cm, shading='flat', rasterized=True,
+                                  edgecolors='face')
+                a.contour(Xc, Zc, np.log10(phys['nH'][iph][:nup]),
+                          levels=[9, 10, 11], colors='k',
+                          linewidths=[0.6, 1.0, 1.6])
+                a.set_aspect('equal')
+                a.tick_params(which='both', direction='in',
+                              labelsize=10 if inset else 12)
+                if inset:
+                    a.set_xlim(0.47, 0.62)
+                    a.set_ylim(-0.005, 0.09)
+                    ax.indicate_inset_zoom(a, edgecolor='purple')
+            ax.text(0.03, 0.05, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'
+                    r'^\circ$', transform=ax.transAxes, fontsize=16)
+            ax.set_xlabel(r'$R\,[r_0]$')
+            if j == 0:
+                ax.set_ylabel(r'$z\,[r_0]$')
+            cax = make_axes_locatable(ax).append_axes('right', size='2.5%',
+                                                      pad=0.08)
+            cb = fig.colorbar(pc, cax=cax)
+            if j == len(iphs) - 1:
+                cb.set_label(lab, fontsize=15)
+        fig.tight_layout()
+        path = os.path.join(pdir, f'vel_{key}.png')
+        fig.savefig(path, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        print(f"wrote {path}: 1-50-99% "
+              f"{np.percentile(np.abs(f), [1, 50, 99]).round(1)}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
-                                     'faceon', 'spectrum'])
+                                     'faceon', 'spectrum', 'vmaps'])
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
     ap.add_argument('--maponly', action='store_true',
@@ -1060,6 +1175,9 @@ def main():
 
     elif a.step == 'faceon':
         faceon_map(a.out, a.dph)
+
+    elif a.step == 'vmaps':
+        velocity_maps(a.out, (0, 160))
 
     elif a.step == 'plot':
         if a.maponly:

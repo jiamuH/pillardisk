@@ -1023,7 +1023,7 @@ def velocity_fields(sim, phys):
                 normal=enn * 0.01, nr=nr)
 
 
-def velocity_maps(out, iphs):
+def velocity_maps(out, iphs, labels):
     """meridional maps of velocity_fields at the phi indices iphs plus
     the cut through the embedded star (marked), one figure per field,
     n_H contours (1e9, 1e10, 1e11 cm^-3, thin to thick) on top"""
@@ -1044,7 +1044,8 @@ def velocity_maps(out, iphs):
     xs, ys = star_position(sim)
     ist = int(np.argmin(np.abs(np.angle(np.exp(1j * (
         sim['ph'] - np.arctan2(ys, xs)))))))
-    iphs = tuple(iphs) + (ist,)
+    iphs = (ist,) + tuple(iphs)
+    labels = ('star',) + tuple(labels)
     R, T = np.meshgrid(sim['rf'], sim['thf'])
     nup = int((sim['th'] <= np.pi / 2).sum())
     X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
@@ -1071,7 +1072,7 @@ def velocity_maps(out, iphs):
         fig, axs = plt.subplots(len(iphs), 1, sharex=True,
                                 figsize=(14, 4.6 * len(iphs)))
         axs = np.atleast_1d(axs)
-        for j, (ax, iph) in enumerate(zip(axs, iphs)):
+        for j, (ax, iph, tag) in enumerate(zip(axs, iphs, labels)):
             for a, inset in ((ax, False),
                              (ax.inset_axes([0.6, 0.38, 0.38, 0.58]), True)):
                 pc = a.pcolormesh(X, Z, vf[key][iph][:nup], norm=norm,
@@ -1094,7 +1095,8 @@ def velocity_maps(out, iphs):
             ax.set_xlim(sim['rf'][0] - 0.03, sim['rf'][-1])
             ax.set_ylim(0, 0.64)
             ax.text(0.03, 0.9, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'
-                    r'^\circ$', transform=ax.transAxes, fontsize=16)
+                    rf'^\circ$ ({tag})', transform=ax.transAxes,
+                    fontsize=16)
             if j == len(iphs) - 1:
                 ax.set_xlabel(r'$R\,[r_0]$')
             ax.set_ylabel(r'$z\,[r_0]$')
@@ -1209,7 +1211,10 @@ def main():
         faceon_map(a.out, a.dph)
 
     elif a.step == 'vmaps':
-        velocity_maps(a.out, (0, 160))
+        # star first (found in velocity_maps); then the strongest Sigma
+        # excess away from it (3.6x the phi-median at R = 1) and the
+        # quietest column (least rms Sigma and H deviation, R 0.6-1.8)
+        velocity_maps(a.out, (49, 141), ('arm', 'quiet'))
 
     elif a.step == 'plot':
         if a.maponly:

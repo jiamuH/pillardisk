@@ -1231,7 +1231,9 @@ def main():
             for name, dt, st in pool.imap_unordered(
                     run_one, [(rdir, n) for n in names]):
                 done += 1
+                # small sets (tests): every ray; large: every 50th
                 if st != 'skip' and (done % 50 == 0 or st != 'ok'
+                                     or len(names) <= 100
                                      or done == len(names)):
                     el = time.time() - t0
                     print(f"  {done}/{len(names)} {name} {st} {dt:.0f} s; "

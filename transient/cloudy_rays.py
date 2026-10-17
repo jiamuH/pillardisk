@@ -1008,8 +1008,19 @@ def velocity_fields(sim, phys):
     for v in (vr, vt, vp):
         var = var + (uniform_filter(v * v, 3, mode=mode)
                      - uniform_filter(v, 3, mode=mode) ** 2)
+    # gradient along the local surface normal n = -grad n_H / |grad n_H|
+    # (the way out of a lit skin): n.e.n with the full strain rate e
+    # (trace included, it helps escape too)
+    ln = np.log(phys['nH'])
+    g = [d(ln, 2), d(ln, 1) / r, d(ln, 0) / (r * st)]
+    gn = np.sqrt(g[0] ** 2 + g[1] ** 2 + g[2] ** 2)
+    gn = np.where(gn > 0, gn, np.inf)            # flat floor: n = 0
+    nr, nt, npp = (-c / gn for c in g)
+    enn = (err * nr ** 2 + ett * nt ** 2 + epp * npp ** 2
+           + 2 * (ert * nr * nt + erp * nr * npp + etp * nt * npp))
     return dict(grad=err * 0.01, shear=np.sqrt(2 * s2) * 0.01,
-                disp=np.sqrt(np.clip(var, 0, None) / 3))
+                disp=np.sqrt(np.clip(var, 0, None) / 3),
+                normal=enn * 0.01, nr=nr)
 
 
 def velocity_maps(out, iphs):
@@ -1039,13 +1050,15 @@ def velocity_maps(out, iphs):
             ('shear', r'$|\sigma|\,[\rm km\,s^{-1}\,(0.01\,r_0)^{-1}]$',
              'viridis'),
             ('disp', r'$\sigma_v\,(3^3~{\rm cells})\,[\rm km\,s^{-1}]$',
-             'magma')]
+             'magma'),
+            ('normal', r'$\hat n\cdot e\cdot\hat n\,[\rm km\,s^{-1}\,'
+             r'(0.01\,r_0)^{-1}]$', 'RdBu_r')]
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
     for key, lab, cm in figs:
         f = vf[key][up]
-        if key == 'grad':
-            vmax = np.percentile(np.abs(f), 99)
+        if key in ('grad', 'normal'):           # same scale for both
+            vmax = np.percentile(np.abs(vf['grad'][up]), 99)
             norm = SymLogNorm(linthresh=1.0, vmin=-vmax, vmax=vmax)
         else:
             norm = LogNorm(*np.percentile(f[f > 0], [1, 99.5]))
@@ -1084,6 +1097,15 @@ def velocity_maps(out, iphs):
         plt.close(fig)
         print(f"wrote {path}: 1-50-99% "
               f"{np.percentile(np.abs(f), [1, 50, 99]).round(1)}")
+    # the lit skin (1e10 < n_H < 1e11): along the lamp ray vs out of it
+    sk = (phys['nH'] > 1e10) & (phys['nH'] < 1e11)
+    sk[:, nup:] = False
+    q = lambda x: np.percentile(x[sk], [16, 50, 84]).round(2)
+    w12 = 1e12 / (0.01 * CONFIG['R0_LD'] * LD_CM)   # per 0.01 r0 -> 1e12 cm
+    print(f"skin cells {sk.sum()}: |dv_r/dr| {q(np.abs(vf['grad']))}, "
+          f"|n.e.n| {q(np.abs(vf['normal']))} km/s/(0.01 r0); "
+          f"|n.e.n| x 1e12 cm {q(np.abs(vf['normal']) * w12)} km/s; "
+          f"|n_r| {q(np.abs(vf['nr']))}")
 
 
 def main():

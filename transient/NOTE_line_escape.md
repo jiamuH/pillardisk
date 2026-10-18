@@ -52,11 +52,27 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
 
 ## Line escape geometry in Cloudy (important)
 
-- 1D two-stream escape: P = [P(tau_in) + P(T - tau_in)] / 2
-  (`docs/latex/hazy2/linedetl.tex:238`): toward the lamp, and deeper
-  along the ray. The deeper direction is the second term; its velocity
-  gradient is dv_r/dr, not n.e.n. The real shortest escape route
-  (vertical, through the skin) does not exist in the 1D model.
+- Escape is angle-integrated, in a plane-parallel (or spherical-shell)
+  geometry whose layers are perpendicular to the lamp ray: P = [P(tau_in)
+  + P(T - tau_in)] / 2 (`docs/latex/hazy2/linedetl.tex:238`), each term a
+  K_2 function containing E_2 (exp(-tau/mu) integrated over all
+  directions mu, `linedetl.tex:161`), out of the lamp face and the back
+  face. A photon leaving at angle theta to the ray sees tau / cos theta,
+  so the cheapest exits are along the ray. (Corrected 2026-10-18: earlier
+  versions of this note called it "1D two-stream along the ray".)
+- `save lines emissivity` (what the maps and spectra use) is the net
+  escaping emission 4 pi J = n_u A_ul P_ul h nu (`hazy1/conout.tex`,
+  "Save lines, emissivity"; intrinsic by default, `emergent` would add
+  absorption on the way out), so the face-on maps already show escaping
+  light, in Cloudy's geometry.
+- Tilted skin: the lamp ray grazes the skin, whose normal is nearly
+  vertical. The real shortest exit is through the skin surface, sideways
+  to the ray, with column ~ tau sin(grazing angle) << tau; Cloudy's slab,
+  with its normal along the ray, has no such path. For thick lines (Mg
+  II) Cloudy's escape is then likely too LOW, which moves it toward
+  MOCASSIN. The deeper direction's velocity gradient is dv_r/dr, not
+  n.e.n; across the layer n.e.n gives 0.03-0.4 km/s, negligible next to
+  vturb and the thermal widths, so velocity does not fix this.
 - Deep route is closed physically: Sobolev length along the ray ~3e13 cm
   in the skin, Mg+ column ~1e20 over it, Mg II tau0 ~ 1e8 even then.
 - OUR DECKS RUN ONE ITERATION (no `iterate`; Cloudy warns "This is the
@@ -166,8 +182,8 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
      LVG path is the ballistic `wind`, whose dv/dr = |a_rad - g| / v
      comes from Cloudy's own momentum equation (`:99`), with density from
      continuity; `wind velocity` sets only the launch speed. A patch
-     imposing a table dv/dr would still be 1D along the lamp ray (the
-     wrong direction: Sobolev tau there stays ~1e8) and isotropic. The
+     imposing a table dv/dr would still be a gradient along the lamp ray
+     only (Sobolev tau there stays ~1e8) and isotropic. The
      real velocities go into the profile synthesis (step 3).
 3. Horne & Marsh anisotropic weighting in `ray_spectra` for thick lines,
    using the sim strain tensor; needs the vturb ~ 0 outputs from step 2.

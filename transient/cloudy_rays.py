@@ -774,7 +774,7 @@ def plot_map(out, iph, ray=None):
              ((3, 4), r'$\rm C\,IV$', 'Blues'),
              ((5, 6), r'$\rm Mg\,II$', 'Greens')]
     pts = []                        # (R, z, L_Ha, L_HeII, L_CIV, L_MgII)
-    hatot = {}                      # per-ray H alpha, to pick the 6th panel's
+    hapk = {}                       # R of each ray's H alpha peak (6th panel)
     for n in names:
         e = np.loadtxt(os.path.join(rdir, n + '.ems'))
         if e.shape[1] < 9:                   # older deck: rebuild He II
@@ -789,7 +789,8 @@ def plot_map(out, iph, ray=None):
                        for c, _, _ in lines], axis=1)
         ss = s0 / r0 + (np.arange(nb) + 0.5) * SEG      # from the lamp
         pts.append(np.column_stack([ss * sa, hl + ss * ca, sg]))
-        hatot[n] = (e[:, 1] * dd).sum()
+        # where along R the ray's H alpha peaks (skin rays: on the skin)
+        hapk[n] = (s0 + e[np.argmax(e[:, 1]), 0]) / r0 * sa
     pts = np.vstack(pts)
     with np.errstate(invalid='ignore'):
         lmax = np.nanmax(np.where(np.isfinite(pts[:, 2:]), pts[:, 2:],
@@ -826,7 +827,7 @@ def plot_map(out, iph, ray=None):
         z = base(ax)
         v = pts[:, 2 + k]
         if not np.isfinite(v).any() or lmax[k] <= 0:
-            ax.text(0.3, 0.12, r'$\rm not~saved~for~these~rays$',
+            ax.text(0.3, 0.12, r'\textbf{not saved for these rays}',
                     transform=ax.transAxes, ha='center', fontsize=16)
             ax.set_title(lab, fontsize=16)
             continue
@@ -846,7 +847,7 @@ def plot_map(out, iph, ray=None):
     ax = axs[1, 1]
     z = base(ax)
     if not has_he.any():
-        ax.text(0.3, 0.12, r'$\rm no~He\,II~yet~for~these~rays$',
+        ax.text(0.3, 0.12, r'\textbf{no He\,II yet for these rays}',
                 transform=ax.transAxes, ha='center', fontsize=16)
     # hue from the local balance of the three lines (each normalized to
     # its own maximum, then relative to the point's strongest one, over
@@ -867,13 +868,14 @@ def plot_map(out, iph, ray=None):
                                 (1, 'royalblue'))):
         ax.text(0.03, 0.95 - 0.09 * i, lines[k][1], color=c,
                 transform=ax.transAxes, va='top', fontsize=16)
-    ax.text(0.03, 0.62, rf'$\rm hue:~line~balance~({RGB_DEX:g}~dex)$',
+    ax.text(0.03, 0.62, rf'\textbf{{hue: line balance ({RGB_DEX:g} dex)}}',
             transform=ax.transAxes, va='top', fontsize=14)
     make_axes_locatable(ax).append_axes('right', size='2.5%',
                                         pad=0.08).set_visible(False)
-    # 6th panel: ionization structure along one ray (--ray, default the
-    # column's brightest H alpha ray), its path drawn on the RGB panel
-    rn = ray if ray in names else max(hatot, key=hatot.get)
+    # 6th panel: ionization structure along one ray (--ray, default a
+    # typical skin ray: H alpha peaking nearest R = 1, the star's orbit),
+    # its path drawn on the RGB panel
+    rn = ray if ray in names else min(hapk, key=lambda n: abs(hapk[n] - 1))
     rp = os.path.join(rdir, rn)
     with open(rp + '.ovr') as fh:
         hdr = fh.readline().lstrip('#').rstrip('\n').split('\t')
@@ -896,8 +898,8 @@ def plot_map(out, iph, ray=None):
     lo = max(dep[0], dep[i0] - 0.3 * (dep[-1] - dep[i0]))
     ax.set_xlim(lo, dep[-1])
     ax.set_ylim(-0.02, 1.05)
-    ax.set_xlabel(r'$\rm depth~along~the~ray\,[cm]$')
-    ax.set_ylabel(r'$\rm ion~fraction$')
+    ax.set_xlabel(r'\textbf{depth along the ray} $[\rm cm]$')
+    ax.set_ylabel(r'\textbf{ion fraction}')
     ax.tick_params(which='both', direction='in', labelsize=12)
     ax.legend(fontsize=13, loc='center left', ncol=1)
     axt = ax.twinx()
@@ -905,7 +907,7 @@ def plot_map(out, iph, ray=None):
     axt.set_ylabel(r'$T_e\,[\rm K]$', color='crimson')
     axt.tick_params(axis='y', which='both', direction='in', colors='crimson',
                     labelsize=12)
-    ax.set_title(r'\textbf{' + rn.replace('_', r'\_') + r'} (black line)',
+    ax.set_title(r'\textbf{' + rn.replace('_', r'\_') + r' (black line)}',
                  fontsize=16)
     for ax in list(axs[1, :2]) + [axs[0, 2]]:
         ax.set_xlabel(r'$R\,[r_0]$')

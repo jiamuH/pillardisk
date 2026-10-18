@@ -734,7 +734,7 @@ def ray_geometry(out, sim, dph=2):
     return geo, {i: nup for i in range(0, nph, dph)}, 0.0
 
 
-def plot_map(out, iph):
+def plot_map(out, iph, ray=None):
     """Meridional maps at phi index iph from the finished rays: the light
     each SEG-long stretch of a ray emits (sum 4 pi j dl [erg/s per cm^2 of
     ray cross-section]) for H alpha, He II 1640, C IV, Mg II, one panel
@@ -774,6 +774,7 @@ def plot_map(out, iph):
              ((3, 4), r'$\rm C\,IV$', 'Blues'),
              ((5, 6), r'$\rm Mg\,II$', 'Greens')]
     pts = []                        # (R, z, L_Ha, L_HeII, L_CIV, L_MgII)
+    hatot = {}                      # per-ray H alpha, to pick the 6th panel's
     for n in names:
         e = np.loadtxt(os.path.join(rdir, n + '.ems'))
         if e.shape[1] < 9:                   # older deck: rebuild He II
@@ -788,6 +789,7 @@ def plot_map(out, iph):
                        for c, _, _ in lines], axis=1)
         ss = s0 / r0 + (np.arange(nb) + 0.5) * SEG      # from the lamp
         pts.append(np.column_stack([ss * sa, hl + ss * ca, sg]))
+        hatot[n] = (e[:, 1] * dd).sum()
     pts = np.vstack(pts)
     with np.errstate(invalid='ignore'):
         lmax = np.nanmax(np.where(np.isfinite(pts[:, 2:]), pts[:, 2:],
@@ -797,7 +799,6 @@ def plot_map(out, iph):
     nup = int((sim['th'] <= np.pi / 2).sum())
     X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
     fig, axs = plt.subplots(2, 3, figsize=(32, 10.5))
-    axs[1, 2].set_visible(False)
 
     # light, opaque grey for the density underneath (alpha < 1 draws the
     # cell edges as seams)
@@ -870,6 +871,42 @@ def plot_map(out, iph):
             transform=ax.transAxes, va='top', fontsize=14)
     make_axes_locatable(ax).append_axes('right', size='2.5%',
                                         pad=0.08).set_visible(False)
+    # 6th panel: ionization structure along one ray (--ray, default the
+    # column's brightest H alpha ray), its path drawn on the RGB panel
+    rn = ray if ray in names else max(hatot, key=hatot.get)
+    rp = os.path.join(rdir, rn)
+    with open(rp + '.ovr') as fh:
+        hdr = fh.readline().lstrip('#').rstrip('\n').split('\t')
+    ov = np.genfromtxt(rp + '.ovr', skip_header=1, invalid_raise=False)
+    ov = {k: ov[:, i] for i, k in enumerate(hdr)}
+    s0, sa, ca, _ = geo(rn)
+    sp = (s0 + ov['depth']) / r0
+    for xa in (ax, z):
+        xa.plot(sp * sa, hl + sp * ca, 'k', lw=1.2, zorder=6)
+    ax = axs[1, 2]
+    dep = ov['depth']
+    for k, c, t in (('HII', 'k', r'$\rm H^+$'), ('HeII', 'seagreen',
+                    r'$\rm He^+$'), ('HeIII', 'royalblue', r'$\rm He^{2+}$'),
+                    ('C2', 'darkorange', r'$\rm C^+$'),
+                    ('C4', 'deepskyblue', r'$\rm C^{3+}$')):
+        ax.plot(dep, ov[k], color=c, lw=2, label=t)
+    # zoom on the fronts: from a little before He2+ starts to recombine
+    # to the end of the ray (the hot fully ionized stretch is flat)
+    i0 = np.argmax(ov['HeIII'] < 0.99) if (ov['HeIII'] < 0.99).any() else 0
+    lo = max(dep[0], dep[i0] - 0.3 * (dep[-1] - dep[i0]))
+    ax.set_xlim(lo, dep[-1])
+    ax.set_ylim(-0.02, 1.05)
+    ax.set_xlabel(r'$\rm depth~along~the~ray\,[cm]$')
+    ax.set_ylabel(r'$\rm ion~fraction$')
+    ax.tick_params(which='both', direction='in', labelsize=12)
+    ax.legend(fontsize=13, loc='center left', ncol=1)
+    axt = ax.twinx()
+    axt.semilogy(dep, ov['Te'], color='crimson', lw=1.5, ls='--')
+    axt.set_ylabel(r'$T_e\,[\rm K]$', color='crimson')
+    axt.tick_params(axis='y', which='both', direction='in', colors='crimson',
+                    labelsize=12)
+    ax.set_title(r'\textbf{' + rn.replace('_', r'\_') + r'} (black line)',
+                 fontsize=16)
     for ax in list(axs[1, :2]) + [axs[0, 2]]:
         ax.set_xlabel(r'$R\,[r_0]$')
     for ax in axs[:, 0]:
@@ -1467,6 +1504,9 @@ def main():
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
                                      'vtest', 'rayplan'])
+    ap.add_argument('--ray', default=None,
+                    help='plot --maponly: ray for the ionization panel '
+                         '(default: the column\'s brightest H alpha ray)')
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
     ap.add_argument('--maponly', action='store_true',
@@ -1630,7 +1670,7 @@ def main():
 
     elif a.step == 'plot':
         if a.maponly:
-            plot_map(a.out, a.iph)
+            plot_map(a.out, a.iph, a.ray)
         else:
             plot_rays(a.out, a.iph)
 

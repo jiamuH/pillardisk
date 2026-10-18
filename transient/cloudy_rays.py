@@ -1493,9 +1493,23 @@ def main():
                     help='rayplan / write --adaptive: phi columns')
     ap.add_argument('--only', type=int, default=0,
                     help='run only the first N decks (timing tests)')
+    ap.add_argument('--nscale', type=float, default=None,
+                    help='vtest: scale the density normalization NMID_CM3 '
+                         'by this factor (saved in <out>/nscale.txt, so '
+                         'later steps on that directory reuse it)')
     a = ap.parse_args()
     rdir = os.path.join(a.out, 'rays')
     os.makedirs(rdir, exist_ok=True)
+    # a run directory written with --nscale keeps its density scaling
+    nfile = os.path.join(a.out, 'nscale.txt')
+    if a.nscale is not None:
+        with open(nfile, 'w') as fh:
+            fh.write(f'{a.nscale:g}\n')
+    if os.path.exists(nfile):
+        a.nscale = float(open(nfile).read())
+        CONFIG['NMID_CM3'] *= a.nscale
+        print(f"density scaled x{a.nscale:g} ({nfile}): NMID_CM3 = "
+              f"{CONFIG['NMID_CM3']:.3g} cm^-3")
 
     if a.step == 'write' and a.adaptive:
         sim = load_sim(DUMP)
@@ -1585,7 +1599,12 @@ def main():
     elif a.step == 'vtest':
         sim = load_sim(DUMP)
         phys = to_physical(sim, CONFIG)
-        if a.it2:
+        if a.nscale is not None:
+            # denser disk (NOTE_line_escape.md): the test rays with the
+            # production settings (VTURB, ITERATE)
+            it = ITERATE
+            decks = vtest_decks(sim, phys, (VTURB,), iterate=it)
+        elif a.it2:
             # does a 2nd pass suffice? 3 rays (rim t31, mid t24, high t13)
             # at both vturb extremes, against the 4-pass test set
             it = 'iterate 2'

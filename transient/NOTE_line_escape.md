@@ -158,6 +158,16 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
      ITERATE in cloudy_rays.py); 4 passes are unaffordable for ~3000
      rays. The vtest decks saved only the last pass (`print last`, save
      ... `last`), so the pass-by-pass history is not available; the
-     `vtest --it2` check was skipped.
+     `vtest --it2` check was skipped. Production vturb = 10 km/s
+     (VTURB; subsonic ceiling for sub-cell motions).
+   - Cloudy cannot take the sim's velocity field (checked c23.01 source):
+     static/negative-velocity geometries add the plain cumulated opacity
+     (`rt_line_one_tauinc.cpp:80`, no velocity shift); the only Sobolev /
+     LVG path is the ballistic `wind`, whose dv/dr = |a_rad - g| / v
+     comes from Cloudy's own momentum equation (`:99`), with density from
+     continuity; `wind velocity` sets only the launch speed. A patch
+     imposing a table dv/dr would still be 1D along the lamp ray (the
+     wrong direction: Sobolev tau there stays ~1e8) and isotropic. The
+     real velocities go into the profile synthesis (step 3).
 3. Horne & Marsh anisotropic weighting in `ray_spectra` for thick lines,
    using the sim strain tensor; needs the vturb ~ 0 outputs from step 2.

@@ -78,11 +78,13 @@ EXE = os.path.join(CLOUDY_DIR, 'source', 'cloudy.exe')
 # hot ionized gas a ray crosses first (ray 16 stopped 96% ionized, just in
 # front of the arm); the grid's dense slabs ended with N(H0) ~ 1e24
 STOP_COL = 24.0
-# microturbulence [km/s] (0: thermal widths only) and the iterate line:
+# microturbulence [km/s] (0: thermal widths only; 10 = subsonic ceiling
+# for sub-cell motions; Cloudy cannot take the sim velocity field) and
+# the iterate line:
 # one pass leaves a ray's far side as transparent as its lamp side; 2
 # passes close it at ~2x the cost (4 did not converge either, at 3-5x;
 # transient/NOTE_line_escape.md)
-VTURB = 100
+VTURB = 10
 ITERATE = 'iterate 2'
 WMIN, WMAX = 300.0, 12000.0
 

@@ -8,7 +8,8 @@ every (phi, theta) column r = rin..rout is a straight ray from the lamp.
 Each deck (settings as transient/cloudy/arm_column2.in, the grid the
 pipeline uses):
   - the same incident SED (interpolate table), init "c84.ini", solar,
-    turbulence 100 km/s, stop temperature 3e3 K, continuum resolution 0.2
+    turbulence VTURB, ITERATE passes, stop temperature 3e3 K, continuum
+    resolution 0.2
   - radius = the ray's inner and outer sim boundary, phi(H) = Q_ION /
     4 pi r_in^2 at the inner face; Cloudy dilutes it as 1/r^2 along the
     ray (open geometry), so no foreshortening factor: a tilted surface is
@@ -77,7 +78,19 @@ EXE = os.path.join(CLOUDY_DIR, 'source', 'cloudy.exe')
 # hot ionized gas a ray crosses first (ray 16 stopped 96% ionized, just in
 # front of the arm); the grid's dense slabs ended with N(H0) ~ 1e24
 STOP_COL = 24.0
+# microturbulence [km/s] (0: thermal widths only) and the iterate line:
+# one pass leaves a ray's far side as transparent as its lamp side; 2
+# passes close it at ~2x the cost (4 did not converge either, at 3-5x;
+# transient/NOTE_line_escape.md)
+VTURB = 100
+ITERATE = 'iterate 2'
 WMIN, WMAX = 300.0, 12000.0
+
+
+def turb_line(vt):
+    return (f'turbulence = {vt} km/s' if vt > 0
+            else '# no turbulence: thermal line widths')
+
 
 DECK = '''title pillardisk lamp ray {name} (phi {ph:.4f}, theta {th:.4f})
 init "c84.ini"
@@ -90,7 +103,8 @@ phi(H) {logphi:.4f}
 radius {logr_in:.5f} {logr_out:.5f}
 dlaw table radius
 {dlaw}end of dlaw
-turbulence = 100 km/s
+{turb}
+{iterate}
 stop neutral column density {stop_col:.2f}
 stop temperature 3e3 K
 # default zone limit 1400 stopped ~1% of rays (long mid-latitude paths)
@@ -133,7 +147,8 @@ def ray_decks(sim, phys, dph):
                 name=name, ph=sim['ph'][iph], th=sim['th'][ith],
                 logphi=np.log10(Q_ION / (4 * np.pi * rf[0] ** 2)),
                 logr_in=np.log10(rf[0]), logr_out=np.log10(rf[-1]),
-                dlaw=dlaw, stop_col=STOP_COL)
+                dlaw=dlaw, stop_col=STOP_COL, turb=turb_line(VTURB),
+                iterate=ITERATE)
             out.append((name, iph, ith, rf[0], deck))
     return out
 
@@ -192,7 +207,7 @@ def ray_deck(itp, sim, h, phi, al, name):
         name=name, ph=phi, th=al,
         logphi=np.log10(Q_ION / (4 * np.pi * d[0] ** 2)),
         logr_in=ld[0], logr_out=ld[-1], dlaw=dlaw,
-        stop_col=STOP_COL).replace(
+        stop_col=STOP_COL, turb=turb_line(VTURB), iterate=ITERATE).replace(
             'theta', f'alpha from the lamp at z = {h:.3f} r0')
     return d[0], deck
 
@@ -450,9 +465,8 @@ def vtest_decks(sim, phys, vturbs, rays=VTEST_RAYS, iterate=VTEST_ITER):
         for vt in vturbs:
             nv = f'{name}_v{vt:03d}'
             d = deck.replace(name, nv)
-            turb = (f'turbulence = {vt} km/s\n' if vt > 0
-                    else '# no turbulence: thermal line widths\n')
-            d = d.replace('turbulence = 100 km/s\n', turb + iterate + '\n')
+            d = d.replace(turb_line(VTURB) + '\n' + ITERATE + '\n',
+                          turb_line(vt) + '\n' + iterate + '\n')
             d = d.replace('save lines emissivity',
                           f'save line optical depths "{nv}.tau" units '
                           f'Angstroms last\nsave lines emissivity')

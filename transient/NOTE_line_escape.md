@@ -154,7 +154,10 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
    - Cost: every ray hit 4 iterations ("did not converge in 4", Cloudy's
      all-lines 5% criterion); CPU 3-5x production (t13 rays 1850-3560 s).
      The 4 rim rays t31 at phi 0/48/140/240 give near-identical results.
-   - Pending: `vtest --it2` (`/data2/jhuang/runs/cloudy_rays/vtest_it2`,
-     3 rays x vturb 0/100 with `iterate 2`) to see if 2 passes suffice.
+   - Decision (2026-10-18): production decks use `iterate 2` (DECK,
+     ITERATE in cloudy_rays.py); 4 passes are unaffordable for ~3000
+     rays. The vtest decks saved only the last pass (`print last`, save
+     ... `last`), so the pass-by-pass history is not available; the
+     `vtest --it2` check was skipped.
 3. Horne & Marsh anisotropic weighting in `ray_spectra` for thick lines,
    using the sim strain tensor; needs the vturb ~ 0 outputs from step 2.

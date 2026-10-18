@@ -384,9 +384,11 @@ def plan_preview(out, h_ld, nrays, nphi):
     print('  phi gap [deg] by 30 deg sector: ' + ' '.join(
         f"{np.degrees(np.mean([p[1] for p in plan if lo <= np.degrees(sim['ph'][p[0]]) < lo + 30])):.1f}"
         for lo in range(0, 360, 30)))
-    # surface density (code units) for the background
+    # background: vertical column N_H = int n_H r dtheta [cm^-2] (n_H from
+    # to_physical, normalized by NMID_CM3)
     dth = np.diff(sim['thf'])
-    sig = (sim['rho'] * (sim['r'][None, None, :] * dth[None, :, None])).sum(1)
+    sig = (phys['nH'] * (sim['r'][None, None, :] * dth[None, :, None])
+           ).sum(1) * CONFIG['R0_LD'] * LD_CM
     P, Rg = np.meshgrid(sim['phf'], sim['rf'], indexing='ij')
     fig = plt.figure(figsize=(20, 15))
     gs = fig.add_gridspec(2, 2, height_ratios=[1.75, 1])
@@ -406,7 +408,7 @@ def plan_preview(out, h_ld, nrays, nphi):
                                                   pad=0.1)
         if ax is axs[0]:
             fig.colorbar(pm, cax=cax).set_label(
-                r'$\Sigma\,[\rm code]$', fontsize=16)
+                r'$N_{\rm H}\,[\rm cm^{-2}]$', fontsize=16)
         else:
             fig.colorbar(sc, cax=cax).set_label(
                 r'$z_{\rm land}\,[r_0]$', fontsize=16)

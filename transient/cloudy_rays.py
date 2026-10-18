@@ -799,7 +799,7 @@ def plot_map(out, iph, ray=None):
     R, T = np.meshgrid(sim['rf'], sim['thf'])
     nup = int((sim['th'] <= np.pi / 2).sum())
     X, Z = (R * np.sin(T))[:nup + 1], (R * np.cos(T))[:nup + 1]
-    fig, axs = plt.subplots(2, 3, figsize=(32, 10.5))
+    fig, axs = plt.subplots(3, 2, figsize=(22, 15.5))
 
     # light, opaque grey for the density underneath (alpha < 1 draws the
     # cell edges as seams)
@@ -833,7 +833,7 @@ def plot_map(out, iph, ray=None):
         fig.colorbar(sc, cax=cax).set_label(
             lab + r'$\,\int 4\pi j\,dl\,[\rm erg\,s^{-1}\,cm^{-2}]$',
             fontsize=15)
-    ax = axs[1, 1]
+    ax = axs[2, 0]
     base(ax)
     if not has_he.any():
         ax.text(0.3, 0.12, r'\textbf{no He\,II yet for these rays}',
@@ -872,7 +872,7 @@ def plot_map(out, iph, ray=None):
     s0, sa, ca, _ = geo(rn)
     sp = (s0 + ov['depth']) / r0
     ax.plot(sp * sa, hl + sp * ca, 'k', lw=1.2, zorder=6)
-    ax = axs[1, 2]
+    ax = axs[2, 1]
     dep = ov['depth']
     for k, c, t in (('HII', 'k', r'$\rm H^+$'), ('HeII', 'seagreen',
                     r'$\rm He^+$'), ('HeIII', 'royalblue', r'$\rm He^{2+}$'),
@@ -896,7 +896,7 @@ def plot_map(out, iph, ray=None):
                     labelsize=12)
     ax.set_title(r'\textbf{' + rn.replace('_', r'\_') + r' (black line)}',
                  fontsize=16)
-    for ax in list(axs[1, :2]) + [axs[0, 2]]:
+    for ax in (axs[2, 0], axs[1, 1]):
         ax.set_xlabel(r'$R\,[r_0]$')
     for ax in axs[:, 0]:
         ax.set_ylabel(r'$z\,[r_0]$')

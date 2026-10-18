@@ -357,6 +357,7 @@ def plan_preview(out, h_ld, nrays, nphi):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
                          'font.size': 18})
@@ -392,12 +393,23 @@ def plan_preview(out, h_ld, nrays, nphi):
     axs = [fig.add_subplot(gs[0, k]) for k in range(2)]
     for ax, sets, lab in ((axs[0], un, rf'uniform: {nun} rays'),
                           (axs[1], ad, rf'adaptive: {nad} rays')):
-        ax.pcolormesh(Rg * np.cos(P), Rg * np.sin(P), sig, norm=LogNorm(),
-                      cmap='Greys', shading='flat', rasterized=True)
+        pm = ax.pcolormesh(Rg * np.cos(P), Rg * np.sin(P), sig,
+                           norm=LogNorm(), cmap='Greys', shading='flat',
+                           rasterized=True)
         for j, R, z in sets:
             p = sim['ph'][j]
-            ax.scatter(R * np.cos(p), R * np.sin(p), c=z, s=4, cmap='plasma',
-                       vmin=-0.2, vmax=0.6, edgecolors='none', zorder=5)
+            sc = ax.scatter(R * np.cos(p), R * np.sin(p), c=z, s=4,
+                            cmap='plasma', vmin=-0.2, vmax=0.6,
+                            edgecolors='none', zorder=5)
+        # Sigma bar on the left panel, landing height on the right one
+        cax = make_axes_locatable(ax).append_axes('right', size='4%',
+                                                  pad=0.1)
+        if ax is axs[0]:
+            fig.colorbar(pm, cax=cax).set_label(
+                r'$\Sigma\,[\rm code]$', fontsize=16)
+        else:
+            fig.colorbar(sc, cax=cax).set_label(
+                r'$z_{\rm land}\,[r_0]$', fontsize=16)
         ax.set_aspect('equal')
         ax.set_xlim(-2.05, 2.05)
         ax.set_ylim(-2.05, 2.05)
@@ -417,9 +429,18 @@ def plan_preview(out, h_ld, nrays, nphi):
         ax = fig.add_subplot(gs[1, k])
         ip = int(np.argmin(np.abs(cols - tgt)))
         j, _, ac, _ = plan[ip]
-        ax.pcolormesh(R * np.sin(T), R * np.cos(T), phys['nH'][j],
-                      norm=LogNorm(1e6, 1e12), cmap='Greys', shading='flat',
-                      rasterized=True)
+        pm = ax.pcolormesh(R * np.sin(T), R * np.cos(T), phys['nH'][j],
+                           norm=LogNorm(1e6, 1e12), cmap='Greys',
+                           shading='flat', rasterized=True)
+        # n_H bar on the right panel; an empty one on the left keeps the
+        # two panels the same size
+        cax = make_axes_locatable(ax).append_axes('right', size='4%',
+                                                  pad=0.1)
+        if k == 1:
+            fig.colorbar(pm, cax=cax).set_label(
+                r'$n_{\rm H}\,[\rm cm^{-3}]$', fontsize=16)
+        else:
+            cax.set_visible(False)
         for a in ac:
             Rx, Zx = land(j, a)
             if np.isfinite(Rx):

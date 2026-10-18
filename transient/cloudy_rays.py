@@ -744,8 +744,8 @@ def plot_map(out, iph, ray=None):
     ionized gas and reddens everything) whose hue is the local balance of
     the three lines (each relative to its own maximum, over RGB_DEX
     decades) and whose opacity is the brightness. Rays run before He II
-    was added to the decks get it from heii_profile (no rerun). Zoom on the inner rim in
-    every panel; the sim's n_H in grey underneath."""
+    was added to the decks get it from heii_profile (no rerun). The sim's
+    n_H in grey underneath."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -812,19 +812,9 @@ def plot_map(out, iph, ray=None):
                       edgecolors='face')
         ax.set_aspect('equal')
         ax.tick_params(which='both', direction='in', labelsize=12)
-        z = ax.inset_axes([0.6, 0.38, 0.38, 0.58])
-        z.pcolormesh(X, Z, phys['nH'][iph][:nup], norm=LogNorm(),
-                     cmap=grey, shading='flat', rasterized=True,
-                     edgecolors='face')
-        z.set_xlim(0.47, 0.62)
-        z.set_ylim(-0.005, 0.09)
-        z.set_aspect('equal')
-        z.tick_params(which='both', direction='in', labelsize=10)
-        ax.indicate_inset_zoom(z, edgecolor='purple')
-        return z
 
     for k, (ax, (_, lab, cm)) in enumerate(zip(axs.ravel(), lines)):
-        z = base(ax)
+        base(ax)
         v = pts[:, 2 + k]
         if not np.isfinite(v).any() or lmax[k] <= 0:
             ax.text(0.3, 0.12, r'\textbf{not saved for these rays}',
@@ -835,17 +825,16 @@ def plot_map(out, iph, ray=None):
             m = v > lmax[k] * 10 ** -MAP_DEX
         o = np.argsort(v[m])
         norm = LogNorm(lmax[k] * 10 ** -MAP_DEX, lmax[k])
-        for x, sz in ((ax, 40), (z, 90)):
-            sc = x.scatter(pts[m, 0][o], pts[m, 1][o], c=v[m][o], s=sz,
-                           marker='s', cmap=cm, norm=norm,
-                           edgecolors='none', zorder=5)
+        sc = ax.scatter(pts[m, 0][o], pts[m, 1][o], c=v[m][o], s=40,
+                        marker='s', cmap=cm, norm=norm, edgecolors='none',
+                        zorder=5)
         cax = make_axes_locatable(ax).append_axes('right', size='2.5%',
                                                   pad=0.08)
         fig.colorbar(sc, cax=cax).set_label(
             lab + r'$\,\int 4\pi j\,dl\,[\rm erg\,s^{-1}\,cm^{-2}]$',
             fontsize=15)
     ax = axs[1, 1]
-    z = base(ax)
+    base(ax)
     if not has_he.any():
         ax.text(0.3, 0.12, r'\textbf{no He\,II yet for these rays}',
                 transform=ax.transAxes, ha='center', fontsize=16)
@@ -861,9 +850,8 @@ def plot_map(out, iph, ray=None):
     al = np.clip(1 + np.log10(xm[m]) / MAP_DEX, 0.15, 1)
     o = np.argsort(al)
     cols = np.column_stack([rgb[o], al[o]])
-    for xa, sz in ((ax, 40), (z, 90)):
-        xa.scatter(pts[m, 0][o], pts[m, 1][o], c=cols, s=sz, marker='s',
-                   edgecolors='none', zorder=5)
+    ax.scatter(pts[m, 0][o], pts[m, 1][o], c=cols, s=40, marker='s',
+               edgecolors='none', zorder=5)
     for i, (k, c) in enumerate(((3, 'crimson'), (2, 'seagreen'),
                                 (1, 'royalblue'))):
         ax.text(0.03, 0.95 - 0.09 * i, lines[k][1], color=c,
@@ -883,8 +871,7 @@ def plot_map(out, iph, ray=None):
     ov = {k: ov[:, i] for i, k in enumerate(hdr)}
     s0, sa, ca, _ = geo(rn)
     sp = (s0 + ov['depth']) / r0
-    for xa in (ax, z):
-        xa.plot(sp * sa, hl + sp * ca, 'k', lw=1.2, zorder=6)
+    ax.plot(sp * sa, hl + sp * ca, 'k', lw=1.2, zorder=6)
     ax = axs[1, 2]
     dep = ov['depth']
     for k, c, t in (('HII', 'k', r'$\rm H^+$'), ('HeII', 'seagreen',

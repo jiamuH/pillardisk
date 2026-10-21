@@ -1099,7 +1099,10 @@ def faceon_map(out, dph):
     sim's (phi, r) cells (a ray covers dph phi cells) over theta, divided by
     the cell's face-on area r dr dphi. All the emitted light (no observer
     side or viewing angle). Only complete phi columns are used, each
-    filling the cells up to the next complete one; the rest are blank."""
+    filling the cells up to the next complete one; the rest are blank. A
+    ray Cloudy crashed on ('DISASTER' in its .out) counts as done: only
+    its own strip is blanked, the radii between the H alpha centroids of
+    its finished neighbours in the column (its light elsewhere is lost)."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -1120,10 +1123,14 @@ def faceon_map(out, dph):
     L = np.zeros((len(lines), nph, nr))
     seen = np.zeros(nph, bool)
     nray, ncol = 0, {}
+    rcen, crashed = {}, []          # H alpha centroid R [r0]; failed rays
     geo, nexp, _ = ray_geometry(out, sim, dph)
     for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out'))):
         name = os.path.basename(o)[:-4]
         if not finished(rdir, name, lenient=True):
+            if 'DISASTER' in open(o, errors='ignore').read():
+                crashed.append(name)
+                ncol[int(name[5:8])] = ncol.get(int(name[5:8]), 0) + 1
             continue
         iph = int(name[5:8])
         e = np.loadtxt(o[:-4] + '.ems')
@@ -1141,6 +1148,8 @@ def faceon_map(out, dph):
         for k, (col, _) in enumerate(lines):
             w = e[:, list(col)].sum(axis=1) * ss ** 2 * dom * dd
             np.add.at(L[k, iph], ir, w)
+            if k == 0 and w.sum() > 0:
+                rcen[name] = np.sum(w * ss * sa / r0) / w.sum()
         seen[iph] = True
         nray += 1
         ncol[iph] = ncol.get(iph, 0) + 1
@@ -1178,7 +1187,25 @@ def faceon_map(out, dph):
             seen[c % nph] = True
     area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
         np.diff(phf)[:, None]
-    S = np.where(seen[None, :, None], L / area[None], np.nan)
+    # blank each crashed ray's strip: the phi cells of its column, the
+    # radii between its neighbours' centroids (the disk edge if none)
+    ok = np.broadcast_to(seen[:, None], (nph, nr)).copy()
+    for name in crashed:
+        iph, ia = int(name[5:8]), int(name[-2:])
+        if not seen[iph]:
+            continue
+        nb = sorted((int(n[-2:]), rc) for n, rc in rcen.items()
+                    if int(n[5:8]) == iph)
+        lo = next((rc for i, rc in nb[::-1] if i < ia), rf[0])
+        hi = next((rc for i, rc in nb if i > ia), rf[-1])
+        lo, hi = min(lo, hi), max(lo, hi)
+        rin = (rf[1:] > lo) & (rf[:-1] < hi)
+        if wedges is not None:
+            pin = cell_overlap(phf, *wedges[iph]) > 0
+        else:
+            pin = np.isin(np.arange(nph), np.arange(iph, iph + dph) % nph)
+        ok[np.ix_(pin, rin)] = False
+    S = np.where(ok[None], L / area[None], np.nan)
     nfull = sum(n == nexp.get(i, -1) for i, n in ncol.items())
     R, P = np.meshgrid(rf, phf)
     X, Y = R * np.cos(P), R * np.sin(P)
@@ -1189,7 +1216,7 @@ def faceon_map(out, dph):
     fig, axs = plt.subplots(2, 3, figsize=(21, 13.4))
     axs[1, 2].set_visible(False)
     for k, (ax, (_, lab)) in enumerate(zip(axs.ravel(), lines)):
-        m = np.where(seen[:, None], np.maximum(S[k], norm.vmin), np.nan)
+        m = np.where(ok, np.maximum(S[k], norm.vmin), np.nan)
         pc = ax.pcolormesh(X, Y, m, norm=norm, cmap=cmap, shading='flat',
                            rasterized=True)
         ax.set_aspect('equal')
@@ -1217,7 +1244,7 @@ def faceon_map(out, dph):
     bri = np.clip(1 + np.log10(np.maximum(xm, 1e-300)) / MAP_DEX, 0, 1)
     rgb = hue * bri[..., None]
     from matplotlib.colors import ListedColormap
-    img = np.where(seen[:, None, None], rgb, 1.0)        # white = no data
+    img = np.where(ok[..., None], rgb, 1.0)              # white = no data
     # pcolormesh with per-cell colours: draw via a dummy array + facecolors
     pcm = ax.pcolormesh(X, Y, np.zeros((nph, nr)), shading='flat',
                         cmap=ListedColormap(['k']), rasterized=True)
@@ -1243,7 +1270,8 @@ def faceon_map(out, dph):
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}: {nray} finished rays in {len(ncol)} phi columns "
-          f"({nfull} complete); mapped H alpha "
+          f"({nfull} complete, {len(crashed)} crashed rays blanked); "
+          f"mapped H alpha "
           f"{np.nansum(S[0] * area):.4g} erg/s")
 
 

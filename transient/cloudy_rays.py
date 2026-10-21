@@ -1100,9 +1100,11 @@ def faceon_map(out, dph):
     the cell's face-on area r dr dphi. All the emitted light (no observer
     side or viewing angle). Only complete phi columns are used, each
     filling the cells up to the next complete one; the rest are blank. A
-    ray Cloudy crashed on ('DISASTER' in its .out) counts as done: only
-    its own strip is blanked, the radii between the H alpha centroids of
-    its finished neighbours in the column (its light elsewhere is lost)."""
+    ray Cloudy crashed on ('DISASTER' in its .out) counts as done: its
+    own strip, the radii between the H alpha centroids of its finished
+    neighbours in the column, is filled by interpolating log S in R
+    across it from the cells on either side (its light elsewhere is
+    lost)."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -1187,9 +1189,10 @@ def faceon_map(out, dph):
             seen[c % nph] = True
     area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
         np.diff(phf)[:, None]
-    # blank each crashed ray's strip: the phi cells of its column, the
-    # radii between its neighbours' centroids (the disk edge if none)
+    # each crashed ray's strip: the phi cells of its column, the radii
+    # between its neighbours' centroids (the disk edge if none)
     ok = np.broadcast_to(seen[:, None], (nph, nr)).copy()
+    gap = np.zeros((nph, nr), bool)
     for name in crashed:
         iph, ia = int(name[5:8]), int(name[-2:])
         if not seen[iph]:
@@ -1204,8 +1207,19 @@ def faceon_map(out, dph):
             pin = cell_overlap(phf, *wedges[iph]) > 0
         else:
             pin = np.isin(np.arange(nph), np.arange(iph, iph + dph) % nph)
-        ok[np.ix_(pin, rin)] = False
+        gap[np.ix_(pin, rin)] = True
+    gap &= ok
     S = np.where(ok[None], L / area[None], np.nan)
+    # fill the strips: log S linear in R between the nearest cells outside
+    # the strip on each side (held flat past the disk edge)
+    lr = np.log(sim['r'])
+    for ip in np.nonzero(gap.any(axis=1))[0]:
+        g = gap[ip]
+        for k in range(len(lines)):
+            v = S[k, ip]
+            good = ~g & np.isfinite(v) & (v > 0)
+            if good.sum() >= 2:
+                v[g] = np.exp(np.interp(lr[g], lr[good], np.log(v[good])))
     nfull = sum(n == nexp.get(i, -1) for i, n in ncol.items())
     R, P = np.meshgrid(rf, phf)
     X, Y = R * np.cos(P), R * np.sin(P)
@@ -1270,7 +1284,7 @@ def faceon_map(out, dph):
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}: {nray} finished rays in {len(ncol)} phi columns "
-          f"({nfull} complete, {len(crashed)} crashed rays blanked); "
+          f"({nfull} complete, {len(crashed)} crashed rays interpolated); "
           f"mapped H alpha "
           f"{np.nansum(S[0] * area):.4g} erg/s")
 

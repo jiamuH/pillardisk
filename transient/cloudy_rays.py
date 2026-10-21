@@ -36,6 +36,8 @@ Steps (all with --out DIR):
            spectrum.npz)
   faceon   face-on H alpha, Mg II, C IV surface brightness maps from the
            finished rays (plots/faceon_lines.png)
+  losgrad  face-on maps of |dv_los/dl| (sim velocity, observer at
+           LOSG_INCL) at each ray's C IV layer (plots/losgrad_civ.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -1381,18 +1383,11 @@ def spectrum_plots(out, dph):
           f"{out}/spectrum.npz")
 
 
-def velocity_fields(sim, phys):
-    """three candidate depth profiles for Cloudy's microturbulence, on the
-    sim grid (ph, th, r), for rays from a lamp at the origin (ray
-    direction = r):
-      grad  dv_r/dr                           [km/s per 0.01 r0], signed
-      shear |sigma| = sqrt(2 sigma_ij sigma_ij), sigma the traceless
-            strain-rate tensor in spherical polars (includes the
-            Keplerian r dOmega/dr)        [km/s per 0.01 r0]
-      disp  1D velocity dispersion of (v_r, v_th, v_ph) over the 3x3x3
-            neighbouring cells (local basis, so the turning of v_ph
-            around the axis does not count)            [km/s]"""
-    from scipy.ndimage import uniform_filter
+def strain_rate(sim, phys):
+    """symmetric strain-rate tensor e_ij of the sim velocity in spherical
+    polars, on the grid (ph, th, r) [km/s per r0]: (err, ett, epp, ert,
+    erp, etp). The velocity gradient along any unit direction n (local
+    components n_r, n_th, n_ph) is n.e.n."""
     r = sim['r'][None, None, :]
     th = sim['th'][None, :, None]
     st, ct = np.sin(th), np.cos(th)
@@ -1410,6 +1405,32 @@ def velocity_fields(sim, phys):
     ert = 0.5 * (r * d(vt / r, 2) + d(vr, 1) / r)
     erp = 0.5 * (d(vr, 0) / (r * st) + r * d(vp / r, 2))
     etp = 0.5 * (st / r * d(vp / st, 1) + d(vt, 0) / (r * st))
+    return err, ett, epp, ert, erp, etp
+
+
+def velocity_fields(sim, phys):
+    """three candidate depth profiles for Cloudy's microturbulence, on the
+    sim grid (ph, th, r), for rays from a lamp at the origin (ray
+    direction = r):
+      grad  dv_r/dr                           [km/s per 0.01 r0], signed
+      shear |sigma| = sqrt(2 sigma_ij sigma_ij), sigma the traceless
+            strain-rate tensor in spherical polars (includes the
+            Keplerian r dOmega/dr)        [km/s per 0.01 r0]
+      disp  1D velocity dispersion of (v_r, v_th, v_ph) over the 3x3x3
+            neighbouring cells (local basis, so the turning of v_ph
+            around the axis does not count)            [km/s]"""
+    from scipy.ndimage import uniform_filter
+    r = sim['r'][None, None, :]
+    st = np.sin(sim['th'])[None, :, None]
+    vr, vt, vp = phys['vr'], phys['vt'], phys['vp']        # km/s
+
+    def d(f, ax):                                 # per r0 / per radian
+        if ax == 0:                               # phi: periodic
+            dp = sim['ph'][1] - sim['ph'][0]
+            return (np.roll(f, -1, 0) - np.roll(f, 1, 0)) / (2 * dp)
+        return np.gradient(f, (sim['ph'], sim['th'], sim['r'])[ax],
+                           axis=ax)
+    err, ett, epp, ert, erp, etp = strain_rate(sim, phys)
     tr3 = (err + ett + epp) / 3
     s2 = ((err - tr3) ** 2 + (ett - tr3) ** 2 + (epp - tr3) ** 2
           + 2 * (ert ** 2 + erp ** 2 + etp ** 2))
@@ -1431,6 +1452,123 @@ def velocity_fields(sim, phys):
     return dict(grad=err * 0.01, shear=np.sqrt(2 * s2) * 0.01,
                 disp=np.sqrt(np.clip(var, 0, None) / 3),
                 normal=enn * 0.01, nr=nr)
+
+
+LOSG_INCL = (0.0, 45.0)     # observer inclinations [deg] (azimuth 0)
+
+
+def losgrad_map(out):
+    """Face-on maps of |dv_los/dl| = |n.e.n| (e the sim strain rate, n the
+    observer direction, LOSG_INCL at azimuth 0, i.e. o = (sin i, 0, cos
+    i)) at each finished ray's C IV layer: the point weighted by its
+    C IV 1548+1551 emissivity x s^2 (as faceon_map). A column's rays
+    each fill the radii out to the midpoints to their neighbours (by
+    centroid R) over the column's phi wedge. [km/s per 0.01 r0, as
+    velocity_fields]"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from scipy.interpolate import RegularGridInterpolator
+    from transient.sim_spectrum import vlos_cube
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    rdir = os.path.join(out, 'rays')
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
+    nph, nr = len(ph), len(sim['r'])
+    geo, _, h = ray_geometry(out, sim)
+    wedges = phi_wedges(out)
+    # the C IV layer of every finished ray: (iph, R, z) [r0]
+    pts = []
+    for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out'))):
+        name = os.path.basename(o)[:-4]
+        if not finished(rdir, name, lenient=True):
+            continue
+        e = np.loadtxt(o[:-4] + '.ems')
+        if e.ndim < 2 or len(e) < 2:
+            continue
+        s0, sa, ca, _ = geo(name)
+        ss = s0 + e[:, 0]
+        w = e[:, 3:5].sum(axis=1) * ss ** 2 * np.gradient(e[:, 0])
+        if not w.sum() > 0:
+            continue
+        sc = np.sum(w * ss) / w.sum() / r0
+        pts.append((int(name[5:8]), sc * sa, h + sc * ca))
+    pts = np.array(pts)
+    iph, R, z = pts[:, 0].astype(int), pts[:, 1], pts[:, 2]
+    rq, tq, pq = np.hypot(R, z), np.arctan2(R, z), ph[iph]
+    q = np.column_stack([pq, np.clip(tq, sim['th'][0], sim['th'][-1]),
+                         np.clip(rq, sim['r'][0], sim['r'][-1])])
+    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    err, ett, epp, ert, erp, etp = strain_rate(sim, phys)
+    maps = []
+    for inc in LOSG_INCL:
+        _, (no_r, no_t, no_p) = vlos_cube(sim, inc, 0.0)
+        g = (err * no_r ** 2 + ett * no_t ** 2 + epp * no_p ** 2
+             + 2 * (ert * no_r * no_t + erp * no_r * no_p
+                    + etp * no_t * no_p)) * 0.01
+        gp = np.concatenate([g[-1:], g, g[:1]], axis=0)
+        val = np.abs(RegularGridInterpolator(
+            (php, sim['th'], sim['r']), gp)(q))
+        M = np.full((nph, nr), np.nan)
+        for j in np.unique(iph):
+            k = np.nonzero(iph == j)[0]
+            k = k[np.argsort(R[k])]
+            edges = np.concatenate([[R[k][0]], 0.5 * (R[k][1:] + R[k][:-1]),
+                                    [R[k][-1]]])
+            i = np.clip(np.searchsorted(edges, sim['r']) - 1, 0, len(k) - 1)
+            row = np.where((sim['r'] >= edges[0]) & (sim['r'] <= edges[-1]),
+                           val[k][i], np.nan)
+            if wedges is not None:
+                pin = cell_overlap(phf, *wedges[j]) > 0
+            else:
+                pin = np.arange(nph) == j
+            M[pin] = row
+        maps.append(M)
+        print(f"i = {inc:.0f} deg: |dv_los/dl| at the C IV layer, median "
+              f"{np.median(val):.3g}, 5-95% {np.percentile(val, 5):.3g} - "
+              f"{np.percentile(val, 95):.3g} km/s per 0.01 r0")
+    R2, P2 = np.meshgrid(rf, phf)
+    X, Y = R2 * np.cos(P2), R2 * np.sin(P2)
+    allv = np.concatenate([m[np.isfinite(m)] for m in maps])
+    norm = LogNorm(max(np.percentile(allv, 1), 1e-3), np.percentile(allv, 99.5))
+    cmap = plt.get_cmap('viridis').copy()
+    cmap.set_bad('white')
+    fig, axs = plt.subplots(1, len(maps), figsize=(7.4 * len(maps), 6.6))
+    for k, (ax, M, inc) in enumerate(zip(np.atleast_1d(axs), maps,
+                                         LOSG_INCL)):
+        pc = ax.pcolormesh(X, Y, np.clip(M, norm.vmin, None), norm=norm,
+                           cmap=cmap, shading='flat', rasterized=True)
+        ax.set_aspect('equal')
+        ax.set_xlim(-rf[-1], rf[-1])
+        ax.set_ylim(-rf[-1], rf[-1])
+        ax.set_xlabel(r'$x\,[r_0]$')
+        if k == 0:
+            ax.set_ylabel(r'$y\,[r_0]$')
+        ax.set_title(r'$\bm{i = %d^\circ}$' % inc
+                     + (r'\textbf{ (observer toward} $\bm{+x}$\textbf{)}'
+                        if inc > 0 else ''), fontsize=17)
+        ax.tick_params(which='both', direction='in', labelsize=13)
+        cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
+                                                  pad=0.1)
+        cb = fig.colorbar(pc, cax=cax)
+        if k == len(maps) - 1:
+            cb.set_label(r'$|dv_{\rm los}/dl|$ \textbf{at the C\,IV layer} '
+                         r'$[\rm km\,s^{-1}/0.01\,r_0]$')
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'losgrad_civ.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}: {len(pts)} rays")
 
 
 def velocity_maps(out, iphs, labels):
@@ -1534,6 +1672,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
+                                     'losgrad',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -1666,6 +1805,9 @@ def main():
 
     elif a.step == 'faceon':
         faceon_map(a.out, a.dph)
+
+    elif a.step == 'losgrad':
+        losgrad_map(a.out)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

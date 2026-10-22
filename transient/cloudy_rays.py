@@ -2016,7 +2016,7 @@ def strain_at(sim, phys, L):
 
 
 CIV_VARIANTS = [('noshear', None), ('sim', None)] + \
-    [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep', None)]
+    [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep0', None)]
 CIV_LABELS = dict(
     noshear=r'\textbf{no shear}', sim=r'\textbf{sim velocity}',
     kep=r'\textbf{Keplerian}',
@@ -2027,7 +2027,7 @@ CIV_COLORS = dict(noshear='k', sim='C3', vtz100='C0', vtz300='C2', kep='C1',
                   kep0='C4')
 CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
 # ('static': the no-shear variant's name in files saved before 2026-10-22;
-# kep0, vtz300: variants dropped then)
+# vtz300 dropped then)
 
 
 def civ_escape(out, sim, phys):
@@ -2061,10 +2061,11 @@ def civ_escape(out, sim, phys):
         cc = np.maximum(np.abs(c), 1e-3) if floor else np.where(
             c > 0, c, np.nan)
         nz2 = n[:, 2][None] ** 2
-        vh, vz = VTURB * 1e5, (vtz if vtz is not None else VTURB) * 1e5
+        vt = 0.0 if var == 'kep0' else VTURB
+        vh, vz = vt * 1e5, (vtz if vtz is not None else vt) * 1e5
         b = np.sqrt(bth2[:, None] + vh ** 2 * (1 - nz2) + vz ** 2 * nz2)
         t = k0 * (L['Nabove'] * sinpsi)[:, None] / cc / b
-        if var == 'kep':
+        if var in ('kep', 'kep0'):
             # thin Keplerian disk, v = V_K(R) e_phi: only e_R,phi =
             # (R/2) d(v/R)/dR = -(3/4) V_K / R is nonzero, n.e.n = 2 e n_R n_phi
             nR = np.cos(php)[:, None] * n[:, 0][None] + \
@@ -2125,7 +2126,11 @@ def civ_emission_map(out, dph, plotonly=False):
                  v_tz^2 n_z^2 (vertical turbulence CIV_VTZ, in-plane
                  VTURB)
       kep        min(noshear, Sobolev from a thin Keplerian disk's shear
-                 alone, V_K = sqrt(G M / R)): Horne & Marsh (1986)
+                 alone, V_K = sqrt(G M / R)): Horne & Marsh (1986);
+                 not in CIV_VARIANTS
+      kep0       the same with b thermal only (v_turb = 0): the strongest
+                 shear effect (a V-shaped valley at 60 deg); shape only,
+                 Cloudy's total C IV is still its 10 km/s one
     Saved to <out>/civ_emission.npz, plotted from it (plotonly: replot
     only) to plots/civ_emission.png, rows LOSG_INCL, one colour scale."""
     plt = plot_style()

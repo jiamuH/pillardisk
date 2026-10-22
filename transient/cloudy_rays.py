@@ -49,6 +49,8 @@ Steps (all with --out DIR):
   civspec  the observed C IV line profiles of the same (civ_profiles.png)
   linespec the same for --line (mg2, hb, he2: escape from each line's own
            emitting layer; <line>_profiles.png)
+  trainset the emulator's multi-height training set: decks and Cloudy for
+           each TRAIN_HEIGHTS_LD lamp height in --out/h<height> (niced)
   fine     an interpolated fine ray set in --out from the run --src (all
            256 sim phi columns, no Cloudy; load_rays follows it to --src)
   lines    C IV, He II, Mg II, H beta in the fiducial model (Keplerian
@@ -2783,13 +2785,92 @@ def velocity_maps(out, iphs, labels):
           f"|n_r| {q(np.abs(vf['nr']))}")
 
 
+def write_adaptive(out, hlamp, nrays, nphi):
+    """adaptive_decks for a lamp at hlamp [light days] into <out>/rays,
+    their geometry into <out>/rays_meta.npz"""
+    rdir = os.path.join(out, 'rays')
+    os.makedirs(rdir, exist_ok=True)
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    h = hlamp / CONFIG['R0_LD']
+    decks = adaptive_decks(sim, phys, h, nrays, nphi)
+    for d in decks:
+        with open(os.path.join(rdir, d[0] + '.in'), 'w') as fh:
+            fh.write(d[-1])
+    cols = list(zip(*[d[:-1] for d in decks]))
+    np.savez(os.path.join(out, 'rays_meta.npz'), name=cols[0],
+             iph=cols[1], ia=cols[2], alpha=cols[3], d_in=cols[4],
+             domega=cols[5], phi_lo=cols[6], phi_hi=cols[7], hlamp_r0=h)
+    print(f"wrote {len(decks)} adaptive decks to {rdir}: lamp at z = "
+          f"{h:.3f} r0 ({hlamp:g} ld), {len(set(cols[1]))} phi "
+          f"columns; total dOmega {sum(cols[5]) / (4 * np.pi):.3f} x 4 pi")
+
+
+def run_rays(out, ncpu, every=1, only=0):
+    """Cloudy on every deck in <out>/rays not yet finished, ncpu at a time;
+    coarse to fine in phi: all rays at every 16th phi column first, then
+    every 8th, 4th, ... so that stopping at any point leaves an evenly
+    sampled disk (every: only every N-th phi column; only: the first N)"""
+    rdir = os.path.join(out, 'rays')
+    names = sorted(os.path.basename(p)[:-3]
+                   for p in glob.glob(os.path.join(rdir, 'ray_*.in')))
+
+    def level(n):
+        iph = int(n[5:8])
+        return next(k for k, m in enumerate((16, 8, 4, 2, 1))
+                    if iph % m == 0)
+    names.sort(key=lambda n: (level(n), n))
+    if every > 1:
+        names = [n for n in names if int(n[5:8]) % every == 0]
+    if only:
+        names = names[:only]
+    print(f"running {len(names)} rays on {ncpu} cores with {EXE}",
+          flush=True)
+    t0, done = time.time(), 0
+    with Pool(ncpu) as pool:
+        for name, dt, st in pool.imap_unordered(
+                run_one, [(rdir, n) for n in names]):
+            done += 1
+            # small sets (tests): every ray; large: every 50th
+            if st != 'skip' and (done % 50 == 0 or st != 'ok'
+                                 or len(names) <= 100
+                                 or done == len(names)):
+                el = time.time() - t0
+                print(f"  {done}/{len(names)} {name} {st} {dt:.0f} s; "
+                      f"elapsed {el / 60:.1f} min, eta "
+                      f"{el / done * (len(names) - done) / 60:.0f} min",
+                      flush=True)
+
+
+TRAIN_HEIGHTS_LD = (0.0, 0.2, 1.0)   # emulator training lamp heights [ld]
+TRAIN_NRAYS, TRAIN_NPHI = 300, 16   # per height (0.5 ld: the full run)
+
+
+def train_set(out, ncpu):
+    """The multi-height emulator training set: for each lamp height in
+    TRAIN_HEIGHTS_LD, TRAIN_NRAYS adaptive rays in TRAIN_NPHI phi columns
+    (current VTURB, ITERATE) in <out>/h<height>, decks written once, then
+    Cloudy on all of them (niced: a long multi-core run), unfinished rays
+    only, so a stopped run resumes."""
+    os.nice(19)
+    dirs = []
+    for hl in TRAIN_HEIGHTS_LD:
+        d = os.path.join(out, f'h{hl:.1f}')
+        if not os.path.exists(os.path.join(d, 'rays_meta.npz')):
+            write_adaptive(d, hl, TRAIN_NRAYS, TRAIN_NPHI)
+        dirs.append(d)
+    for d in dirs:
+        print(f"== {d}", flush=True)
+        run_rays(d, ncpu)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
                                      'losgrad', 'civtau', 'civmap',
                                      'civspec', 'linespec', 'lines',
-                                     'sigmaphi', 'fine',
+                                     'sigmaphi', 'fine', 'trainset',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -2845,22 +2926,7 @@ def main():
               f"{CONFIG['NMID_CM3']:.3g} cm^-3")
 
     if a.step == 'write' and a.adaptive:
-        sim = load_sim(DUMP)
-        phys = to_physical(sim, CONFIG)
-        h = a.hlamp / CONFIG['R0_LD']
-        decks = adaptive_decks(sim, phys, h, a.nrays, a.nphi)
-        for d in decks:
-            with open(os.path.join(rdir, d[0] + '.in'), 'w') as fh:
-                fh.write(d[-1])
-        cols = list(zip(*[d[:-1] for d in decks]))
-        np.savez(os.path.join(a.out, 'rays_meta.npz'), name=cols[0],
-                 iph=cols[1], ia=cols[2], alpha=cols[3], d_in=cols[4],
-                 domega=cols[5], phi_lo=cols[6], phi_hi=cols[7],
-                 hlamp_r0=h)
-        print(f"wrote {len(decks)} adaptive decks to {rdir}: lamp at z = "
-              f"{h:.3f} r0 ({a.hlamp:g} ld), {len(set(cols[1]))} phi "
-              f"columns; total dOmega {sum(cols[5]) / (4 * np.pi):.3f} "
-              f"x 4 pi")
+        write_adaptive(a.out, a.hlamp, a.nrays, a.nphi)
 
     elif a.step == 'write' and a.hlamp > 0:
         sim = load_sim(DUMP)
@@ -2891,37 +2957,7 @@ def main():
               f"upper hemisphere; Q_ION = {Q_ION:.3g}/s)")
 
     elif a.step == 'run':
-        names = sorted(os.path.basename(p)[:-3]
-                       for p in glob.glob(os.path.join(rdir, 'ray_*.in')))
-
-        # coarse to fine in phi: all rays at every 16th phi column first,
-        # then every 8th, 4th, ... so that stopping at any point leaves an
-        # evenly sampled disk (a full map and spectrum at coarser phi)
-        def level(n):
-            iph = int(n[5:8])
-            return next(k for k, m in enumerate((16, 8, 4, 2, 1))
-                        if iph % m == 0)
-        names.sort(key=lambda n: (level(n), n))
-        if a.every > 1:              # only every N-th phi column
-            names = [n for n in names if int(n[5:8]) % a.every == 0]
-        if a.only:
-            names = names[:a.only]
-        print(f"running {len(names)} rays on {a.ncpu} cores with {EXE}",
-              flush=True)
-        t0, done = time.time(), 0
-        with Pool(a.ncpu) as pool:
-            for name, dt, st in pool.imap_unordered(
-                    run_one, [(rdir, n) for n in names]):
-                done += 1
-                # small sets (tests): every ray; large: every 50th
-                if st != 'skip' and (done % 50 == 0 or st != 'ok'
-                                     or len(names) <= 100
-                                     or done == len(names)):
-                    el = time.time() - t0
-                    print(f"  {done}/{len(names)} {name} {st} {dt:.0f} s; "
-                          f"elapsed {el / 60:.1f} min, eta "
-                          f"{el / done * (len(names) - done) / 60:.0f} min",
-                          flush=True)
+        run_rays(a.out, a.ncpu, a.every, a.only)
 
     elif a.step == 'spectrum':
         spectrum_plots(a.out, a.dph)
@@ -2952,6 +2988,9 @@ def main():
 
     elif a.step == 'fine':
         fine_rays(a.src, a.out)
+
+    elif a.step == 'trainset':
+        train_set(a.out, a.ncpu)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

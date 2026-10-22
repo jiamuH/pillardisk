@@ -38,6 +38,8 @@ Steps (all with --out DIR):
            finished rays (plots/faceon_lines.png)
   losgrad  face-on maps of |dv_los/dl| (sim velocity, observer at
            LOSG_INCL) at each ray's C IV layer (plots/losgrad_civ.png)
+  civtau   C IV 1548 line-of-sight optical depth from each ray's C IV
+           layer at LOSG_INCL, static vs Sobolev (plots/civ_tau.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -61,6 +63,7 @@ Run:  python3 -m transient.cloudy_rays write --out /data2/jhuang/runs/cloudy_ray
 import argparse
 import glob
 import os
+import re
 import subprocess
 import time
 from multiprocessing import Pool
@@ -68,7 +71,7 @@ from multiprocessing import Pool
 import numpy as np
 
 from transient.sim_spectrum import (load_sim, to_physical, CONFIG, LD_CM,
-                                    C_KMS)
+                                    C_KMS, KB, MH)
 from transient.sim_cloudy_spectrum import Q_ION
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1455,38 +1458,25 @@ def velocity_fields(sim, phys):
 
 
 LOSG_INCL = (0.0, 45.0)     # observer inclinations [deg] (azimuth 0)
+CIV_F, CIV_LAM = 0.190, 1548.19e-8   # C IV 1548: oscillator strength, [cm]
+PIE2_MC = 0.02654           # pi e^2 / (m_e c) [cm^2 s^-1]
+OCC_STEP = 0.005            # [r0] step of the occultation march
 
 
-def losgrad_map(out):
-    """Face-on maps of dv_los/dl = n.e.n (e the sim strain rate, n the
-    observer direction, LOSG_INCL at azimuth 0, i.e. o = (sin i, 0, cos
-    i)) at each finished ray's C IV layer: the point weighted by its
-    C IV 1548+1551 emissivity x s^2 (as faceon_map). Signed (< 0:
-    converging along the line of sight), on a symmetric-log scale; in a
-    column it is linear in R between its rays' points, over the column's
-    phi wedge. [km/s per 0.01 r0, as velocity_fields]"""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import SymLogNorm
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
-    from scipy.interpolate import RegularGridInterpolator
-    from transient.sim_spectrum import vlos_cube
-    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
-                         'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
-    plt.rcParams['text.latex.preamble'] = \
-        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+def civ_layers(out, sim):
+    """The C IV layer of every finished ray (arrays):
+      iph, R, z [r0]  the point weighted by C IV 1548+1551 emissivity x s^2
+                      (as faceon_map)
+      nl [cm^-3]      n(C3+) there, Te [K] there
+      Nabove [cm^-2]  C3+ column along the ray from its entry to there
+      thick [cm]      the ray's path where the C3+ fraction exceeds 0.5
+      elev [rad]      the ray's elevation (< 0: descending)
+    C/H from the first ray's .out."""
     rdir = os.path.join(out, 'rays')
-    sim = load_sim(DUMP)
-    phys = to_physical(sim, CONFIG)
     r0 = CONFIG['R0_LD'] * LD_CM
-    rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
-    nph, nr = len(ph), len(sim['r'])
     geo, _, h = ray_geometry(out, sim)
-    wedges = phi_wedges(out)
-    # the C IV layer of every finished ray: (iph, R, z) [r0]
-    pts = []
+    keys = ('iph', 'R', 'z', 'nl', 'Te', 'Nabove', 'thick', 'elev')
+    rec, ach = [], None
     for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out'))):
         name = os.path.basename(o)[:-4]
         if not finished(rdir, name, lenient=True):
@@ -1494,40 +1484,106 @@ def losgrad_map(out):
         e = np.loadtxt(o[:-4] + '.ems')
         if e.ndim < 2 or len(e) < 2:
             continue
+        if ach is None:
+            m = re.search(r'C :\s*(-?[\d.]+)', open(o, errors='ignore').read())
+            ach = 10 ** float(m.group(1))
         s0, sa, ca, _ = geo(name)
         ss = s0 + e[:, 0]
         w = e[:, 3:5].sum(axis=1) * ss ** 2 * np.gradient(e[:, 0])
         if not w.sum() > 0:
             continue
-        sc = np.sum(w * ss) / w.sum() / r0
-        pts.append((int(name[5:8]), sc * sa, h + sc * ca))
-    pts = np.array(pts)
-    iph, R, z = pts[:, 0].astype(int), pts[:, 1], pts[:, 2]
-    rq, tq, pq = np.hypot(R, z), np.arctan2(R, z), ph[iph]
-    q = np.column_stack([pq, np.clip(tq, sim['th'][0], sim['th'][-1]),
-                         np.clip(rq, sim['r'][0], sim['r'][-1])])
+        dc = np.sum(w * e[:, 0]) / w.sum()
+        with open(o[:-4] + '.ovr') as fh:
+            hdr = fh.readline().lstrip('#').rstrip('\n').split('\t')
+        ov = np.genfromtxt(o[:-4] + '.ovr', skip_header=1,
+                           invalid_raise=False)
+        d = ov[:, 0]
+        nl = ov[:, hdr.index('C4')] * ov[:, hdr.index('hden')] * ach
+        dd = np.gradient(d)
+        Ncum = np.cumsum(nl * dd)
+        sc = (s0 + dc) / r0
+        rec.append((int(name[5:8]), sc * sa, h + sc * ca,
+                    np.interp(dc, d, nl),
+                    np.interp(dc, d, ov[:, hdr.index('Te')]),
+                    np.interp(dc, d, Ncum),
+                    np.sum(dd[ov[:, hdr.index('C4')] > 0.5]),
+                    np.arctan2(ca, sa)))
+    a = np.array(rec)
+    L = {k: a[:, i] for i, k in enumerate(keys)}
+    L['iph'] = L['iph'].astype(int)
+    print(f"C IV layers of {len(a)} rays (C/H = {ach:.3g})")
+    return L
+
+
+def los_gradient(sim, phys, L, inc):
+    """dv_los/dl = n.e.n (e the sim strain rate, n toward an observer at
+    inclination inc, azimuth 0: o = (sin i, 0, cos i)) at the points of
+    civ_layers [km/s per 0.01 r0]"""
+    from scipy.interpolate import RegularGridInterpolator
+    from transient.sim_spectrum import vlos_cube
+    ph = sim['ph']
+    R, z = L['R'], L['z']
+    q = np.column_stack([ph[L['iph']],
+                         np.clip(np.arctan2(R, z), sim['th'][0],
+                                 sim['th'][-1]),
+                         np.clip(np.hypot(R, z), sim['r'][0],
+                                 sim['r'][-1])])
     php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
     err, ett, epp, ert, erp, etp = strain_rate(sim, phys)
+    _, (no_r, no_t, no_p) = vlos_cube(sim, inc, 0.0)
+    g = (err * no_r ** 2 + ett * no_t ** 2 + epp * no_p ** 2
+         + 2 * (ert * no_r * no_t + erp * no_r * no_p
+                + etp * no_t * no_p)) * 0.01
+    gp = np.concatenate([g[-1:], g, g[:1]], axis=0)
+    return RegularGridInterpolator((php, sim['th'], sim['r']), gp)(q)
+
+
+def column_map(sim, wedges, iph, R, val):
+    """(nph, nr) face-on map of per-ray values: linear in R between a
+    column's rays, over the column's phi wedge; nan elsewhere"""
+    nph = len(sim['ph'])
+    M = np.full((nph, len(sim['r'])), np.nan)
+    for j in np.unique(iph):
+        k = np.nonzero(iph == j)[0]
+        k = k[np.argsort(R[k])]
+        row = np.interp(sim['r'], R[k], val[k], left=np.nan, right=np.nan)
+        if wedges is not None:
+            pin = cell_overlap(sim['phf'], *wedges[j]) > 0
+        else:
+            pin = np.arange(nph) == j
+        M[pin] = row
+    return M
+
+
+def plot_style():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 18})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    return plt
+
+
+def losgrad_map(out):
+    """Face-on maps of dv_los/dl (los_gradient, LOSG_INCL) at each
+    finished ray's C IV layer. Signed (< 0: converging along the line of
+    sight), on a symmetric-log scale; column_map fills the disk.
+    [km/s per 0.01 r0, as velocity_fields]"""
+    plt = plot_style()
+    from matplotlib.colors import SymLogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    rf, phf = sim['rf'], sim['phf']
+    wedges = phi_wedges(out)
+    L = civ_layers(out, sim)
     maps = []
     for inc in LOSG_INCL:
-        _, (no_r, no_t, no_p) = vlos_cube(sim, inc, 0.0)
-        g = (err * no_r ** 2 + ett * no_t ** 2 + epp * no_p ** 2
-             + 2 * (ert * no_r * no_t + erp * no_r * no_p
-                    + etp * no_t * no_p)) * 0.01
-        gp = np.concatenate([g[-1:], g, g[:1]], axis=0)
-        val = RegularGridInterpolator((php, sim['th'], sim['r']), gp)(q)
-        M = np.full((nph, nr), np.nan)
-        for j in np.unique(iph):
-            k = np.nonzero(iph == j)[0]
-            k = k[np.argsort(R[k])]
-            row = np.interp(sim['r'], R[k], val[k], left=np.nan,
-                            right=np.nan)
-            if wedges is not None:
-                pin = cell_overlap(phf, *wedges[j]) > 0
-            else:
-                pin = np.arange(nph) == j
-            M[pin] = row
-        maps.append(M)
+        val = los_gradient(sim, phys, L, inc)
+        maps.append(column_map(sim, wedges, L['iph'], L['R'], val))
         av = np.abs(val)
         print(f"i = {inc:.0f} deg: dv_los/dl at the C IV layer: |.| median "
               f"{np.median(av):.3g}, 5-95% {np.percentile(av, 5):.3g} - "
@@ -1569,6 +1625,142 @@ def losgrad_map(out):
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}: {len(pts)} rays")
+
+
+def occulted(sim, phys, L, inc):
+    """True where the line of sight from a civ_layers point toward the
+    observer (inclination inc, azimuth 0) meets n_H > N_SURF before it
+    leaves the grid (marched in OCC_STEP steps, from 0.01 r0 on)"""
+    itp = density_interp(sim, phys)
+    rf, thf = sim['rf'], sim['thf']
+    ph = sim['ph'][L['iph']]
+    x = np.stack([L['R'] * np.cos(ph), L['R'] * np.sin(ph), L['z']], 1)
+    o = np.array([np.sin(np.radians(inc)), 0.0, np.cos(np.radians(inc))])
+    hid = np.zeros(len(x), bool)
+    live = np.ones(len(x), bool)
+    for s in np.arange(0.01, 2 * rf[-1], OCC_STEP):
+        p = x[live] + s * o
+        r = np.linalg.norm(p, axis=1)
+        t = np.arccos(np.clip(p[:, 2] / r, -1, 1))
+        inside = (r >= rf[0]) & (r <= rf[-1]) & (t >= thf[0]) & \
+            (t <= thf[-1])
+        idx = np.nonzero(live)[0]
+        live[idx[~inside & (r > rf[-1])]] = False      # out of the grid
+        q = np.column_stack([np.arctan2(p[:, 1], p[:, 0]) % (2 * np.pi),
+                             np.clip(t, sim['th'][0], sim['th'][-1]),
+                             np.clip(r, sim['r'][0], sim['r'][-1])])
+        dense = inside & (itp(q) > np.log10(N_SURF))
+        hid[idx[dense]] = True
+        live[idx[dense]] = False
+        if not live.any():
+            break
+    return hid
+
+
+def civ_tau_map(out):
+    """C IV 1548 optical depth from each ray's C IV layer point
+    (civ_layers) toward an observer at LOSG_INCL, face-on maps:
+      static   tau = (pi e^2/m_e c) f lambda N_los / (sqrt(pi) b), N_los =
+               the C3+ column above the point along the line of sight: the
+               ray's column from its entry x sin(psi) (psi the angle
+               between the ray and the column's C IV layer, from the slope
+               of its rays' points) / cos(theta_o) (theta_o between the
+               layer normal and the observer direction); b^2 = 2kT/m_C +
+               VTURB^2
+      Sobolev  tau_S = (pi e^2/m_e c) f lambda n_l / |dv_los/dl| (sim
+               velocity, los_gradient)
+    mapped: tau = min(static, Sobolev), and L_Sob / l_los = (b/|dv/dl|) /
+    (the ray's C3+ path x sin(psi) / cos(theta_o)): > 1 where the sim's
+    velocity gradient does not matter. Grey: no line of sight (normal
+    away from the observer, or n_H > N_SURF in the way: occulted)."""
+    plt = plot_style()
+    from matplotlib.colors import LogNorm, ListedColormap
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from scipy.ndimage import median_filter
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf = sim['rf'], sim['phf']
+    wedges = phi_wedges(out)
+    L = civ_layers(out, sim)
+    iph, R, z = L['iph'], L['R'], L['z']
+    # the C IV layer's slope beta in each column (5-ray running median)
+    beta = np.zeros(len(R))
+    for j in np.unique(iph):
+        k = np.nonzero(iph == j)[0]
+        k = k[np.argsort(R[k])]
+        if len(k) < 3:
+            continue
+        zs = median_filter(z[k], size=5, mode='nearest')
+        beta[k] = np.arctan(np.gradient(zs, R[k]))
+    sinpsi = np.sin(beta - L['elev'])
+    nfloor = int(np.sum(sinpsi < 1e-3))
+    sinpsi = np.maximum(sinpsi, 1e-3)
+    b = np.sqrt(2 * KB * L['Te'] / (12 * MH) + (VTURB * 1e5) ** 2)
+    k0 = PIE2_MC * CIV_F * CIV_LAM
+    ph = sim['ph'][iph]
+    rows = []
+    for inc in LOSG_INCL:
+        si, ci = np.sin(np.radians(inc)), np.cos(np.radians(inc))
+        # layer normal (-sin beta e_R + cos beta e_z), e_R = (cos ph, sin ph)
+        cth = -np.sin(beta) * np.cos(ph) * si + np.cos(beta) * ci
+        hid = (cth <= 0.05) | occulted(sim, phys, L, inc)
+        cth = np.maximum(cth, 0.05)
+        Nlos = L['Nabove'] * sinpsi / cth
+        tst = k0 * Nlos / (np.sqrt(np.pi) * b)
+        dvdl = np.abs(los_gradient(sim, phys, L, inc)) * 1e5 / (0.01 * r0)
+        tso = k0 * L['nl'] / np.maximum(dvdl, 1e-30)
+        tau = np.minimum(tst, tso)
+        ratio = (b / np.maximum(dvdl, 1e-30)) / (L['thick'] * sinpsi / cth)
+        print(f"i = {inc:.0f} deg: tau(C IV 1548) median {np.median(tau):.3g}"
+              f" (5-95% {np.percentile(tau, 5):.3g} - "
+              f"{np.percentile(tau, 95):.3g}); Sobolev-limited "
+              f"{np.mean(tso < tst):.0%}; L_Sob/l_los median "
+              f"{np.median(ratio):.3g}; hidden {np.mean(hid):.0%}")
+        rows.append([column_map(sim, wedges, iph, R, np.log10(v))
+                     for v in (tau, ratio)]
+                    + [column_map(sim, wedges, iph, R, hid.astype(float))])
+    print(f"{nfloor} rays with the layer angle floored (sin psi < 1e-3)")
+    R2, P2 = np.meshgrid(rf, phf)
+    X, Y = R2 * np.cos(P2), R2 * np.sin(P2)
+    tv = np.concatenate([r[0][np.isfinite(r[0])] for r in rows])
+    specs = [(r'$\log\,\tau_{\rm los}(\rm C\,IV\,1548)$', 'viridis',
+              np.percentile(tv, 1), np.percentile(tv, 99)),
+             (r'$\log\,L_{\rm Sob}/\ell_{\rm los}$', 'RdBu_r', -2.0, 2.0)]
+    fig, axs = plt.subplots(len(rows), 2, figsize=(15, 6.6 * len(rows)))
+    axs = np.atleast_2d(axs)
+    grey = ListedColormap(['0.6'])
+    for i, (inc, row) in enumerate(zip(LOSG_INCL, rows)):
+        for j, (lab, cm, lo, hi) in enumerate(specs):
+            ax = axs[i, j]
+            cmap = plt.get_cmap(cm).copy()
+            cmap.set_bad('white')
+            M = np.where(row[2] > 0.5, np.nan, row[j])
+            pc = ax.pcolormesh(X, Y, np.clip(M, lo, hi), cmap=cmap,
+                               vmin=lo, vmax=hi, shading='flat',
+                               rasterized=True)
+            ax.pcolormesh(X, Y, np.ma.masked_where(~(row[2] > 0.5), row[2]),
+                          cmap=grey, shading='flat', rasterized=True)
+            ax.set_aspect('equal')
+            ax.set_xlim(-rf[-1], rf[-1])
+            ax.set_ylim(-rf[-1], rf[-1])
+            ax.tick_params(which='both', direction='in', labelsize=13)
+            if i == len(rows) - 1:
+                ax.set_xlabel(r'$x\,[r_0]$')
+            if j == 0:
+                ax.set_ylabel(r'$y\,[r_0]$')
+            ax.set_title(r'$\bm{i = %d^\circ}$\textbf{: }' % inc + lab,
+                         fontsize=17)
+            cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
+                                                      pad=0.1)
+            fig.colorbar(pc, cax=cax)
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'civ_tau.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}: {len(R)} rays; observer toward +x at i > 0")
 
 
 def velocity_maps(out, iphs, labels):
@@ -1672,7 +1864,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
-                                     'losgrad',
+                                     'losgrad', 'civtau',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -1808,6 +2000,9 @@ def main():
 
     elif a.step == 'losgrad':
         losgrad_map(a.out)
+
+    elif a.step == 'civtau':
+        civ_tau_map(a.out)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

@@ -1459,7 +1459,7 @@ def velocity_fields(sim, phys):
                 normal=enn * 0.01, nr=nr)
 
 
-LOSG_INCL = (0.0, 45.0)     # observer inclinations [deg] (azimuth 0)
+LOSG_INCL = (0.0, 45.0, 60.0)   # observer inclinations [deg] (azimuth 0)
 CIV_F, CIV_LAM = 0.190, 1548.19e-8   # C IV 1548: oscillator strength, [cm]
 PIE2_MC = 0.02654           # pi e^2 / (m_e c) [cm^2 s^-1]
 OCC_STEP = 0.005            # [r0] step of the occultation march

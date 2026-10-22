@@ -47,6 +47,8 @@ Steps (all with --out DIR):
            times its escape toward the observer relative to the mean
            (static, sim velocity, vertical turbulence; civ_emission.png)
   civspec  the observed C IV line profiles of the same (civ_profiles.png)
+  linespec the same for --line (mg2, hb, he2: escape from each line's own
+           emitting layer; <line>_profiles.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -2033,21 +2035,26 @@ CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
 # vtz300 dropped then)
 
 
-def civ_escape(out, sim, phys):
+def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None):
     """Escape weights of each ray's C IV toward an observer at LOSG_INCL,
     f = beta(tau_obs) / <beta> (see civ_emission_map) for CIV_VARIANTS:
     (names, L, {(inc, variant): f}), f aligned with names and civ_layers
-    L. 4 pi dL/dOmega = f x the ray's (all-direction) C IV."""
+    L. 4 pi dL/dOmega = f x the ray's (all-direction) C IV. Another line:
+    its layers L (line_layers, with names), its ion mass [amu] and k0 (the
+    line-centre opacity per unit column / sqrt(pi); 1/sqrt(pi) with
+    line_layers' unit density)."""
     r0 = CONFIG['R0_LD'] * LD_CM
-    L = civ_layers(out, sim)
-    names = sorted(n for n, r in load_rays(out).items() if r['finl'] and
-                   len(r['ems']) > 1 and r['ems'][:, 3:5].sum() > 0)
-    assert len(names) == len(L['R'])          # civ_layers' order
+    if L is None:
+        L = civ_layers(out, sim)
+        names = sorted(n for n, r in load_rays(out).items() if r['finl']
+                       and len(r['ems']) > 1 and r['ems'][:, 3:5].sum() > 0)
+        assert len(names) == len(L['R'])      # civ_layers' order
     beta, sinpsi, _ = layer_geometry(L)
     nrm = layer_normals(sim, L, beta)
     e, basis = strain_at(sim, phys, L)
-    bth2 = 2 * KB * L['Te'] / (12 * MH)
-    k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
+    bth2 = 2 * KB * L['Te'] / (mass * MH)
+    if k0 is None:
+        k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
     v2cm = 1e5 / (r0)                 # km/s per r0 -> s^-1
     # directions: Fibonacci sphere
     k = np.arange(N_DIRS) + 0.5
@@ -2108,6 +2115,72 @@ def civ_escape(out, sim, phys):
             f = np.where(blocked, 0.0, esc(tob) / np.maximum(mean, 1e-300))
             ftab[(inc, var)] = f
     return names, L, ftab
+
+
+# lines for the escape-weighted profiles: .ems columns, rest (vacuum)
+# wavelengths [A], ion mass [amu]; lam_c the velocity zero (f-weighted)
+LINE_SPECS = dict(
+    c4=dict(cols=(3, 4), lam=(1548.19, 1550.77), lam_c=1549.06, mass=12.011,
+            name=r'C\,IV'),
+    mg2=dict(cols=(5, 6), lam=(2796.35, 2803.53), lam_c=2798.74,
+             mass=24.305, name=r'Mg\,II'),
+    hb=dict(cols=(2,), lam=(4862.68,), lam_c=4862.68, mass=1.008,
+            name=r'H\beta'),
+    he2=dict(cols=(7,), lam=(1640.42,), lam_c=1640.42, mass=4.003,
+             name=r'He\,II\,1640'))
+LAYER_Q = 0.05              # a line's layer: its emission's LAYER_Q to
+                            # 1 - LAYER_Q quantiles in depth along the ray
+
+
+def line_layers(out, sim, key):
+    """The emitting layer of line key (LINE_SPECS) on every finished ray,
+    from its emissivity alone (no level populations): as civ_layers, with
+    the emission point at the emissivity x s^2 weighted mean depth, the
+    path above it from the LAYER_Q quantile (Nabove) and the layer from
+    the LAYER_Q to 1 - LAYER_Q quantiles (Ntot, thick), at unit absorber
+    density (nl = 1). For tau >> 1 every line here has (Cloudy:
+    1e4 - 1e7) beta ~ 1/tau, so the escape weights need only these paths:
+    the absorber density cancels. Returns (names, L)."""
+    spec = LINE_SPECS[key]
+    r0 = CONFIG['R0_LD'] * LD_CM
+    geo, _, h = ray_geometry(out, sim)
+    cols = list(spec['cols'])
+    rec, names = [], []
+    for name, ray in sorted(load_rays(out).items()):
+        e = ray['ems']
+        if not ray['finl'] or len(e) < 2 or not e[:, cols].sum() > 0:
+            continue
+        s0, sa, ca, _ = geo(name)
+        d = e[:, 0]
+        w = e[:, cols].sum(axis=1) * (s0 + d) ** 2 * np.gradient(d)
+        if not w.sum() > 0:
+            continue
+        cw = np.cumsum(w) / w.sum()
+        dlo, dhi = np.interp([LAYER_Q, 1 - LAYER_Q], cw, d)
+        dc = np.sum(w * d) / w.sum()
+        ov = ray['ovr']
+        sc = (s0 + dc) / r0
+        rec.append((int(name[5:8]), sc * sa, h + sc * ca, 1.0,
+                    np.interp(dc, ov[:, 0], ov[:, 1 + CACHE_OVR.index('Te')]),
+                    max(dc - dlo, 1e-3 * (dhi - dlo)), dhi - dlo,
+                    np.arctan2(ca, sa), dhi - dlo))
+        names.append(name)
+    a = np.array(rec)
+    keys = ('iph', 'R', 'z', 'nl', 'Te', 'Nabove', 'thick', 'elev', 'Ntot')
+    L = {k: a[:, i] for i, k in enumerate(keys)}
+    L['iph'] = L['iph'].astype(int)
+    print(f"{key} layers of {len(names)} rays (from the emissivity)")
+    return names, L
+
+
+def line_escape(out, sim, phys, key):
+    """civ_escape for line key: C IV from its C3+ column, the others
+    from line_layers"""
+    if key == 'c4':
+        return civ_escape(out, sim, phys)
+    names, L = line_layers(out, sim, key)
+    return civ_escape(out, sim, phys, L=L, names=names,
+                      mass=LINE_SPECS[key]['mass'], k0=1 / np.sqrt(np.pi))
 
 
 def civ_emission_map(out, dph, plotonly=False):
@@ -2216,7 +2289,6 @@ def civ_emission_map(out, dph, plotonly=False):
           f"i > 0")
 
 
-CIV_DOUBLET = ((3, 1548.19), (4, 1550.77))   # (.ems column, rest [A])
 PROF_DL = 0.25              # [A] profile bin (~50 km/s)
 CIV_LAM_C = 1549.06         # [A] doublet centre (f-weighted): the velocity
                             # zero of the profiles' top axis
@@ -2224,21 +2296,25 @@ PROF_NSUB = 8               # sub-samples per phi cell: one cell spans
                             # ~90 km/s of projected rotation at i = 45 deg
 
 
-def civ_profiles(out, dph, plotonly=False):
-    """Observed C IV 1548+1551 profiles at LOSG_INCL (observer toward +x)
+def line_profiles(out, dph, key='c4', plotonly=False):
+    """Observed profiles of line key (LINE_SPECS; C IV 1548+1551 by
+    default) at LOSG_INCL (observer toward +x)
     for CIV_VARIANTS: each ray's emission, binned into the sim's r cells
     (luminosity-weighted R, z per cell) and spread over its column's phi
     wedge (cell overlap, as faceon_surface; PROF_NSUB points across each
     cell, so the rotation shift varies within it), times its escape weight f
-    (civ_escape), Doppler-shifted by the sim velocity along the line of
+    (line_escape), Doppler-shifted by the sim velocity along the line of
     sight at that (phi cell, R, z): lambda = lambda0 (1 - v_los/c), v_los
     > 0 approaching. No local broadening (thermal + turbulent << the
     PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A] (the
     isotropic-equivalent L_lambda = 4 pi D^2 F_lambda; plotted as lambda
-    L_lambda), saved to <out>/civ_profiles.npz and plotted from it (plotonly: replot
-    only) to plots/civ_profiles.png."""
+    L_lambda), saved to <out>/<key>_profiles.npz and plotted from it (plotonly:
+    replot only) to plots/<key>_profiles.png (C IV: civ_profiles)."""
     plt = plot_style()
-    npz = os.path.join(out, 'civ_profiles.npz')
+    spec = LINE_SPECS[key]
+    lam0, lc = list(spec['lam']), spec['lam_c']
+    tag = 'civ' if key == 'c4' else key       # civ_*: the C IV files
+    npz = os.path.join(out, f'{tag}_profiles.npz')
     if not plotonly:
         from scipy.interpolate import RegularGridInterpolator
         from transient.sim_spectrum import vlos_cube
@@ -2247,11 +2323,12 @@ def civ_profiles(out, dph, plotonly=False):
         r0 = CONFIG['R0_LD'] * LD_CM
         rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
         nph, nr = len(ph), len(sim['r'])
-        names, L, ftab = civ_escape(out, sim, phys)
+        names, L, ftab = line_escape(out, sim, phys, key)
         rays = load_rays(out)
         geo, _, h = ray_geometry(out, sim, dph)
         wedges = phi_wedges(out)
-        cols = {'ray': [], 'c': [], 'R': [], 'z': [], 'L0': [], 'L1': []}
+        cols = {'ray': [], 'c': [], 'R': [], 'z': []}
+        cols.update({f'L{m}': [] for m in range(len(lam0))})
         for i, n in enumerate(names):
             e = rays[n]['ems']
             s0, sa, ca, dom = geo(n)
@@ -2260,10 +2337,10 @@ def civ_profiles(out, dph, plotonly=False):
             Rz, zz = ss * sa / r0, h + ss * ca / r0
             ir = np.clip(np.searchsorted(rf, Rz) - 1, 0, nr - 1)
             lr = [np.bincount(ir, e[:, k] * ss ** 2 * dom * dd, nr)
-                  for k, _ in CIV_DOUBLET]
-            W = lr[0] + lr[1]
+                  for k in spec['cols']]
+            W = sum(lr)
             cel = np.nonzero(W > 0)[0]
-            w = (e[:, 3] + e[:, 4]) * ss ** 2 * dom * dd
+            w = e[:, list(spec['cols'])].sum(axis=1) * ss ** 2 * dom * dd
             Rm = np.bincount(ir, w * Rz, nr)[cel] / W[cel]
             zm = np.bincount(ir, w * zz, nr)[cel] / W[cel]
             iph = int(n[5:8])
@@ -2277,8 +2354,8 @@ def civ_profiles(out, dph, plotonly=False):
                 cols['c'].append(np.full(len(cel), c, float))
                 cols['R'].append(Rm)
                 cols['z'].append(zm)
-                cols['L0'].append(lr[0][cel] * a)
-                cols['L1'].append(lr[1][cel] * a)
+                for m in range(len(lam0)):
+                    cols[f'L{m}'].append(lr[m][cel] * a)
         P = {k: np.concatenate(v) for k, v in cols.items()}
         # PROF_NSUB phi points across each cell, each with 1/PROF_NSUB of it
         c = P['c'].astype(int)
@@ -2286,8 +2363,8 @@ def civ_profiles(out, dph, plotonly=False):
         P = {k: np.repeat(v, PROF_NSUB) for k, v in P.items()}
         P['phi'] = (phf[c][:, None] + np.diff(phf)[c][:, None] * sub[None]
                     ).ravel() % (2 * np.pi)
-        P['L0'] = P['L0'] / PROF_NSUB
-        P['L1'] = P['L1'] / PROF_NSUB
+        for m in range(len(lam0)):
+            P[f'L{m}'] = P[f'L{m}'] / PROF_NSUB
         P['ray'] = P['ray'].astype(int)
         q = np.column_stack([P['phi'],
                              np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
@@ -2295,8 +2372,8 @@ def civ_profiles(out, dph, plotonly=False):
                              np.clip(np.hypot(P['R'], P['z']), sim['r'][0],
                                      sim['r'][-1])])
         php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
-        lam0 = [l0 for _, l0 in CIV_DOUBLET]
-        edges = np.arange(1500.0, 1600.0 + PROF_DL, PROF_DL)
+        dl = PROF_DL * lc / CIV_LAM_C        # the same ~48 km/s bins
+        edges = np.arange(lc * (1 - 0.035), lc * (1 + 0.035) + dl, dl)
         wave = 0.5 * (edges[1:] + edges[:-1])
         prof = {}
         for inc in LOSG_INCL:
@@ -2310,9 +2387,10 @@ def civ_profiles(out, dph, plotonly=False):
                 prof[(inc, var)] = sum(
                     np.histogram(l0 * (1 - v / C_KMS), edges,
                                  weights=P[k] * f)[0]
-                    for k, l0 in zip(('L0', 'L1'), lam0)) / PROF_DL
-            print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) " + ', '.join(
-                f"{var} {prof[(inc, var)].sum() * PROF_DL:.3g}"
+                    for k, l0 in zip([f'L{m}' for m in range(len(lam0))],
+                                     lam0)) / dl
+            print(f"i = {inc:.0f} deg: 4 pi dL/dOmega({key}) " + ', '.join(
+                f"{var} {prof[(inc, var)].sum() * dl:.3g}"
                 for var, _ in CIV_VARIANTS) + " erg/s; v_los 5-95% "
                 f"{np.percentile(v, 5):.0f} - {np.percentile(v, 95):.0f} km/s")
         np.savez(npz, wave=wave,
@@ -2322,7 +2400,6 @@ def civ_profiles(out, dph, plotonly=False):
                                 for i in LOSG_INCL]), nrays=len(names))
     d = np.load(npz)
     wave, variants = d['wave'], [str(v) for v in d['variants']]
-    lam0 = [l0 for _, l0 in CIV_DOUBLET]
     n = len(d['incl'])
     fig, axs = plt.subplots(n, 1, sharex=True, figsize=(12, 6.0 * n))
     axs = np.atleast_1d(axs)
@@ -2333,7 +2410,7 @@ def civ_profiles(out, dph, plotonly=False):
                     label=CIV_LABELS.get(var, var), drawstyle='steps-mid')
         for l0 in lam0:
             ax.axvline(l0, color='0.6', lw=1, ls=':')
-        ax.set_xlim(1515, 1585)
+        ax.set_xlim(lc * (1 - 0.0233), lc * (1 + 0.0233))  # +- 7000 km/s
         # top panel: below its right-hand legend
         ax.text(0.97, 0.92 if j else 0.65, r'$\bm{i = %d^\circ}$' % inc
                 + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
@@ -2346,8 +2423,8 @@ def civ_profiles(out, dph, plotonly=False):
         if j == 0:
             # velocity about the doublet centre [10^3 km/s], top panel only
             top = ax.secondary_xaxis('top', functions=(
-                lambda x: (x / CIV_LAM_C - 1) * C_KMS / 1e3,
-                lambda v: CIV_LAM_C * (1 + v * 1e3 / C_KMS)))
+                lambda x: (x / lc - 1) * C_KMS / 1e3,
+                lambda v: lc * (1 + v * 1e3 / C_KMS)))
             top.set_xlabel(r'$v\ [10^3\,\rm km\,s^{-1}]$')
             top.minorticks_on()
             top.tick_params(which='both', direction='in', labelsize=19)
@@ -2367,7 +2444,7 @@ def civ_profiles(out, dph, plotonly=False):
     fig.tight_layout(h_pad=0.2)
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
-    path = os.path.join(pdir, 'civ_profiles.png')
+    path = os.path.join(pdir, f'{tag}_profiles.png')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}" + (f": {int(d['nrays'])} rays"
@@ -2469,13 +2546,15 @@ def main():
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
                                      'losgrad', 'civtau', 'civmap',
-                                     'civspec',
+                                     'civspec', 'linespec',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
                          '(default: the column\'s brightest H alpha ray)')
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
+    ap.add_argument('--line', default='mg2', choices=list(LINE_SPECS),
+                    help='linespec: the line (c4, mg2, hb, he2)')
     ap.add_argument('--plotonly', action='store_true',
                     help='civmap/civspec: replot from the saved .npz')
     ap.add_argument('--maponly', action='store_true',
@@ -2615,7 +2694,10 @@ def main():
         civ_emission_map(a.out, a.dph, a.plotonly)
 
     elif a.step == 'civspec':
-        civ_profiles(a.out, a.dph, a.plotonly)
+        line_profiles(a.out, a.dph, 'c4', a.plotonly)
+
+    elif a.step == 'linespec':
+        line_profiles(a.out, a.dph, a.line, a.plotonly)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

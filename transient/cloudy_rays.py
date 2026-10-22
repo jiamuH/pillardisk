@@ -24,7 +24,10 @@ Outputs per ray in <out>/rays/<name>.{in,out,conA,ems}; `extract`
 gathers the observer-relevant spectra into <out>/rays.npz: per ray
 refl/out line and continuum nu F_nu [erg/s/cm^2 at the inner face] on a
 common wavelength grid, plus (iph, ith, r_in) - a ray's luminosity per
-sr is F r_in^2.
+sr is F r_in^2. The map steps (faceon, losgrad, civtau) read the rays
+through <out>/rays_cache.npz (load_rays: status, .ems and the overview
+columns they use), built on first use and refreshed for any ray whose
+.out changes.
 
 Steps (all with --out DIR):
   write    decks for the upper-hemisphere rays (every --dph-th phi)
@@ -505,18 +508,19 @@ def vtest_decks(sim, phys, vturbs, rays=VTEST_RAYS, iterate=VTEST_ITER):
     return out
 
 
-def finished(rdir, name, lenient=False):
+def finished(rdir, name, lenient=False, txt=None):
     """True when the ray's Cloudy run completed: 'Cloudy exited OK', or
     'something went wrong' when the ONLY warning is the electron-scattering
     optical depth one (rays crossing ~7e24 cm^-2 of ionized gas before the
     arm reach tau_es ~ 5: Cloudy completes them but flags the regime, as it
     does not redistribute the scattered photons - the spectrum reaching
-    the arm is approximate there)."""
+    the arm is approximate there). txt: the .out text, if already read."""
     o = os.path.join(rdir, name + '.out')
     if not (os.path.exists(o) and
             os.path.exists(os.path.join(rdir, name + '.conA'))):
         return False
-    txt = open(o, errors='ignore').read()
+    if txt is None:
+        txt = open(o, errors='ignore').read()
     if 'Cloudy exited OK' in txt[-3000:]:
         return True
     if 'something went wrong' not in txt[-3000:]:
@@ -527,6 +531,106 @@ def finished(rdir, name, lenient=False):
         ok += ['number of zones', 'Default limit can be']   # but short)
     return bool(warn) and all(any(k in w for k in ok) for w in warn) \
         and 'Cloudy ends:' in txt
+
+
+# ---- per-run cache of what the maps read from the rays' text output ----
+CACHE_OVR = ('Te', 'hden', 'eden', 'HII', 'HeII', 'HeIII', 'C2', 'C3', 'C4')
+NEMS = 9                    # .ems columns: depth + 8 lines (He II added)
+
+
+def _parse_ray(args):
+    """one ray's cache entry: status, C/H, .ems (He II rebuilt for older
+    decks) and the CACHE_OVR columns of .ovr (nan if absent)"""
+    rdir, name = args
+    o = os.path.join(rdir, name + '.out')
+    st = os.stat(o)
+    txt = open(o, errors='ignore').read()
+    m = re.search(r'C :\s*(-?[\d.]+)', txt)
+    r = dict(name=name, mtime=st.st_mtime, size=st.st_size,
+             fin=finished(rdir, name, txt=txt),
+             finl=finished(rdir, name, lenient=True, txt=txt),
+             crash='DISASTER' in txt,
+             cha=10 ** float(m.group(1)) if m else np.nan,
+             ems=np.zeros((0, NEMS)), ovr=np.zeros((0, 1 + len(CACHE_OVR))))
+    if not r['finl']:
+        return r
+    e = np.loadtxt(o[:-4] + '.ems', ndmin=2)
+    if 1 < e.shape[1] < NEMS:                  # older deck: rebuild He II
+        he = heii_profile(rdir, name, e[:, 0])
+        e = np.column_stack([e, he, np.zeros_like(he)])[:, :NEMS]
+    r['ems'] = e
+    with open(o[:-4] + '.ovr') as fh:
+        hdr = fh.readline().lstrip('#').rstrip('\n').split('\t')
+    ov = np.genfromtxt(o[:-4] + '.ovr', skip_header=1, invalid_raise=False)
+    ov = np.atleast_2d(ov)
+    r['ovr'] = np.column_stack(
+        [ov[:, 0]] + [ov[:, hdr.index(k)] if k in hdr
+                      else np.full(len(ov), np.nan) for k in CACHE_OVR])
+    return r
+
+
+def load_rays(out, ncpu=16):
+    """{name: entry} for every ray with a .out (see _parse_ray), from
+    <out>/rays_cache.npz; rays whose .out is new or changed (mtime, size)
+    are re-read from their text output and the cache rewritten. Depths
+    float64, the rest float32."""
+    rdir = os.path.join(out, 'rays')
+    path = os.path.join(out, 'rays_cache.npz')
+    names = sorted(os.path.basename(o)[:-4] for o in
+                   glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out')))
+    rays = {}
+    if os.path.exists(path):
+        with np.load(path) as z:          # each z[k] access re-reads
+            c = {k: z[k] for k in z.files}
+        ke, ko = np.cumsum(c['n_ems']), np.cumsum(c['n_ovr'])
+        for i, n in enumerate(c['name']):
+            n = str(n)
+            se = slice(ke[i] - c['n_ems'][i], ke[i])
+            so = slice(ko[i] - c['n_ovr'][i], ko[i])
+            rays[n] = dict(
+                name=n, mtime=c['mtime'][i], size=c['size'][i],
+                fin=c['fin'][i], finl=c['finl'][i], crash=c['crash'][i],
+                cha=c['cha'][i],
+                ems=np.column_stack([c['ems_d'][se],
+                                     c['ems_v'][se].astype(float)]),
+                ovr=np.column_stack([c['ovr_d'][so],
+                                     c['ovr_v'][so].astype(float)]))
+    todo = []
+    for n in names:
+        st = os.stat(os.path.join(rdir, n + '.out'))
+        r = rays.get(n)
+        if r is None or r['mtime'] != st.st_mtime or r['size'] != st.st_size:
+            todo.append(n)
+    stale = set(rays) - set(names)
+    for n in stale:
+        del rays[n]
+    if not todo and not stale:
+        return rays
+    print(f"ray cache: reading {len(todo)} rays' text output "
+          f"({len(rays) - len(set(todo) & set(rays))} cached)", flush=True)
+    with Pool(min(ncpu, max(len(todo), 1))) as pool:
+        for r in pool.imap_unordered(_parse_ray, [(rdir, n) for n in todo],
+                                     chunksize=8):
+            rays[r['name']] = r
+    rs = [rays[n] for n in sorted(rays)]
+    np.savez(path, name=np.array([r['name'] for r in rs]),
+             mtime=np.array([r['mtime'] for r in rs]),
+             size=np.array([r['size'] for r in rs]),
+             fin=np.array([r['fin'] for r in rs]),
+             finl=np.array([r['finl'] for r in rs]),
+             crash=np.array([r['crash'] for r in rs]),
+             cha=np.array([r['cha'] for r in rs]),
+             n_ems=np.array([len(r['ems']) for r in rs]),
+             n_ovr=np.array([len(r['ovr']) for r in rs]),
+             ems_d=np.concatenate([r['ems'][:, 0] for r in rs]),
+             ems_v=np.concatenate([r['ems'][:, 1:] for r in rs]
+                                  ).astype(np.float32),
+             ovr_d=np.concatenate([r['ovr'][:, 0] for r in rs]),
+             ovr_v=np.concatenate([r['ovr'][:, 1:] for r in rs]
+                                  ).astype(np.float32))
+    print(f"ray cache: wrote {path} ({os.path.getsize(path) / 1e6:.0f} MB, "
+          f"{len(rs)} rays)", flush=True)
+    return rays
 
 
 def run_one(args):
@@ -1120,7 +1224,6 @@ def faceon_map(out, dph):
                          'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
-    rdir = os.path.join(out, 'rays')
     sim = load_sim(DUMP)
     r0 = CONFIG['R0_LD'] * LD_CM
     rf, thf, phf = sim['rf'], sim['thf'], sim['phf']
@@ -1132,20 +1235,16 @@ def faceon_map(out, dph):
     nray, ncol = 0, {}
     rcen, crashed = {}, []          # H alpha centroid R [r0]; failed rays
     geo, nexp, _ = ray_geometry(out, sim, dph)
-    for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out'))):
-        name = os.path.basename(o)[:-4]
-        if not finished(rdir, name, lenient=True):
-            if 'DISASTER' in open(o, errors='ignore').read():
+    for name, ray in sorted(load_rays(out).items()):
+        if not ray['finl']:
+            if ray['crash']:
                 crashed.append(name)
                 ncol[int(name[5:8])] = ncol.get(int(name[5:8]), 0) + 1
             continue
         iph = int(name[5:8])
-        e = np.loadtxt(o[:-4] + '.ems')
-        if e.ndim < 2 or len(e) < 2:
+        e = ray['ems']
+        if len(e) < 2:
             continue
-        if e.shape[1] < 9:                   # older deck: rebuild He II
-            he = heii_profile(rdir, name, e[:, 0])
-            e = np.column_stack([e, he, np.zeros_like(he)])
         s0, sa, _, dom = geo(name)
         ss = s0 + e[:, 0]                              # [cm] from the lamp
         dd = np.gradient(e[:, 0])                      # [cm]
@@ -1474,41 +1573,36 @@ def civ_layers(out, sim):
       thick [cm]      the ray's path where the C3+ fraction exceeds 0.5
       elev [rad]      the ray's elevation (< 0: descending)
     C/H from the first ray's .out."""
-    rdir = os.path.join(out, 'rays')
     r0 = CONFIG['R0_LD'] * LD_CM
     geo, _, h = ray_geometry(out, sim)
     keys = ('iph', 'R', 'z', 'nl', 'Te', 'Nabove', 'thick', 'elev')
     rec, ach = [], None
-    for o in sorted(glob.glob(os.path.join(rdir, 'ray_p*_[ta]*.out'))):
-        name = os.path.basename(o)[:-4]
-        if not finished(rdir, name, lenient=True):
+    for name, ray in sorted(load_rays(out).items()):
+        if not ray['finl']:
             continue
-        e = np.loadtxt(o[:-4] + '.ems')
-        if e.ndim < 2 or len(e) < 2:
+        e = ray['ems']
+        if len(e) < 2:
             continue
         if ach is None:
-            m = re.search(r'C :\s*(-?[\d.]+)', open(o, errors='ignore').read())
-            ach = 10 ** float(m.group(1))
+            ach = ray['cha']
         s0, sa, ca, _ = geo(name)
         ss = s0 + e[:, 0]
         w = e[:, 3:5].sum(axis=1) * ss ** 2 * np.gradient(e[:, 0])
         if not w.sum() > 0:
             continue
         dc = np.sum(w * e[:, 0]) / w.sum()
-        with open(o[:-4] + '.ovr') as fh:
-            hdr = fh.readline().lstrip('#').rstrip('\n').split('\t')
-        ov = np.genfromtxt(o[:-4] + '.ovr', skip_header=1,
-                           invalid_raise=False)
+        ov = ray['ovr']
+        col = {k: ov[:, 1 + i] for i, k in enumerate(CACHE_OVR)}
         d = ov[:, 0]
-        nl = ov[:, hdr.index('C4')] * ov[:, hdr.index('hden')] * ach
+        nl = col['C4'] * col['hden'] * ach
         dd = np.gradient(d)
         Ncum = np.cumsum(nl * dd)
         sc = (s0 + dc) / r0
         rec.append((int(name[5:8]), sc * sa, h + sc * ca,
                     np.interp(dc, d, nl),
-                    np.interp(dc, d, ov[:, hdr.index('Te')]),
+                    np.interp(dc, d, col['Te']),
                     np.interp(dc, d, Ncum),
-                    np.sum(dd[ov[:, hdr.index('C4')] > 0.5]),
+                    np.sum(dd[col['C4'] > 0.5]),
                     np.arctan2(ca, sa)))
     a = np.array(rec)
     L = {k: a[:, i] for i, k in enumerate(keys)}

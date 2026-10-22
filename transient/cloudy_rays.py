@@ -2017,12 +2017,15 @@ def strain_at(sim, phys, L):
 
 CIV_VARIANTS = [('noshear', None), ('sim', None)] + \
     [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep0', None)]
+# what each escape variant changes (all at VTURB unless said otherwise)
 CIV_LABELS = dict(
-    noshear=r'\textbf{no shear}', sim=r'\textbf{sim velocity}',
-    kep=r'\textbf{Keplerian}',
-    kep0=r'\textbf{Keplerian, }$\bm{v_{\rm turb} = 0}$',
-    **{f'vtz{v}': r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v
-       for v in CIV_VTZ})
+    noshear=r'\textbf{no shear, }$\bm{v_{\rm turb} = 10}\,'
+            r'\rm\bf km\,s^{-1}$',
+    sim=r'\textbf{+ sim velocity shear}',
+    kep=r'\textbf{Keplerian shear}',
+    kep0=r'\textbf{Keplerian shear, }$\bm{v_{\rm turb} = 0}$',
+    **{f'vtz{v}': r'\textbf{+ vertical turbulence %d}\,'
+       r'$\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ})
 CIV_COLORS = dict(noshear='k', sim='orangered', vtz100='dodgerblue',
                   vtz300='seagreen', kep='darkorange', kep0='darkviolet')
 CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
@@ -2343,12 +2346,16 @@ def civ_profiles(out, dph, plotonly=False):
                 lambda v: CIV_LAM_C * (1 + v * 1e3 / C_KMS)))
             top.set_xlabel(r'$v\ [10^3\,\rm km\,s^{-1}]$')
             top.tick_params(which='both', direction='in', labelsize=19)
-            ax.legend(fontsize=17, frameon=False, loc='upper left')
         if j == n // 2:
             ax.set_ylabel(r'$\lambda L_\lambda\ [10^{42}\,\rm erg\,'
                           r's^{-1}]$ \textbf{(isotropic equiv.)}')
     axs[-1].set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
-    fig.tight_layout(h_pad=0.2)
+    # legend below the panels (the face-on doublet fills the top one)
+    fig.tight_layout(h_pad=0.2, rect=(0, 0.075, 1, 1))
+    fig.legend(*axs[0].get_legend_handles_labels(), loc='lower center',
+               ncol=2, fontsize=17, frameon=False,
+               title=r'\textbf{escape weighting (all Doppler-shifted by the '
+                     r'sim velocity)}', title_fontsize=17)
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
     path = os.path.join(pdir, 'civ_profiles.png')

@@ -2292,6 +2292,10 @@ def civ_emission_map(out, dph, plotonly=False):
 PROF_DL = 0.25              # [A] profile bin (~50 km/s)
 CIV_LAM_C = 1549.06         # [A] doublet centre (f-weighted): the velocity
                             # zero of the profiles' top axis
+PROF_FWHM = 150.0           # [km/s] instrumental Gaussian the plotted
+                            # profiles are convolved with (~SDSS/BOSS); it
+                            # also hides the steps between the 64 phi
+                            # columns' wedges (the saved .npz is unsmoothed)
 PROF_NSUB = 8               # sub-samples per phi cell: one cell spans
                             # ~90 km/s of projected rotation at i = 45 deg
 
@@ -2306,7 +2310,10 @@ def line_profiles(out, dph, key='c4', plotonly=False):
     (line_escape), Doppler-shifted by the sim velocity along the line of
     sight at that (phi cell, R, z): lambda = lambda0 (1 - v_los/c), v_los
     > 0 approaching. No local broadening (thermal + turbulent << the
-    PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A] (the
+    PROF_DL bins and the rotation); plotted convolved with PROF_FWHM. The
+    sharp outermost horns (|v| = V_K(0.5 r0) sin i) are the rays landing
+    on the grid's inner boundary wall at R = 0.5 r0, an edge of the
+    simulated domain, not a physical rim. 4 pi dL/dOmega/dlambda [erg/s/A] (the
     isotropic-equivalent L_lambda = 4 pi D^2 F_lambda; plotted as lambda
     L_lambda), saved to <out>/<key>_profiles.npz and plotted from it (plotonly:
     replot only) to plots/<key>_profiles.png (C IV: civ_profiles)."""
@@ -2400,12 +2407,16 @@ def line_profiles(out, dph, key='c4', plotonly=False):
                                 for i in LOSG_INCL]), nrays=len(names))
     d = np.load(npz)
     wave, variants = d['wave'], [str(v) for v in d['variants']]
+    from scipy.ndimage import gaussian_filter1d
+    dv = np.median(np.diff(wave)) / lc * C_KMS          # [km/s] per bin
+    prof = gaussian_filter1d(d['prof'], PROF_FWHM / 2.3548 / dv, axis=-1,
+                             mode='constant')
     n = len(d['incl'])
     fig, axs = plt.subplots(n, 1, sharex=True, figsize=(12, 6.0 * n))
     axs = np.atleast_1d(axs)
     for j, (ax, inc) in enumerate(zip(axs, d['incl'])):
         for k, var in enumerate(variants):
-            ax.plot(wave, wave * d['prof'][j, k] / 1e42,
+            ax.plot(wave, wave * prof[j, k] / 1e42,
                     color=CIV_COLORS.get(var, '0.5'), lw=2,
                     label=CIV_LABELS.get(var, var), drawstyle='steps-mid')
         for l0 in lam0:

@@ -1572,11 +1572,13 @@ def civ_layers(out, sim):
       nl [cm^-3]      n(C3+) there, Te [K] there
       Nabove [cm^-2]  C3+ column along the ray from its entry to there
       thick [cm]      the ray's path where the C3+ fraction exceeds 0.5
+      Ntot [cm^-2]    the ray's whole C3+ column
       elev [rad]      the ray's elevation (< 0: descending)
     C/H from the first ray's .out."""
     r0 = CONFIG['R0_LD'] * LD_CM
     geo, _, h = ray_geometry(out, sim)
-    keys = ('iph', 'R', 'z', 'nl', 'Te', 'Nabove', 'thick', 'elev')
+    keys = ('iph', 'R', 'z', 'nl', 'Te', 'Nabove', 'thick', 'elev',
+            'Ntot')
     rec, ach = [], None
     for name, ray in sorted(load_rays(out).items()):
         if not ray['finl']:
@@ -1604,7 +1606,7 @@ def civ_layers(out, sim):
                     np.interp(dc, d, col['Te']),
                     np.interp(dc, d, Ncum),
                     np.sum(dd[col['C4'] > 0.5]),
-                    np.arctan2(ca, sa)))
+                    np.arctan2(ca, sa), Ncum[-1]))
     a = np.array(rec)
     L = {k: a[:, i] for i, k in enumerate(keys)}
     L['iph'] = L['iph'].astype(int)
@@ -1724,34 +1726,39 @@ def losgrad_map(out):
     print(f"wrote {path}: {len(L['R'])} rays")
 
 
-def occulted(sim, phys, L, inc):
-    """True where the line of sight from a civ_layers point toward the
-    observer (inclination inc, azimuth 0) meets n_H > N_SURF before it
-    leaves the grid (marched in OCC_STEP steps, from 0.01 r0 on)"""
+def los_exits(sim, phys, L, inc):
+    """March the line of sight from each civ_layers point toward the
+    observer (inclination inc, azimuth 0) in OCC_STEP steps (from 0.01 r0
+    on) to the grid edge: (pt, xyz) of every place it leaves gas denser
+    than N_SURF (through that gas's lit surface), and a flag for lines of
+    sight that end inside such gas."""
     itp = density_interp(sim, phys)
     rf, thf = sim['rf'], sim['thf']
     ph = sim['ph'][L['iph']]
     x = np.stack([L['R'] * np.cos(ph), L['R'] * np.sin(ph), L['z']], 1)
     o = np.array([np.sin(np.radians(inc)), 0.0, np.cos(np.radians(inc))])
-    hid = np.zeros(len(x), bool)
+    indense = np.zeros(len(x), bool)
     live = np.ones(len(x), bool)
-    for s in np.arange(0.01, 2 * rf[-1], OCC_STEP):
-        p = x[live] + s * o
+    pts, xyz = [], []
+    for s in np.arange(0.01, 2 * rf[-1] + 1, OCC_STEP):
+        idx = np.nonzero(live)[0]
+        p = x[idx] + s * o
         r = np.linalg.norm(p, axis=1)
         t = np.arccos(np.clip(p[:, 2] / r, -1, 1))
         inside = (r >= rf[0]) & (r <= rf[-1]) & (t >= thf[0]) & \
             (t <= thf[-1])
-        idx = np.nonzero(live)[0]
-        live[idx[~inside & (r > rf[-1])]] = False      # out of the grid
         q = np.column_stack([np.arctan2(p[:, 1], p[:, 0]) % (2 * np.pi),
                              np.clip(t, sim['th'][0], sim['th'][-1]),
                              np.clip(r, sim['r'][0], sim['r'][-1])])
         dense = inside & (itp(q) > np.log10(N_SURF))
-        hid[idx[dense]] = True
-        live[idx[dense]] = False
+        ex = indense[idx] & ~dense
+        pts.append(idx[ex])
+        xyz.append(p[ex])
+        indense[idx] = dense
+        live[idx[r > rf[-1]]] = False
         if not live.any():
             break
-    return hid
+    return np.concatenate(pts), np.concatenate(xyz), indense
 
 
 def civ_tau_map(out):
@@ -1766,15 +1773,20 @@ def civ_tau_map(out):
                VTURB^2
       Sobolev  tau_S = (pi e^2/m_e c) f lambda n_l / |dv_los/dl| (sim
                velocity, los_gradient)
-    mapped: tau = min(static, Sobolev), and L_Sob / l_los = (b/|dv/dl|) /
-    (the ray's C3+ path x sin(psi) / cos(theta_o)): > 1 where the sim's
-    velocity gradient does not matter. Grey: no line of sight (normal
-    away from the observer, or n_H > N_SURF in the way: occulted).
-    plots/civ_tau_vturb.png: the static tau alone (no sim velocity) for
-    constant turbulence CIV_VTURBS, b^2 = 2kT/m_C + v_turb^2, one colour
-    scale."""
+    mapped: tau = min(static, Sobolev) through the point's own layer
+    (|cos theta_o| floored at 1e-3: a wall seen edge-on has a long path,
+    not none) plus, for every stretch of gas denser than N_SURF the line
+    of sight crosses (los_exits), the layer it leaves that gas through:
+    the nearest civ_layers point (R, z) in the nearest column, its whole
+    C3+ column (Ntot) x sin(psi) / |cos theta_o| there, min(static,
+    Sobolev) likewise; a line of sight that ends inside dense gas gets
+    tau = inf (the top of the colour scale). And L_Sob / l_los = (b /
+    |dv/dl|) / (the ray's C3+ path x sin(psi) / |cos theta_o|) for the
+    own layer: > 1 where the sim's velocity gradient does not matter.
+    plots/civ_tau_vturb.png: the same with the static tau alone (no sim
+    velocity) for constant turbulence CIV_VTURBS, b^2 = 2kT/m_C +
+    v_turb^2, one colour scale."""
     plt = plot_style()
-    from matplotlib.colors import LogNorm, ListedColormap
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from scipy.ndimage import median_filter
     sim = load_sim(DUMP)
@@ -1796,33 +1808,56 @@ def civ_tau_map(out):
     sinpsi = np.sin(beta - L['elev'])
     nfloor = int(np.sum(sinpsi < 1e-3))
     sinpsi = np.maximum(sinpsi, 1e-3)
-    b = np.sqrt(2 * KB * L['Te'] / (12 * MH) + (VTURB * 1e5) ** 2)
-    k0 = PIE2_MC * CIV_F * CIV_LAM
+    bth2 = 2 * KB * L['Te'] / (12 * MH)
+    k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
     ph = sim['ph'][iph]
+    cols = np.unique(iph)
+    members = {j: np.nonzero(iph == j)[0] for j in cols}
+    TAU_MAX = 1e12                # a line of sight that ends in dense gas
     rows, vrows = [], []
     for inc in LOSG_INCL:
         si, ci = np.sin(np.radians(inc)), np.cos(np.radians(inc))
         # layer normal (-sin beta e_R + cos beta e_z), e_R = (cos ph, sin ph)
-        cth = -np.sin(beta) * np.cos(ph) * si + np.cos(beta) * ci
-        hid = (cth <= 0.05) | occulted(sim, phys, L, inc)
-        cth = np.maximum(cth, 0.05)
-        Nlos = L['Nabove'] * sinpsi / cth
-        tst = k0 * Nlos / (np.sqrt(np.pi) * b)
+        acth = np.maximum(np.abs(-np.sin(beta) * np.cos(ph) * si
+                                 + np.cos(beta) * ci), 1e-3)
         dvdl = np.abs(los_gradient(sim, phys, L, inc)) * 1e5 / (0.01 * r0)
-        tso = k0 * L['nl'] / np.maximum(dvdl, 1e-30)
-        tau = np.minimum(tst, tso)
-        ratio = (b / np.maximum(dvdl, 1e-30)) / (L['thick'] * sinpsi / cth)
+        tso = k0 * np.sqrt(np.pi) * L['nl'] / np.maximum(dvdl, 1e-30)
+        # the layers the line of sight leaves dense gas through
+        pt, xyz, blocked = los_exits(sim, phys, L, inc)
+        phx = np.arctan2(xyz[:, 1], xyz[:, 0])
+        jc = cols[np.argmin(np.abs(np.angle(np.exp(1j * (
+            phx[:, None] - sim['ph'][cols][None, :])))), axis=1)]
+        Rx, zx = np.hypot(xyz[:, 0], xyz[:, 1]), xyz[:, 2]
+        sh = np.empty(len(pt), int)
+        for j in np.unique(jc):
+            e, m = np.nonzero(jc == j)[0], members[j]
+            sh[e] = m[np.argmin((R[m][None] - Rx[e, None]) ** 2
+                                + (z[m][None] - zx[e, None]) ** 2, axis=1)]
+
+        def total(bv, sob):
+            own = k0 * L['Nabove'] * sinpsi / acth / bv
+            lay = k0 * L['Ntot'] * sinpsi / acth / bv
+            if sob:
+                own, lay = np.minimum(own, tso), np.minimum(lay, tso)
+            t = own.copy()
+            np.add.at(t, pt, lay[sh])
+            return np.where(blocked, TAU_MAX, np.minimum(t, TAU_MAX))
+        b = np.sqrt(bth2 + (VTURB * 1e5) ** 2)
+        tau = total(b, True)
+        ost = k0 * L['Nabove'] * sinpsi / acth / b
+        ratio = (b / np.maximum(dvdl, 1e-30)) / (L['thick'] * sinpsi / acth)
+        crossed = np.bincount(pt, minlength=len(R)) > 0
         print(f"i = {inc:.0f} deg: tau(C IV 1548) median {np.median(tau):.3g}"
               f" (5-95% {np.percentile(tau, 5):.3g} - "
-              f"{np.percentile(tau, 95):.3g}); Sobolev-limited "
-              f"{np.mean(tso < tst):.0%}; L_Sob/l_los median "
-              f"{np.median(ratio):.3g}; hidden {np.mean(hid):.0%}")
+              f"{np.percentile(tau, 95):.3g}); own layer Sobolev-limited "
+              f"{np.mean(tso < ost):.0%}; L_Sob/l_los median "
+              f"{np.median(ratio):.3g}; crossing other layers "
+              f"{np.mean(crossed):.0%}, ending in dense gas "
+              f"{np.sum(blocked)}")
         rows.append([column_map(sim, wedges, iph, R, np.log10(v))
-                     for v in (tau, ratio)]
-                    + [column_map(sim, wedges, iph, R, hid.astype(float))])
-        vrows.append([column_map(sim, wedges, iph, R, np.log10(
-            k0 * Nlos / (np.sqrt(np.pi) * np.sqrt(
-                2 * KB * L['Te'] / (12 * MH) + (vt * 1e5) ** 2))))
+                     for v in (tau, ratio)])
+        vrows.append([column_map(sim, wedges, iph, R, np.log10(total(
+            np.sqrt(bth2 + (vt * 1e5) ** 2), False)))
             for vt in CIV_VTURBS])
     print(f"{nfloor} rays with the layer angle floored (sin psi < 1e-3)")
     R2, P2 = np.meshgrid(rf, phf)
@@ -1831,19 +1866,15 @@ def civ_tau_map(out):
     specs = [(r'$\log\,\tau_{\rm los}(\rm C\,IV\,1548)$', 'viridis',
               np.percentile(tv, 1), np.percentile(tv, 99)),
              (r'$\log\,L_{\rm Sob}/\ell_{\rm los}$', 'RdBu_r', -2.0, 2.0)]
-    grey = ListedColormap(['0.6'])
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
 
-    def panel(ax, M, hid, title, cm, lo, hi, last_row, first_col, cbar,
+    def panel(ax, M, title, cm, lo, hi, last_row, first_col, cbar,
               clab=None):
         cmap = plt.get_cmap(cm).copy()
         cmap.set_bad('white')
-        pc = ax.pcolormesh(X, Y, np.clip(np.where(hid > 0.5, np.nan, M),
-                                         lo, hi), cmap=cmap, vmin=lo,
+        pc = ax.pcolormesh(X, Y, np.clip(M, lo, hi), cmap=cmap, vmin=lo,
                            vmax=hi, shading='flat', rasterized=True)
-        ax.pcolormesh(X, Y, np.ma.masked_where(~(hid > 0.5), hid),
-                      cmap=grey, shading='flat', rasterized=True)
         ax.set_aspect('equal')
         ax.set_xlim(-rf[-1], rf[-1])
         ax.set_ylim(-rf[-1], rf[-1])
@@ -1867,7 +1898,7 @@ def civ_tau_map(out):
     axs = np.atleast_2d(axs)
     for i, (inc, row) in enumerate(zip(LOSG_INCL, rows)):
         for j, (lab, cm, lo, hi) in enumerate(specs):
-            panel(axs[i, j], row[j], row[2],
+            panel(axs[i, j], row[j],
                   r'$\bm{i = %d^\circ}$\textbf{: }' % inc + lab, cm, lo, hi,
                   i == len(rows) - 1, j == 0, True)
     fig.tight_layout()
@@ -1882,9 +1913,9 @@ def civ_tau_map(out):
     fig, axs = plt.subplots(len(vrows), nv,
                             figsize=(7.2 * nv, 6.6 * len(vrows)))
     axs = np.atleast_2d(axs)
-    for i, (inc, vrow, row) in enumerate(zip(LOSG_INCL, vrows, rows)):
+    for i, (inc, vrow) in enumerate(zip(LOSG_INCL, vrows)):
         for j, vt in enumerate(CIV_VTURBS):
-            panel(axs[i, j], vrow[j], row[2],
+            panel(axs[i, j], vrow[j],
                   r'$\bm{i = %d^\circ,\ v_{\rm turb} = %d}$' % (inc, vt)
                   + r'$\,\rm\bf km\,s^{-1}$', 'viridis', lo, hi,
                   i == len(vrows) - 1, j == 0, j == nv - 1,

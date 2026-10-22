@@ -31,6 +31,10 @@ TABLE_DIR = '/data2/jhuang/data/opacity_tables'
 F05 = os.path.join(TABLE_DIR, 'f05', 'x', 'g7.02.tron')
 OPAL = os.path.join(TABLE_DIR, 'opal', 'GN93hz')
 OPAL_TABLE = 73                         # X = 0.70, Z = 0.02
+# the main plot's metallicities: (Z, F05 file, OPAL table, line style,
+# label); X = 0.70 for both (5 Z_sun: Y = 0.20)
+METALS = ((0.02, 'g7.02.tron', 73, '-', r'$\bm{Z_\odot}$'),
+          (0.10, 'g7.1.tron', 78, '--', r'$\bm{5\,Z_\odot}$'))
 T_JOIN = 4.0                            # log T: F05 below, OPAL above
 LOG_NH = (10, 12, 14)                   # n_H [cm^-3]
 T_SUB, T_COLOR = 1500.0, 9000.0         # [K] marked
@@ -283,26 +287,32 @@ def main():
                          'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
-    f05, opal = read_f05(), read_opal()
-    logT = np.linspace(f05[0][0], 5.3, 400)
+    logT = np.linspace(2.7, 5.3, 400)
+    T = 10 ** logT
     fig, ax = plt.subplots(figsize=(12, 8))
     cols = dict(zip(LOG_NH, ('dodgerblue', 'darkviolet', 'orangered')))
-    for n in LOG_NH:
-        logrho = np.log10(1.4 * MH) + n
-        lo = logT <= T_JOIN
-        k1, c1 = kappa_at(f05, logT[lo], logrho)
-        k2, c2 = kappa_at(opal, logT[~lo], logrho)
-        k, c = np.concatenate([k1, k2]), np.concatenate([c1, c2])
-        T = 10 ** logT
-        ax.loglog(T, np.where(c, np.nan, 10 ** k), color=cols[n], lw=2.5,
-                  label=r'$\bm{n_{\rm H} = 10^{%d}}\,\rm\bf cm^{-3}$' % n)
-        ax.loglog(T, np.where(c, 10 ** k, np.nan), color=cols[n], lw=2,
-                  ls=':')
-        i = np.nanargmax(np.where((T > 5e3) & (T < 3e4), k, -np.inf))
-        print(f"log n_H = {n}: kappa_R peak near the H-ionization bump "
-              f"{10 ** k[i]:.3g} cm^2/g at T = {T[i]:.0f} K; at 1000 K "
-              f"{10 ** np.interp(3, logT, k):.3g}, at 2500 K "
-              f"{10 ** np.interp(np.log10(2500), logT, k):.3g}")
+    for z, ffile, otab, ls, zlab in METALS:
+        f05 = read_f05(os.path.join(TABLE_DIR, 'f05', 'x', ffile))
+        opal = read_opal(table=otab)
+        for n in LOG_NH:
+            logrho = np.log10(1.4 * MH) + n
+            lo = logT <= T_JOIN
+            k1, c1 = kappa_at(f05, logT[lo], logrho)
+            k2, c2 = kappa_at(opal, logT[~lo], logrho)
+            k, c = np.concatenate([k1, k2]), np.concatenate([c1, c2])
+            ax.loglog(T, np.where(c, np.nan, 10 ** k), color=cols[n],
+                      lw=2.5, ls=ls,
+                      label=(r'$\bm{n_{\rm H} = 10^{%d}}\,\rm\bf cm^{-3}$' % n
+                             if z == METALS[0][0] else None))
+            ax.loglog(T, np.where(c, 10 ** k, np.nan), color=cols[n], lw=2,
+                      ls=':')
+            i = np.nanargmax(np.where((T > 5e3) & (T < 3e4), k, -np.inf))
+            print(f"Z = {z}, log n_H = {n}: kappa_R max (5e3-3e4 K) "
+                  f"{10 ** k[i]:.3g} cm^2/g at {T[i]:.0f} K; 1000 K "
+                  f"{10 ** np.interp(3, logT, k):.3g}, 2500 K "
+                  f"{10 ** np.interp(np.log10(2500), logT, k):.3g}, 9000 K "
+                  f"{10 ** np.interp(np.log10(9000), logT, k):.3g}")
+        ax.plot([], [], 'k', ls=ls, lw=2.5, label=zlab)
     for t, txt in ((T_SUB, r'$\bm{T_{\rm sub}}$'), (T_COLOR,
                                                     r'\textbf{9000\,K}')):
         ax.axvline(t, color='0.5', lw=1.2, ls='--')

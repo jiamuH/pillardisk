@@ -1813,21 +1813,14 @@ def velocity_maps(out, iphs, labels):
                                 figsize=(14, 4.6 * len(iphs)))
         axs = np.atleast_1d(axs)
         for j, (ax, iph, tag) in enumerate(zip(axs, iphs, labels)):
-            for a, inset in ((ax, False),
-                             (ax.inset_axes([0.6, 0.38, 0.38, 0.58]), True)):
-                pc = a.pcolormesh(X, Z, vf[key][iph][:nup], norm=norm,
-                                  cmap=cm, shading='flat', rasterized=True,
-                                  edgecolors='face')
-                a.contour(Xc, Zc, np.log10(phys['nH'][iph][:nup]),
-                          levels=[9, 10, 11], colors='k',
-                          linewidths=[0.6, 1.0, 1.6])
-                a.set_aspect('equal')
-                a.tick_params(which='both', direction='in',
-                              labelsize=10 if inset else 12)
-                if inset:
-                    a.set_xlim(0.47, 0.62)
-                    a.set_ylim(-0.005, 0.09)
-                    ax.indicate_inset_zoom(a, edgecolor='purple')
+            pc = ax.pcolormesh(X, Z, vf[key][iph][:nup], norm=norm,
+                               cmap=cm, shading='flat', rasterized=True,
+                               edgecolors='face')
+            ax.contour(Xc, Zc, np.log10(phys['nH'][iph][:nup]),
+                       levels=[9, 10, 11], colors='k',
+                       linewidths=[0.6, 1.0, 1.6])
+            ax.set_aspect('equal')
+            ax.tick_params(which='both', direction='in', labelsize=12)
             if iph == ist:
                 ax.plot(np.hypot(xs, ys), 0.0, marker='*', ms=22,
                         mfc='white', mec='black', mew=1.5, ls='none',

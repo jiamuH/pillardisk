@@ -2355,7 +2355,7 @@ def civ_profiles(out, dph, plotonly=False):
             top.tick_params(which='minor', length=5, width=1.5)
         if j == n // 2:
             ax.set_ylabel(r'$\lambda L_\lambda\ [10^{42}\,\rm erg\,'
-                          r's^{-1}]$ \textbf{(isotropic equiv.)}')
+                          r's^{-1}]$')
     axs[-1].set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
     # legend in the top panel, either side of the face-on doublet
     h, lab = axs[0].get_legend_handles_labels()

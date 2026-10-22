@@ -2017,15 +2017,15 @@ def strain_at(sim, phys, L):
 
 CIV_VARIANTS = [('noshear', None), ('sim', None)] + \
     [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep0', None)]
-# what each escape variant changes (all at VTURB unless said otherwise)
+# each escape variant: its turbulence and its shear
 CIV_LABELS = dict(
-    noshear=r'\textbf{no shear, }$\bm{v_{\rm turb} = 10}\,'
-            r'\rm\bf km\,s^{-1}$',
-    sim=r'\textbf{+ sim velocity shear}',
-    kep=r'\textbf{Keplerian shear}',
-    kep0=r'\textbf{Keplerian shear, }$\bm{v_{\rm turb} = 0}$',
-    **{f'vtz{v}': r'\textbf{+ vertical turbulence %d}\,'
-       r'$\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ})
+    noshear=r'$\bm{10}\,\rm\bf km\,s^{-1}$\textbf{ turbulence, no shear}',
+    sim=r'$\bm{10}\,\rm\bf km\,s^{-1}$\textbf{ turbulence, sim shear}',
+    kep=r'$\bm{10}\,\rm\bf km\,s^{-1}$\textbf{ turbulence, Keplerian '
+        r'shear}',
+    kep0=r'\textbf{no turbulence, Keplerian shear}',
+    **{f'vtz{v}': r'$\bm{%d}\,\rm\bf km\,s^{-1}$\textbf{ vertical '
+       r'turbulence, no shear}' % v for v in CIV_VTZ})
 CIV_COLORS = dict(noshear='k', sim='orangered', vtz100='dodgerblue',
                   vtz300='seagreen', kep='darkorange', kep0='darkviolet')
 CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'

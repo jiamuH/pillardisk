@@ -16,6 +16,11 @@ fixed rho, log R = log rho - 3 (log T - 6); below the tables' log R = -8
 value (drawn dotted).
 
 Run:  python3 -m transient.opacity_tables   (writes PLOT)
+      python3 -m transient.opacity_tables components   (PLOT_COMP: the
+      table total against analytic LTE gas components - H- bound-free and
+      free-free, H bound-free and free-free, electron scattering - as
+      additive shares of the analytic kappa_R; Saha with H, He and lumped
+      metal donors; no molecules, dust or lines)
 """
 
 import os
@@ -91,6 +96,184 @@ def kappa_at(tab, logT, logrho):
     return f(q), clamped
 
 
+# ---- analytic gas opacity components (LTE, Saha) ----
+KB_EV, KB_CGS, HPL, CL, ME = 8.6173e-5, 1.3807e-16, 6.6261e-27, 2.9979e10, \
+    9.1094e-28
+SIG_T = 6.6524e-25
+Y_HE = 0.085                    # He / H by number
+# electron donors at low T: (abundance / H, ionization energy [eV])
+DONORS = ((1.0e-4, 7.8),        # Mg + Si + Fe lumped
+          (2.0e-6, 5.14),       # Na
+          (1.3e-7, 4.34))       # K
+NU = np.logspace(12, 17, 3000)  # [Hz]
+
+
+def saha_rhs(T, chi, g=1.0):
+    """n_{i+1} n_e / n_i [cm^-3] = g (2 pi m_e k T / h^2)^1.5 e^(-chi/kT)"""
+    return g * (2 * np.pi * ME * KB_CGS * T / HPL ** 2) ** 1.5 * \
+        np.exp(-chi / (KB_EV * T))
+
+
+def ionization(T, nH):
+    """(n_e, n_H0, n_p) [cm^-3] from Saha for H, He (I, II) and the
+    DONORS, n_e found by bisection in log"""
+    def ne_of(ne):
+        sH = saha_rhs(T, 13.598)
+        xp = sH / (sH + ne)
+        s1, s2 = saha_rhs(T, 24.587, 4.0), saha_rhs(T, 54.418, 0.25)
+        d = 1 + s1 / ne + s1 * s2 / ne ** 2
+        he_e = Y_HE * (s1 / ne + 2 * s1 * s2 / ne ** 2) / d
+        m_e = sum(a * saha_rhs(T, c) / (saha_rhs(T, c) + ne)
+                  for a, c in DONORS)
+        return nH * (xp + he_e + m_e), xp
+    lo, hi = -30.0, np.log10(nH * 3)
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        f, _ = ne_of(10 ** mid)
+        lo, hi = (mid, hi) if f > 10 ** mid else (lo, mid)
+    ne = 10 ** (0.5 * (lo + hi))
+    _, xp = ne_of(ne)
+    return ne, nH * (1 - xp), nH * xp
+
+
+def hminus_bf(lam):
+    """H- bound-free cross-section [cm^2] (Wishart 1979 fit, Gray 2005)"""
+    a = (1.99654, -1.18267e-5, 2.64243e-6, -4.40524e-10, 3.23992e-14,
+         -1.39568e-18, 2.78701e-23)
+    s = sum(c * lam ** k for k, c in enumerate(a)) * 1e-18
+    return np.where(lam < 16200, np.clip(s, 0, None), 0.0)
+
+
+def hminus_ff(lam, T):
+    """H- free-free per neutral H per unit electron pressure [cm^2 /
+    (dyn cm^-2)] (Bell & Berrington 1987 fit, Gray 2005)"""
+    x = np.log10(lam)
+    f0 = -2.2763 - 1.6850 * x + 0.76661 * x ** 2 - 0.053346 * x ** 3
+    f1 = 15.2827 - 9.2846 * x + 1.99381 * x ** 2 - 0.142631 * x ** 3
+    f2 = (-197.789 + 190.266 * x - 67.9775 * x ** 2 + 10.6913 * x ** 3
+          - 0.625151 * x ** 4)
+    lt = np.log10(5040.0 / T)
+    return 1e-26 * 10 ** (f0 + f1 * lt + f2 * lt ** 2)
+
+
+def components(T, nH):
+    """monochromatic opacities [cm^-1] on NU of the processes:
+    H- bf, H- ff, H bf (n = 1-8, hydrogenic), H ff (Kramers), e scattering"""
+    ne, n0, npr = ionization(T, nH)
+    lam = CL / NU * 1e8                                   # [A]
+    stim = -np.expm1(-HPL * NU / (KB_CGS * T))
+    th = 5040.0 / T
+    pe = ne * KB_CGS * T
+    out = {}
+    out['hm_bf'] = 4.158e-10 * hminus_bf(lam) * pe * th ** 2.5 * \
+        10 ** (0.754 * th) * n0 * stim
+    out['hm_ff'] = hminus_ff(lam, T) * pe * n0
+    hb = np.zeros_like(NU)
+    for n in range(1, 9):
+        nu_n = 3.2898e15 / n ** 2
+        pop = n0 / 2 * 2 * n ** 2 * np.exp(-13.598 * (1 - 1 / n ** 2)
+                                            / (KB_EV * T))
+        hb += np.where(NU >= nu_n, 2.815e29 / (n ** 5 * NU ** 3), 0) * pop
+    out['h_bf'] = hb * stim
+    out['h_ff'] = 3.69e8 * ne * npr * T ** -0.5 * NU ** -3 * stim
+    out['es'] = np.full_like(NU, SIG_T * ne)
+    return out
+
+
+def dbdt(T):
+    x = HPL * NU / (KB_CGS * T)
+    return NU ** 4 * np.exp(-np.clip(x, 0, 700)) / np.clip(
+        np.expm1(np.clip(x, 1e-12, 700)), 1e-300, None) ** 2
+
+
+def rosseland(kappa, T):
+    dB = dbdt(T)
+    return np.trapz(dB, NU) / np.trapz(dB / np.maximum(kappa, 1e-300), NU)
+
+
+def rosseland_shares(comp, T):
+    """kappa_R of the summed opacity and each process's additive share
+    c_i = kappa_R <kappa_i / kappa_tot>, averaged with the Rosseland
+    weight dB/dT / kappa_tot (the c_i sum to kappa_R; a process's own
+    Rosseland mean is no use: one transparent window sets it to ~0)"""
+    tot = np.maximum(sum(comp.values()), 1e-300)
+    w = dbdt(T) / tot
+    kr = rosseland(tot, T)
+    return kr, {k: kr * np.trapz(w * v / tot, NU) / np.trapz(w, NU)
+                for k, v in comp.items()}
+
+
+COMP_STYLE = (('hm_bf', r'$\bm{{\rm H}^-}$\textbf{ bound-free}', 'dodgerblue', '-'),
+              ('hm_ff', r'$\bm{{\rm H}^-}$\textbf{ free-free}', 'deepskyblue', ':'),
+              ('h_bf', r'\textbf{H bound-free}', 'orangered', '-'),
+              ('h_ff', r'\textbf{H free-free}', 'darkorange', ':'),
+              ('es', r'\textbf{electron scattering}', '0.5', '--'))
+PLOT_COMP = PLOT.replace('.png', '_components.png')
+
+
+def plot_components():
+    """per density (stacked panels): the table kappa_R, the analytic gas
+    kappa_R and each process's additive share of it (rosseland_shares;
+    gas only: no molecules, dust, metal lines)"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 24})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    f05, opal = read_f05(), read_opal()
+    logT = np.linspace(3.0, 5.3, 160)
+    T = 10 ** logT
+    fig, axs = plt.subplots(len(LOG_NH), 1, sharex=True,
+                            figsize=(12, 6.0 * len(LOG_NH)))
+    for ax, n in zip(axs, LOG_NH):
+        nH = 10.0 ** n
+        rho = 1.4 * MH * nH
+        lo = logT <= T_JOIN
+        k1, _ = kappa_at(f05, logT[lo], np.log10(rho))
+        k2, _ = kappa_at(opal, logT[~lo], np.log10(rho))
+        ax.loglog(T, 10 ** np.concatenate([k1, k2]), 'k', lw=3,
+                  label=r'\textbf{tables (total)}')
+        comp = {k: [] for k, *_ in COMP_STYLE}
+        tot = []
+        for t in T:
+            kr, sh = rosseland_shares(components(t, nH), t)
+            for k in comp:
+                comp[k].append(sh[k] / rho)
+            tot.append(kr / rho)
+        for k, lab, col, ls in COMP_STYLE:
+            ax.loglog(T, comp[k], color=col, ls=ls, lw=2.2, label=lab)
+        ax.loglog(T, tot, 'k--', lw=1.8, label=r'\textbf{analytic total}')
+        for t in (T_SUB, T_COLOR):
+            ax.axvline(t, color='0.6', lw=1.2, ls='--')
+        ax.text(0.03, 0.92, r'$\bm{n_{\rm H} = 10^{%d}}\,\rm\bf cm^{-3}$' % n,
+                transform=ax.transAxes, va='top', fontsize=21)
+        ax.set_ylim(1e-6, 1e3)
+        ax.minorticks_on()
+        ax.tick_params(which='both', direction='in', labelsize=19,
+                       top=True, right=True)
+        ax.tick_params(which='major', length=10, width=2)
+        ax.tick_params(which='minor', length=5, width=1.5)
+        i = np.argmin(np.abs(T - T_COLOR))
+        print(f"log n_H = {n}, T = {T[i]:.0f} K: table {10 ** np.interp(logT[i], logT, np.concatenate([k1, k2])):.3g}; "
+              + ', '.join(f"{k} {comp[k][i]:.3g}" for k, *_ in COMP_STYLE)
+              + f"; analytic total {tot[i]:.3g} cm^2/g")
+    for t, txt in ((T_SUB, r'$\bm{T_{\rm sub}}$'), (T_COLOR,
+                                                    r'\textbf{9000\,K}')):
+        axs[0].text(t * 1.06, 1.02, txt, fontsize=19, va='bottom',
+                    transform=axs[0].get_xaxis_transform())
+    axs[len(LOG_NH) // 2].set_ylabel(
+        r'$\kappa_{\rm R}$\textbf{ and its shares }$[\rm cm^2\,g^{-1}]$')
+    axs[-1].set_xlabel(r'$T\,[\rm K]$')
+    axs[-1].set_xlim(T[0], T[-1])
+    axs[0].legend(fontsize=15, frameon=False, loc='upper right', ncol=2)
+    fig.tight_layout(h_pad=0.2)
+    fig.savefig(PLOT_COMP, dpi=130, bbox_inches='tight')
+    print(f"wrote {PLOT_COMP}")
+
+
 def main():
     import matplotlib
     matplotlib.use('Agg')
@@ -142,4 +325,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    plot_components() if 'components' in sys.argv[1:] else main()

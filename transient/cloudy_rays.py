@@ -43,6 +43,9 @@ Steps (all with --out DIR):
            LOSG_INCL) at each ray's C IV layer (plots/losgrad_civ.png)
   civtau   C IV 1548 line-of-sight optical depth from each ray's C IV
            layer at LOSG_INCL, static vs Sobolev (plots/civ_tau.png)
+  civmap   observed C IV surface brightness at LOSG_INCL: each ray's C IV
+           times its escape toward the observer relative to the mean
+           (static, sim velocity, vertical turbulence; civ_emission.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -1201,36 +1204,23 @@ def cell_overlap(phf, lo, hi):
     return f / np.diff(phf)
 
 
-def faceon_map(out, dph):
-    """Face-on surface brightness [erg/s/cm^2] of H alpha, Mg II, C IV from
-    the finished rays (lamp at the origin: rays = sim columns): each ray's
-    emissivity 4 pi j along its depth, times r^2 dOmega dr, summed into the
-    sim's (phi, r) cells (a ray covers dph phi cells) over theta, divided by
-    the cell's face-on area r dr dphi. All the emitted light (no observer
-    side or viewing angle). Only complete phi columns are used, each
-    filling the cells up to the next complete one; the rest are blank. A
-    ray Cloudy crashed on ('DISASTER' in its .out) counts as done: its
-    own strip, the radii between the H alpha centroids of its finished
+def faceon_surface(out, sim, dph, chans):
+    """Face-on surface brightness [erg/s/cm^2] maps (nchan, nph, nr) from
+    the finished rays, one per channel (cols, rw): the sum of .ems
+    columns cols (4 pi j), times r^2 dOmega dr, times the ray's weight
+    rw[name] if rw is given (0 for rays not in it), summed into the sim's
+    (phi, r) cells over the ray, divided by the cells' face-on area r dr
+    dphi. Only complete phi columns are used, each filling the cells up
+    to the next complete one (adaptive runs: its own wedge). A ray Cloudy
+    crashed on ('DISASTER' in its .out) counts as done: its own strip,
+    the radii between the first channel's centroids of its finished
     neighbours in the column, is filled by interpolating log S in R
     across it from the cells on either side (its light elsewhere is
-    lost)."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
-    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
-                         'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 24})
-    plt.rcParams['text.latex.preamble'] = \
-        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
-    sim = load_sim(DUMP)
+    lost). Returns (S, ok, info), ok the (nph, nr) cells with data."""
     r0 = CONFIG['R0_LD'] * LD_CM
-    rf, thf, phf = sim['rf'], sim['thf'], sim['phf']
+    rf, phf = sim['rf'], sim['phf']
     nph, nr = len(sim['ph']), len(sim['r'])
-    lines = [((1,), r'$S(\rm H\alpha)$'), ((7,), r'$S(\rm He\,II\,1640)$'),
-             ((3, 4), r'$S(\rm C\,IV)$'), ((5, 6), r'$S(\rm Mg\,II)$')]
-    L = np.zeros((len(lines), nph, nr))
+    L = np.zeros((len(chans), nph, nr))
     seen = np.zeros(nph, bool)
     nray, ncol = 0, {}
     rcen, crashed = {}, []          # H alpha centroid R [r0]; failed rays
@@ -1251,8 +1241,10 @@ def faceon_map(out, dph):
         # face-on: deposit at the cylindrical radius (Cloudy's intensity
         # dilutes as 1/s^2 about the lamp, so emission at s counts s^2)
         ir = np.clip(np.searchsorted(rf, ss * sa / r0) - 1, 0, nr - 1)
-        for k, (col, _) in enumerate(lines):
+        for k, (col, rw) in enumerate(chans):
             w = e[:, list(col)].sum(axis=1) * ss ** 2 * dom * dd
+            if rw is not None:
+                w = w * rw.get(name, 0.0)
             np.add.at(L[k, iph], ir, w)
             if k == 0 and w.sum() > 0:
                 rcen[name] = np.sum(w * ss * sa / r0) / w.sum()
@@ -1319,12 +1311,50 @@ def faceon_map(out, dph):
     lr = np.log(sim['r'])
     for ip in np.nonzero(gap.any(axis=1))[0]:
         g = gap[ip]
-        for k in range(len(lines)):
+        for k in range(len(chans)):
             v = S[k, ip]
             good = ~g & np.isfinite(v) & (v > 0)
             if good.sum() >= 2:
                 v[g] = np.exp(np.interp(lr[g], lr[good], np.log(v[good])))
     nfull = sum(n == nexp.get(i, -1) for i, n in ncol.items())
+    return S, ok, dict(nray=nray, ncol=ncol, nfull=nfull,
+                       crashed=crashed)
+
+
+def faceon_map(out, dph):
+    """Face-on surface brightness [erg/s/cm^2] of H alpha, Mg II, C IV from
+    the finished rays (lamp at the origin: rays = sim columns): each ray's
+    emissivity 4 pi j along its depth, times r^2 dOmega dr, summed into the
+    sim's (phi, r) cells (a ray covers dph phi cells) over theta, divided by
+    the cell's face-on area r dr dphi. All the emitted light (no observer
+    side or viewing angle). Only complete phi columns are used, each
+    filling the cells up to the next complete one; the rest are blank. A
+    ray Cloudy crashed on ('DISASTER' in its .out) counts as done: its
+    own strip, the radii between the H alpha centroids of its finished
+    neighbours in the column, is filled by interpolating log S in R
+    across it from the cells on either side (its light elsewhere is
+    lost)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
+                         'font.family': 'serif', 'font.weight': 'heavy',
+                         'font.size': 24})
+    plt.rcParams['text.latex.preamble'] = \
+        r'\usepackage{amsmath} \usepackage{bm} \boldmath'
+    sim = load_sim(DUMP)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf = sim['rf'], sim['phf']
+    lines = [((1,), r'$S(\rm H\alpha)$'), ((7,), r'$S(\rm He\,II\,1640)$'),
+             ((3, 4), r'$S(\rm C\,IV)$'), ((5, 6), r'$S(\rm Mg\,II)$')]
+    S, ok, info = faceon_surface(out, sim, dph,
+                                 [(c, None) for c, _ in lines])
+    nray, ncol, nfull = info['nray'], info['ncol'], info['nfull']
+    crashed = info['crashed']
+    area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
+        np.diff(phf)[:, None]
     R, P = np.meshgrid(rf, phf)
     X, Y = R * np.cos(P), R * np.sin(P)
     smax = np.nanmax(S)
@@ -1365,7 +1395,7 @@ def faceon_map(out, dph):
     from matplotlib.colors import ListedColormap
     img = np.where(ok[..., None], rgb, 1.0)              # white = no data
     # pcolormesh with per-cell colours: draw via a dummy array + facecolors
-    pcm = ax.pcolormesh(X, Y, np.zeros((nph, nr)), shading='flat',
+    pcm = ax.pcolormesh(X, Y, np.zeros(ok.shape), shading='flat',
                         cmap=ListedColormap(['k']), rasterized=True)
     pcm.set_array(None)
     pcm.set_facecolor(img.reshape(-1, 3))
@@ -1761,6 +1791,55 @@ def los_exits(sim, phys, L, inc):
     return np.concatenate(pts), np.concatenate(xyz), indense
 
 
+def layer_geometry(L):
+    """The C IV layer at each civ_layers point: its slope beta [rad] in the
+    meridional plane (5-ray running median of z(R) in the column), sin of
+    the angle psi between the ray and the layer (floored at 1e-3), the
+    layer's unit normal (3, cartesian) and how many were floored."""
+    from scipy.ndimage import median_filter
+    iph, R, z = L['iph'], L['R'], L['z']
+    beta = np.zeros(len(R))
+    for j in np.unique(iph):
+        k = np.nonzero(iph == j)[0]
+        k = k[np.argsort(R[k])]
+        if len(k) < 3:
+            continue
+        zs = median_filter(z[k], size=5, mode='nearest')
+        beta[k] = np.arctan(np.gradient(zs, R[k]))
+    sinpsi = np.sin(beta - L['elev'])
+    nfloor = int(np.sum(sinpsi < 1e-3))
+    return beta, np.maximum(sinpsi, 1e-3), nfloor
+
+
+def layer_normals(sim, L, beta):
+    """unit normals (n, 3) of the C IV layers: -sin(beta) e_R + cos(beta)
+    e_z in each point's meridional plane"""
+    ph = sim['ph'][L['iph']]
+    return np.stack([-np.sin(beta) * np.cos(ph), -np.sin(beta) * np.sin(ph),
+                     np.cos(beta)], 1)
+
+
+def layer_crossings(sim, phys, L, inc):
+    """(pt, sh, blocked): for each place the line of sight from point pt
+    toward an observer at inc leaves dense gas (los_exits), the
+    civ_layers point sh whose layer it leaves through (nearest in (R, z)
+    in the nearest column); blocked: lines of sight that end in dense
+    gas"""
+    iph, R, z = L['iph'], L['R'], L['z']
+    cols = np.unique(iph)
+    pt, xyz, blocked = los_exits(sim, phys, L, inc)
+    phx = np.arctan2(xyz[:, 1], xyz[:, 0])
+    jc = cols[np.argmin(np.abs(np.angle(np.exp(1j * (
+        phx[:, None] - sim['ph'][cols][None, :])))), axis=1)]
+    Rx, zx = np.hypot(xyz[:, 0], xyz[:, 1]), xyz[:, 2]
+    sh = np.empty(len(pt), int)
+    for j in np.unique(jc):
+        e, m = np.nonzero(jc == j)[0], np.nonzero(iph == j)[0]
+        sh[e] = m[np.argmin((R[m][None] - Rx[e, None]) ** 2
+                            + (z[m][None] - zx[e, None]) ** 2, axis=1)]
+    return pt, sh, blocked
+
+
 def civ_tau_map(out):
     """C IV 1548 optical depth from each ray's C IV layer point
     (civ_layers) toward an observer at LOSG_INCL, face-on maps:
@@ -1788,31 +1867,17 @@ def civ_tau_map(out):
     v_turb^2, one colour scale."""
     plt = plot_style()
     from mpl_toolkits.axes_grid1 import make_axes_locatable
-    from scipy.ndimage import median_filter
     sim = load_sim(DUMP)
     phys = to_physical(sim, CONFIG)
     r0 = CONFIG['R0_LD'] * LD_CM
     rf, phf = sim['rf'], sim['phf']
     wedges = phi_wedges(out)
     L = civ_layers(out, sim)
-    iph, R, z = L['iph'], L['R'], L['z']
-    # the C IV layer's slope beta in each column (5-ray running median)
-    beta = np.zeros(len(R))
-    for j in np.unique(iph):
-        k = np.nonzero(iph == j)[0]
-        k = k[np.argsort(R[k])]
-        if len(k) < 3:
-            continue
-        zs = median_filter(z[k], size=5, mode='nearest')
-        beta[k] = np.arctan(np.gradient(zs, R[k]))
-    sinpsi = np.sin(beta - L['elev'])
-    nfloor = int(np.sum(sinpsi < 1e-3))
-    sinpsi = np.maximum(sinpsi, 1e-3)
+    iph, R = L['iph'], L['R']
+    beta, sinpsi, nfloor = layer_geometry(L)
     bth2 = 2 * KB * L['Te'] / (12 * MH)
     k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
     ph = sim['ph'][iph]
-    cols = np.unique(iph)
-    members = {j: np.nonzero(iph == j)[0] for j in cols}
     TAU_MAX = 1e12                # a line of sight that ends in dense gas
     rows, vrows = [], []
     for inc in LOSG_INCL:
@@ -1823,16 +1888,7 @@ def civ_tau_map(out):
         dvdl = np.abs(los_gradient(sim, phys, L, inc)) * 1e5 / (0.01 * r0)
         tso = k0 * np.sqrt(np.pi) * L['nl'] / np.maximum(dvdl, 1e-30)
         # the layers the line of sight leaves dense gas through
-        pt, xyz, blocked = los_exits(sim, phys, L, inc)
-        phx = np.arctan2(xyz[:, 1], xyz[:, 0])
-        jc = cols[np.argmin(np.abs(np.angle(np.exp(1j * (
-            phx[:, None] - sim['ph'][cols][None, :])))), axis=1)]
-        Rx, zx = np.hypot(xyz[:, 0], xyz[:, 1]), xyz[:, 2]
-        sh = np.empty(len(pt), int)
-        for j in np.unique(jc):
-            e, m = np.nonzero(jc == j)[0], members[j]
-            sh[e] = m[np.argmin((R[m][None] - Rx[e, None]) ** 2
-                                + (z[m][None] - zx[e, None]) ** 2, axis=1)]
+        pt, sh, blocked = layer_crossings(sim, phys, L, inc)
 
         def total(bv, sob):
             own = k0 * L['Nabove'] * sinpsi / acth / bv
@@ -1932,6 +1988,173 @@ def civ_tau_map(out):
           f"{lo:.2f} - {hi:.2f}")
 
 
+CIV_VTZ = (100, 300)        # [km/s] vertical turbulence scan (in-plane VTURB)
+N_DIRS = 400                # directions for the escape average
+
+
+def strain_at(sim, phys, L):
+    """the sim strain rate at the civ_layers points: (e, basis) with e
+    (n, 6) = (err, ett, epp, ert, erp, etp) [km/s per r0] and basis
+    (3, n, 3) = the local unit vectors e_r, e_th, e_ph (cartesian)"""
+    from scipy.interpolate import RegularGridInterpolator
+    ph = sim['ph']
+    R, z, p = L['R'], L['z'], ph[L['iph']]
+    th = np.arctan2(R, z)
+    q = np.column_stack([p, np.clip(th, sim['th'][0], sim['th'][-1]),
+                         np.clip(np.hypot(R, z), sim['r'][0], sim['r'][-1])])
+    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    e = np.column_stack([RegularGridInterpolator(
+        (php, sim['th'], sim['r']), np.concatenate([g[-1:], g, g[:1]], 0))(q)
+        for g in strain_rate(sim, phys)])
+    st, ct, sp, cp = np.sin(th), np.cos(th), np.sin(p), np.cos(p)
+    basis = np.stack([np.stack([st * cp, st * sp, ct], 1),
+                      np.stack([ct * cp, ct * sp, -st], 1),
+                      np.stack([-sp, cp, np.zeros_like(p)], 1)])
+    return e, basis
+
+
+def civ_emission_map(out, dph):
+    """Observed C IV 1548+1551 surface brightness at LOSG_INCL (observer
+    toward +x), 4 pi dL/dOmega per face-on area [erg/s/cm^2]: each ray's
+    escaping C IV (Cloudy's, all directions) deposited as faceon_surface,
+    times f = beta(tau_obs) / <beta>, beta(tau) = (1 - e^-tau) / tau the
+    escape probability, <beta> its mean over N_DIRS directions (zero into
+    the layer, cos theta <= 0). One f per ray, from tau at its C IV point
+    (civ_layers): the own layer along each direction (as civ_tau_map,
+    floored |cos theta| for the observer) plus, toward the observer, the
+    layers the line of sight leaves dense gas through. Columns:
+      static     b^2 = 2kT/m_C + VTURB^2: geometry only, the same for any
+                 isotropic turbulence (tau >> 1: f ~ (1/tau_obs)/<1/tau>)
+      sim        min(static, Sobolev from the sim velocity along each
+                 direction)
+      v_t,z      static with b^2 = 2kT/m_C + VTURB^2 (1 - n_z^2) +
+                 v_tz^2 n_z^2 (vertical turbulence CIV_VTZ, in-plane
+                 VTURB)
+    plots/civ_emission.png, rows LOSG_INCL, one colour scale (MAP_DEX
+    decades, as faceon_map)."""
+    plt = plot_style()
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf = sim['rf'], sim['phf']
+    L = civ_layers(out, sim)
+    names = sorted(n for n, r in load_rays(out).items() if r['finl'] and
+                   len(r['ems']) > 1 and r['ems'][:, 3:5].sum() > 0)
+    assert len(names) == len(L['R'])          # civ_layers' order
+    beta, sinpsi, _ = layer_geometry(L)
+    nrm = layer_normals(sim, L, beta)
+    e, basis = strain_at(sim, phys, L)
+    bth2 = 2 * KB * L['Te'] / (12 * MH)
+    k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
+    v2cm = 1e5 / (r0)                 # km/s per r0 -> s^-1
+    # directions: Fibonacci sphere
+    k = np.arange(N_DIRS) + 0.5
+    mu, az = 1 - 2 * k / N_DIRS, np.pi * (1 + 5 ** 0.5) * k
+    dirs = np.stack([np.sqrt(1 - mu ** 2) * np.cos(az),
+                     np.sqrt(1 - mu ** 2) * np.sin(az), mu], 1)
+    variants = [('static', None), ('sim', None)] + \
+        [(f'vtz{v}', v) for v in CIV_VTZ]
+    titles = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
+        [r'$\bm{v_{t,z} = %d}$' % v for v in CIV_VTZ]
+
+    def tau_dirs(n, var, vtz, floor):
+        """own-layer tau (npt, nd) along unit directions n (nd, 3)"""
+        c = nrm @ n.T                                    # (npt, nd)
+        cc = np.maximum(np.abs(c), 1e-3) if floor else np.where(
+            c > 0, c, np.nan)
+        nz2 = n[:, 2][None] ** 2
+        vh, vz = VTURB * 1e5, (vtz if vtz is not None else VTURB) * 1e5
+        b = np.sqrt(bth2[:, None] + vh ** 2 * (1 - nz2) + vz ** 2 * nz2)
+        t = k0 * (L['Nabove'] * sinpsi)[:, None] / cc / b
+        if var == 'sim':
+            nl = np.einsum('aij,dj->aid', basis, n)      # (3, npt, nd)
+            ene = (e[:, 0, None] * nl[0] ** 2 + e[:, 1, None] * nl[1] ** 2
+                   + e[:, 2, None] * nl[2] ** 2
+                   + 2 * (e[:, 3, None] * nl[0] * nl[1]
+                          + e[:, 4, None] * nl[0] * nl[2]
+                          + e[:, 5, None] * nl[1] * nl[2]))
+            ts = k0 * np.sqrt(np.pi) * L['nl'][:, None] / np.maximum(
+                np.abs(ene) * v2cm, 1e-30)
+            t = np.fmin(t, ts)
+        return t, c
+
+    def esc(t):
+        return np.where(t > 1e-8, -np.expm1(-t) / np.maximum(t, 1e-300), 1.0)
+    rows, ftab = [], {}
+    for inc in LOSG_INCL:
+        o = np.array([[np.sin(np.radians(inc)), 0.0, np.cos(np.radians(inc))]])
+        pt, sh, blocked = layer_crossings(sim, phys, L, inc)
+        row = []
+        for var, vtz in variants:
+            td, c = tau_dirs(dirs, var, vtz, False)
+            mean = np.nansum(np.where(c > 0, esc(td), 0.0), 1) / N_DIRS
+            tob, _ = tau_dirs(o, var, vtz, True)
+            # the layers crossed: their whole C3+ column along o
+            full = tob[:, 0] * L['Ntot'] / np.maximum(L['Nabove'], 1e-30)
+            tob = tob[:, 0].copy()
+            np.add.at(tob, pt, full[sh])
+            f = np.where(blocked, 0.0, esc(tob) / np.maximum(mean, 1e-300))
+            ftab[(inc, var)] = f
+            row.append(dict(zip(names, f)))
+        S, ok, _ = faceon_surface(out, sim, dph,
+                                  [((3, 4), rw) for rw in row])
+        rows.append((S, ok))
+        area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
+            np.diff(phf)[:, None]
+        print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) [erg/s]: " +
+              ', '.join(f"{v} {np.nansum(S[j] * area):.3g}"
+                        for j, (v, _) in enumerate(variants)) +
+              "; f median " + ', '.join(
+                  f"{v} {np.median(ftab[(inc, v)]):.2f}"
+                  for v, _ in variants))
+    S0, _, _ = faceon_surface(out, sim, dph, [((3, 4), None)])
+    print(f"intrinsic L(C IV) = {np.nansum(S0[0] * area):.3g} erg/s")
+    R2, P2 = np.meshgrid(rf, phf)
+    X, Y = R2 * np.cos(P2), R2 * np.sin(P2)
+    smax = max(np.nanmax(S) for S, _ in rows)
+    norm = LogNorm(smax * 10 ** -4, smax)
+    cmap = plt.get_cmap('magma').copy()
+    cmap.set_bad('white')
+    nv = len(variants)
+    fig, axs = plt.subplots(len(rows), nv,
+                            figsize=(7.2 * nv, 6.6 * len(rows)))
+    axs = np.atleast_2d(axs)
+    for i, (inc, (S, ok)) in enumerate(zip(LOSG_INCL, rows)):
+        for j in range(nv):
+            ax = axs[i, j]
+            pc = ax.pcolormesh(X, Y, np.where(ok, np.maximum(S[j], norm.vmin),
+                                              np.nan), norm=norm, cmap=cmap,
+                               shading='flat', rasterized=True)
+            ax.set_aspect('equal')
+            ax.set_xlim(-rf[-1], rf[-1])
+            ax.set_ylim(-rf[-1], rf[-1])
+            ax.set_yticks([-1, 0, 1, 2])     # none at -2: it meets x = -2
+            ax.tick_params(which='both', direction='in', labelsize=19)
+            if i == len(rows) - 1:
+                ax.set_xlabel(r'$x\,[r_0]$')
+            if j == 0:
+                ax.set_ylabel(r'$y\,[r_0]$')
+            ax.set_title(r'$\bm{i = %d^\circ}$\textbf{, }' % inc + titles[j],
+                         fontsize=23)
+            cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
+                                                      pad=0.1)
+            if j == nv - 1:
+                fig.colorbar(pc, cax=cax).set_label(
+                    r'$4\pi\,dL/d\Omega\,dA\ (\rm C\,IV)\,'
+                    r'[\rm erg\,s^{-1}\,cm^{-2}]$')
+            else:
+                cax.set_visible(False)
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'civ_emission.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}: {len(names)} rays; observer toward +x at i > 0")
+
+
 def velocity_maps(out, iphs, labels):
     """meridional maps of velocity_fields at the phi indices iphs plus
     the cut through the embedded star (marked), one figure per field,
@@ -2026,7 +2249,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
-                                     'losgrad', 'civtau',
+                                     'losgrad', 'civtau', 'civmap',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -2165,6 +2388,9 @@ def main():
 
     elif a.step == 'civtau':
         civ_tau_map(a.out)
+
+    elif a.step == 'civmap':
+        civ_emission_map(a.out, a.dph)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

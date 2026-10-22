@@ -56,6 +56,7 @@ RUNS = '/data2/jhuang/runs/cloudy_rays'
 HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
 GROUP_FOLDS = 8
+MIN_RAYS = 50               # heights: a run needs this many finished rays
 
 
 def read_deck(path):
@@ -141,17 +142,22 @@ def build_table(out):
     """features and targets of every finished ray of the run (adaptive
     layout: rays_meta.npz), cached as <out>/emulator/table.npz"""
     path = os.path.join(out, 'emulator', 'table.npz')
+    rays = load_rays(out)
+    nfin = sum(bool(r['finl']) for r in rays.values())
     if os.path.exists(path):
         d = np.load(path)
-        if all(k in d.files for k in FEATURES):
-            return {k: d[k] for k in d.files}
+        # rebuilt when more rays have finished (a run still going)
+        if all(k in d.files for k in FEATURES) and 'nfin' in d.files \
+                and int(d['nfin']) == nfin:
+            return {k: d[k] for k in d.files if k != 'nfin'}
+    if nfin == 0:
+        return None
     sim = load_sim(DUMP)
     itp = density_interp(sim, to_physical(sim, CONFIG))
     m = np.load(os.path.join(out, 'rays_meta.npz'))
     h, r0 = float(m['hlamp_r0']), CONFIG['R0_LD'] * LD_CM
     meta = {str(n): (int(p), float(a), float(d0)) for n, p, a, d0 in
             zip(m['name'], m['iph'], m['alpha'], m['d_in'])}
-    rays = load_rays(out)
     rows = []
     for name, ray in sorted(rays.items()):
         if not ray['finl'] or len(ray['ems']) < 2 or name not in meta:
@@ -165,7 +171,7 @@ def build_table(out):
         rows.append(dict(name=name, iph=iph, **f, **t))
     tab = {k: np.array([r[k] for r in rows]) for k in rows[0]}
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez(path, **tab)
+    np.savez(path, nfin=nfin, **tab)
     print(f"emulator table: {len(rows)} rays -> {path}")
     return tab
 
@@ -295,6 +301,13 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
     from sklearn.ensemble import HistGradientBoostingRegressor
     runs = [r for r in runs if os.path.exists(os.path.join(r, 'rays_meta.npz'))]
     tabs = [build_table(r) for r in runs]
+    # heights still running count with the rays finished so far
+    keep = [t is not None and len(t['h']) >= MIN_RAYS for t in tabs]
+    for r, k in zip(runs, keep):
+        if not k:
+            print(f"skipped {r}: fewer than {MIN_RAYS} finished rays")
+    runs = [r for r, k in zip(runs, keep) if k]
+    tabs = [t for t, k in zip(tabs, keep) if k]
     doms = []
     for r, t in zip(runs, tabs):
         m = np.load(os.path.join(r, 'rays_meta.npz'))

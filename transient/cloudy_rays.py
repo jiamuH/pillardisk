@@ -2334,7 +2334,8 @@ def civ_profiles(out, dph, plotonly=False):
         for l0 in lam0:
             ax.axvline(l0, color='0.6', lw=1, ls=':')
         ax.set_xlim(1515, 1585)
-        ax.text(0.97, 0.92, r'$\bm{i = %d^\circ}$' % inc
+        # top panel: below its right-hand legend
+        ax.text(0.97, 0.92 if j else 0.55, r'$\bm{i = %d^\circ}$' % inc
                 + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
                 transform=ax.transAxes, ha='right', va='top', fontsize=21)
         ax.minorticks_on()
@@ -2356,12 +2357,19 @@ def civ_profiles(out, dph, plotonly=False):
             ax.set_ylabel(r'$\lambda L_\lambda\ [10^{42}\,\rm erg\,'
                           r's^{-1}]$ \textbf{(isotropic equiv.)}')
     axs[-1].set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
-    # legend below the panels (the face-on doublet fills the top one)
-    fig.tight_layout(h_pad=0.2, rect=(0, 0.075, 1, 1))
-    fig.legend(*axs[0].get_legend_handles_labels(), loc='lower center',
-               ncol=2, fontsize=17, frameon=False,
-               title=r'\textbf{escape weighting (all Doppler-shifted by the '
-                     r'sim velocity)}', title_fontsize=17)
+    # legend in the top panel, either side of the face-on doublet
+    h, lab = axs[0].get_legend_handles_labels()
+    m = (len(h) + 1) // 2
+    lg = axs[0].legend(h[:m], lab[:m], loc='upper left', fontsize=17,
+                       frameon=False, title=r'\textbf{escape weighting:}',
+                       title_fontsize=17)
+    lg._legend_box.align = 'left'
+    axs[0].add_artist(lg)
+    lg = axs[0].legend(h[m:], lab[m:], loc='upper right', fontsize=17,
+                       frameon=False, title=r'\textbf{(all Doppler-shifted '
+                       r'by the sim velocity)}', title_fontsize=17)
+    lg._legend_box.align = 'left'
+    fig.tight_layout(h_pad=0.2)
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
     path = os.path.join(pdir, 'civ_profiles.png')

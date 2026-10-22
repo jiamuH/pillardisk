@@ -2023,8 +2023,8 @@ CIV_LABELS = dict(
     kep0=r'\textbf{Keplerian, }$\bm{v_{\rm turb} = 0}$',
     **{f'vtz{v}': r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v
        for v in CIV_VTZ})
-CIV_COLORS = dict(noshear='k', sim='C3', vtz100='C0', vtz300='C2', kep='C1',
-                  kep0='C4')
+CIV_COLORS = dict(noshear='k', sim='orangered', vtz100='dodgerblue',
+                  vtz300='seagreen', kep='darkorange', kep0='darkviolet')
 CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
 # ('static': the no-shear variant's name in files saved before 2026-10-22;
 # vtz300 dropped then)
@@ -2215,6 +2215,8 @@ def civ_emission_map(out, dph, plotonly=False):
 
 CIV_DOUBLET = ((3, 1548.19), (4, 1550.77))   # (.ems column, rest [A])
 PROF_DL = 0.25              # [A] profile bin (~50 km/s)
+CIV_LAM_C = 1549.06         # [A] doublet centre (f-weighted): the velocity
+                            # zero of the profiles' top axis
 PROF_NSUB = 8               # sub-samples per phi cell: one cell spans
                             # ~90 km/s of projected rotation at i = 45 deg
 
@@ -2318,9 +2320,10 @@ def civ_profiles(out, dph, plotonly=False):
     d = np.load(npz)
     wave, variants = d['wave'], [str(v) for v in d['variants']]
     lam0 = [l0 for _, l0 in CIV_DOUBLET]
-    fig, axs = plt.subplots(1, len(d['incl']),
-                            figsize=(8 * len(d['incl']), 6.6))
-    for j, (ax, inc) in enumerate(zip(np.atleast_1d(axs), d['incl'])):
+    n = len(d['incl'])
+    fig, axs = plt.subplots(n, 1, sharex=True, figsize=(12, 4.6 * n))
+    axs = np.atleast_1d(axs)
+    for j, (ax, inc) in enumerate(zip(axs, d['incl'])):
         for k, var in enumerate(variants):
             ax.plot(wave, wave * d['prof'][j, k] / 1e42,
                     color=CIV_COLORS.get(var, '0.5'), lw=2,
@@ -2328,16 +2331,24 @@ def civ_profiles(out, dph, plotonly=False):
         for l0 in lam0:
             ax.axvline(l0, color='0.6', lw=1, ls=':')
         ax.set_xlim(1515, 1585)
-        ax.set_title(r'$\bm{i = %d^\circ}$' % inc
-                     + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
-                     fontsize=23)
-        ax.set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
+        ax.text(0.97, 0.92, r'$\bm{i = %d^\circ}$' % inc
+                + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
+                transform=ax.transAxes, ha='right', va='top', fontsize=21)
         ax.tick_params(which='both', direction='in', labelsize=19)
+        ax.tick_params(axis='x', top=True)
         if j == 0:
+            # velocity about the doublet centre [10^3 km/s], top panel only
+            top = ax.secondary_xaxis('top', functions=(
+                lambda x: (x / CIV_LAM_C - 1) * C_KMS / 1e3,
+                lambda v: CIV_LAM_C * (1 + v * 1e3 / C_KMS)))
+            top.set_xlabel(r'$v\ [10^3\,\rm km\,s^{-1}]$')
+            top.tick_params(which='both', direction='in', labelsize=19)
+            ax.legend(fontsize=17, frameon=False, loc='upper left')
+        if j == n // 2:
             ax.set_ylabel(r'$\lambda L_\lambda\ [10^{42}\,\rm erg\,'
                           r's^{-1}]$ \textbf{(isotropic equiv.)}')
-            ax.legend(fontsize=17, frameon=False, loc='upper left')
-    fig.tight_layout()
+    axs[-1].set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
+    fig.tight_layout(h_pad=0.2)
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
     path = os.path.join(pdir, 'civ_profiles.png')

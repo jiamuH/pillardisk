@@ -46,6 +46,7 @@ Steps (all with --out DIR):
   civmap   observed C IV surface brightness at LOSG_INCL: each ray's C IV
            times its escape toward the observer relative to the mean
            (static, sim velocity, vertical turbulence; civ_emission.png)
+  civspec  the observed C IV line profiles of the same (civ_profiles.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -2013,6 +2014,73 @@ def strain_at(sim, phys, L):
     return e, basis
 
 
+CIV_VARIANTS = [('static', None), ('sim', None)] + \
+    [(f'vtz{v}', v) for v in CIV_VTZ]
+
+
+def civ_escape(out, sim, phys):
+    """Escape weights of each ray's C IV toward an observer at LOSG_INCL,
+    f = beta(tau_obs) / <beta> (see civ_emission_map) for CIV_VARIANTS:
+    (names, L, {(inc, variant): f}), f aligned with names and civ_layers
+    L. 4 pi dL/dOmega = f x the ray's (all-direction) C IV."""
+    r0 = CONFIG['R0_LD'] * LD_CM
+    L = civ_layers(out, sim)
+    names = sorted(n for n, r in load_rays(out).items() if r['finl'] and
+                   len(r['ems']) > 1 and r['ems'][:, 3:5].sum() > 0)
+    assert len(names) == len(L['R'])          # civ_layers' order
+    beta, sinpsi, _ = layer_geometry(L)
+    nrm = layer_normals(sim, L, beta)
+    e, basis = strain_at(sim, phys, L)
+    bth2 = 2 * KB * L['Te'] / (12 * MH)
+    k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
+    v2cm = 1e5 / (r0)                 # km/s per r0 -> s^-1
+    # directions: Fibonacci sphere
+    k = np.arange(N_DIRS) + 0.5
+    mu, az = 1 - 2 * k / N_DIRS, np.pi * (1 + 5 ** 0.5) * k
+    dirs = np.stack([np.sqrt(1 - mu ** 2) * np.cos(az),
+                     np.sqrt(1 - mu ** 2) * np.sin(az), mu], 1)
+    variants = CIV_VARIANTS
+
+    def tau_dirs(n, var, vtz, floor):
+        """own-layer tau (npt, nd) along unit directions n (nd, 3)"""
+        c = nrm @ n.T                                    # (npt, nd)
+        cc = np.maximum(np.abs(c), 1e-3) if floor else np.where(
+            c > 0, c, np.nan)
+        nz2 = n[:, 2][None] ** 2
+        vh, vz = VTURB * 1e5, (vtz if vtz is not None else VTURB) * 1e5
+        b = np.sqrt(bth2[:, None] + vh ** 2 * (1 - nz2) + vz ** 2 * nz2)
+        t = k0 * (L['Nabove'] * sinpsi)[:, None] / cc / b
+        if var == 'sim':
+            nl = np.einsum('aij,dj->aid', basis, n)      # (3, npt, nd)
+            ene = (e[:, 0, None] * nl[0] ** 2 + e[:, 1, None] * nl[1] ** 2
+                   + e[:, 2, None] * nl[2] ** 2
+                   + 2 * (e[:, 3, None] * nl[0] * nl[1]
+                          + e[:, 4, None] * nl[0] * nl[2]
+                          + e[:, 5, None] * nl[1] * nl[2]))
+            ts = k0 * np.sqrt(np.pi) * L['nl'][:, None] / np.maximum(
+                np.abs(ene) * v2cm, 1e-30)
+            t = np.fmin(t, ts)
+        return t, c
+
+    def esc(t):
+        return np.where(t > 1e-8, -np.expm1(-t) / np.maximum(t, 1e-300), 1.0)
+    ftab = {}
+    for inc in LOSG_INCL:
+        o = np.array([[np.sin(np.radians(inc)), 0.0, np.cos(np.radians(inc))]])
+        pt, sh, blocked = layer_crossings(sim, phys, L, inc)
+        for var, vtz in variants:
+            td, c = tau_dirs(dirs, var, vtz, False)
+            mean = np.nansum(np.where(c > 0, esc(td), 0.0), 1) / N_DIRS
+            tob, _ = tau_dirs(o, var, vtz, True)
+            # the layers crossed: their whole C3+ column along o
+            full = tob[:, 0] * L['Ntot'] / np.maximum(L['Nabove'], 1e-30)
+            tob = tob[:, 0].copy()
+            np.add.at(tob, pt, full[sh])
+            f = np.where(blocked, 0.0, esc(tob) / np.maximum(mean, 1e-300))
+            ftab[(inc, var)] = f
+    return names, L, ftab
+
+
 def civ_emission_map(out, dph):
     """Observed C IV 1548+1551 surface brightness at LOSG_INCL (observer
     toward +x), 4 pi dL/dOmega per face-on area [erg/s/cm^2]: each ray's
@@ -2039,65 +2107,13 @@ def civ_emission_map(out, dph):
     phys = to_physical(sim, CONFIG)
     r0 = CONFIG['R0_LD'] * LD_CM
     rf, phf = sim['rf'], sim['phf']
-    L = civ_layers(out, sim)
-    names = sorted(n for n, r in load_rays(out).items() if r['finl'] and
-                   len(r['ems']) > 1 and r['ems'][:, 3:5].sum() > 0)
-    assert len(names) == len(L['R'])          # civ_layers' order
-    beta, sinpsi, _ = layer_geometry(L)
-    nrm = layer_normals(sim, L, beta)
-    e, basis = strain_at(sim, phys, L)
-    bth2 = 2 * KB * L['Te'] / (12 * MH)
-    k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
-    v2cm = 1e5 / (r0)                 # km/s per r0 -> s^-1
-    # directions: Fibonacci sphere
-    k = np.arange(N_DIRS) + 0.5
-    mu, az = 1 - 2 * k / N_DIRS, np.pi * (1 + 5 ** 0.5) * k
-    dirs = np.stack([np.sqrt(1 - mu ** 2) * np.cos(az),
-                     np.sqrt(1 - mu ** 2) * np.sin(az), mu], 1)
-    variants = [('static', None), ('sim', None)] + \
-        [(f'vtz{v}', v) for v in CIV_VTZ]
+    names, L, ftab = civ_escape(out, sim, phys)
+    variants = CIV_VARIANTS
     titles = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
         [r'$\bm{v_{t,z} = %d}$' % v for v in CIV_VTZ]
-
-    def tau_dirs(n, var, vtz, floor):
-        """own-layer tau (npt, nd) along unit directions n (nd, 3)"""
-        c = nrm @ n.T                                    # (npt, nd)
-        cc = np.maximum(np.abs(c), 1e-3) if floor else np.where(
-            c > 0, c, np.nan)
-        nz2 = n[:, 2][None] ** 2
-        vh, vz = VTURB * 1e5, (vtz if vtz is not None else VTURB) * 1e5
-        b = np.sqrt(bth2[:, None] + vh ** 2 * (1 - nz2) + vz ** 2 * nz2)
-        t = k0 * (L['Nabove'] * sinpsi)[:, None] / cc / b
-        if var == 'sim':
-            nl = np.einsum('aij,dj->aid', basis, n)      # (3, npt, nd)
-            ene = (e[:, 0, None] * nl[0] ** 2 + e[:, 1, None] * nl[1] ** 2
-                   + e[:, 2, None] * nl[2] ** 2
-                   + 2 * (e[:, 3, None] * nl[0] * nl[1]
-                          + e[:, 4, None] * nl[0] * nl[2]
-                          + e[:, 5, None] * nl[1] * nl[2]))
-            ts = k0 * np.sqrt(np.pi) * L['nl'][:, None] / np.maximum(
-                np.abs(ene) * v2cm, 1e-30)
-            t = np.fmin(t, ts)
-        return t, c
-
-    def esc(t):
-        return np.where(t > 1e-8, -np.expm1(-t) / np.maximum(t, 1e-300), 1.0)
-    rows, ftab = [], {}
+    rows = []
     for inc in LOSG_INCL:
-        o = np.array([[np.sin(np.radians(inc)), 0.0, np.cos(np.radians(inc))]])
-        pt, sh, blocked = layer_crossings(sim, phys, L, inc)
-        row = []
-        for var, vtz in variants:
-            td, c = tau_dirs(dirs, var, vtz, False)
-            mean = np.nansum(np.where(c > 0, esc(td), 0.0), 1) / N_DIRS
-            tob, _ = tau_dirs(o, var, vtz, True)
-            # the layers crossed: their whole C3+ column along o
-            full = tob[:, 0] * L['Ntot'] / np.maximum(L['Nabove'], 1e-30)
-            tob = tob[:, 0].copy()
-            np.add.at(tob, pt, full[sh])
-            f = np.where(blocked, 0.0, esc(tob) / np.maximum(mean, 1e-300))
-            ftab[(inc, var)] = f
-            row.append(dict(zip(names, f)))
+        row = [dict(zip(names, ftab[(inc, v)])) for v, _ in variants]
         S, ok, _ = faceon_surface(out, sim, dph,
                                   [((3, 4), rw) for rw in row])
         rows.append((S, ok))
@@ -2153,6 +2169,122 @@ def civ_emission_map(out, dph):
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}: {len(names)} rays; observer toward +x at i > 0")
+
+
+CIV_DOUBLET = ((3, 1548.19), (4, 1550.77))   # (.ems column, rest [A])
+PROF_DL = 0.25              # [A] profile bin (~50 km/s)
+
+
+def civ_profiles(out, dph):
+    """Observed C IV 1548+1551 profiles at LOSG_INCL (observer toward +x)
+    for CIV_VARIANTS: each ray's emission, binned into the sim's r cells
+    (luminosity-weighted R, z per cell) and spread over its column's phi
+    wedge (cell overlap, as faceon_surface), times its escape weight f
+    (civ_escape), Doppler-shifted by the sim velocity along the line of
+    sight at that (phi cell, R, z): lambda = lambda0 (1 - v_los/c), v_los
+    > 0 approaching. No local broadening (thermal + turbulent << the
+    PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A]:
+    plots/civ_profiles.png, <out>/civ_profiles.npz."""
+    plt = plot_style()
+    from scipy.interpolate import RegularGridInterpolator
+    from transient.sim_spectrum import vlos_cube
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
+    nph, nr = len(ph), len(sim['r'])
+    names, L, ftab = civ_escape(out, sim, phys)
+    rays = load_rays(out)
+    geo, _, h = ray_geometry(out, sim, dph)
+    wedges = phi_wedges(out)
+    cols = {'ray': [], 'c': [], 'R': [], 'z': [], 'L0': [], 'L1': []}
+    for i, n in enumerate(names):
+        e = rays[n]['ems']
+        s0, sa, ca, dom = geo(n)
+        ss = s0 + e[:, 0]
+        dd = np.gradient(e[:, 0])
+        Rz, zz = ss * sa / r0, h + ss * ca / r0
+        ir = np.clip(np.searchsorted(rf, Rz) - 1, 0, nr - 1)
+        lr = [np.bincount(ir, e[:, k] * ss ** 2 * dom * dd, nr)
+              for k, _ in CIV_DOUBLET]
+        W = lr[0] + lr[1]
+        cel = np.nonzero(W > 0)[0]
+        w = (e[:, 3] + e[:, 4]) * ss ** 2 * dom * dd
+        Rm = np.bincount(ir, w * Rz, nr)[cel] / W[cel]
+        zm = np.bincount(ir, w * zz, nr)[cel] / W[cel]
+        iph = int(n[5:8])
+        if wedges is not None:
+            fr = cell_overlap(phf, *wedges[iph])
+        else:
+            fr = (np.arange(nph) == iph).astype(float)
+        for c in np.nonzero(fr > 0)[0]:
+            a = fr[c] / fr.sum()
+            cols['ray'].append(np.full(len(cel), i))
+            cols['c'].append(np.full(len(cel), c))
+            cols['R'].append(Rm)
+            cols['z'].append(zm)
+            cols['L0'].append(lr[0][cel] * a)
+            cols['L1'].append(lr[1][cel] * a)
+    P = {k: np.concatenate(v) for k, v in cols.items()}
+    q = np.column_stack([ph[P['c']],
+                         np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
+                                 sim['th'][-1]),
+                         np.clip(np.hypot(P['R'], P['z']), sim['r'][0],
+                                 sim['r'][-1])])
+    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    lam0 = [l0 for _, l0 in CIV_DOUBLET]
+    edges = np.arange(1500.0, 1600.0 + PROF_DL, PROF_DL)
+    wave = 0.5 * (edges[1:] + edges[:-1])
+    prof = {}
+    for inc in LOSG_INCL:
+        _, (r_o, t_o, p_o) = vlos_cube(sim, inc, 0.0)
+        vl = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
+        v = RegularGridInterpolator(
+            (php, sim['th'], sim['r']),
+            np.concatenate([vl[-1:], vl, vl[:1]], 0))(q)
+        for var, _ in CIV_VARIANTS:
+            f = ftab[(inc, var)][P['ray']]
+            prof[(inc, var)] = sum(
+                np.histogram(l0 * (1 - v / C_KMS), edges,
+                             weights=P[k] * f)[0]
+                for k, l0 in zip(('L0', 'L1'), lam0)) / PROF_DL
+        print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) " + ', '.join(
+            f"{var} {prof[(inc, var)].sum() * PROF_DL:.3g}"
+            for var, _ in CIV_VARIANTS) + " erg/s; v_los 5-95% "
+            f"{np.percentile(v, 5):.0f} - {np.percentile(v, 95):.0f} km/s")
+    np.savez(os.path.join(out, 'civ_profiles.npz'), wave=wave,
+             incl=np.array(LOSG_INCL),
+             variants=np.array([v for v, _ in CIV_VARIANTS]),
+             prof=np.array([[prof[(i, v)] for v, _ in CIV_VARIANTS]
+                            for i in LOSG_INCL]))
+    labels = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
+        [r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ]
+    colors = ['k', 'C3', 'C0', 'C2']
+    fig, axs = plt.subplots(1, len(LOSG_INCL),
+                            figsize=(8 * len(LOSG_INCL), 6.6))
+    for j, (ax, inc) in enumerate(zip(np.atleast_1d(axs), LOSG_INCL)):
+        for (var, _), lab, c in zip(CIV_VARIANTS, labels, colors):
+            ax.plot(wave, prof[(inc, var)] / 1e39, color=c, lw=2,
+                    label=lab, drawstyle='steps-mid')
+        for l0 in lam0:
+            ax.axvline(l0, color='0.6', lw=1, ls=':')
+        ax.set_xlim(1515, 1585)
+        ax.set_title(r'$\bm{i = %d^\circ}$' % inc
+                     + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
+                     fontsize=23)
+        ax.set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
+        ax.tick_params(which='both', direction='in', labelsize=19)
+        if j == 0:
+            ax.set_ylabel(r'$4\pi\,dL/d\Omega\,d\lambda\ '
+                          r'[10^{39}\,\rm erg\,s^{-1}\,\AA^{-1}]$')
+            ax.legend(fontsize=17, frameon=False, loc='upper left')
+    fig.tight_layout()
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'civ_profiles.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path} and civ_profiles.npz: {len(names)} rays")
 
 
 def velocity_maps(out, iphs, labels):
@@ -2250,6 +2382,7 @@ def main():
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
                                      'losgrad', 'civtau', 'civmap',
+                                     'civspec',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -2391,6 +2524,9 @@ def main():
 
     elif a.step == 'civmap':
         civ_emission_map(a.out, a.dph)
+
+    elif a.step == 'civspec':
+        civ_profiles(a.out, a.dph)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

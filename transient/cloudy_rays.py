@@ -2016,9 +2016,14 @@ def strain_at(sim, phys, L):
 
 CIV_VARIANTS = [('noshear', None), ('sim', None)] + \
     [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep', None), ('kep0', None)]
-CIV_TITLES = [r'\textbf{no shear}', r'\textbf{sim velocity}'] + \
-    [r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ] + \
-    [r'\textbf{Keplerian}', r'\textbf{Keplerian, }$\bm{v_{\rm turb} = 0}$']
+CIV_LABELS = dict(
+    noshear=r'\textbf{no shear}', sim=r'\textbf{sim velocity}',
+    kep=r'\textbf{Keplerian}',
+    kep0=r'\textbf{Keplerian, }$\bm{v_{\rm turb} = 0}$',
+    **{f'vtz{v}': r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v
+       for v in CIV_VTZ})
+CIV_COLORS = dict(noshear='k', sim='C3', vtz100='C0', vtz300='C2', kep='C1',
+                  kep0='C4')
 
 
 def civ_escape(out, sim, phys):
@@ -2098,7 +2103,7 @@ def civ_escape(out, sim, phys):
     return names, L, ftab
 
 
-def civ_emission_map(out, dph):
+def civ_emission_map(out, dph, plotonly=False):
     """Observed C IV 1548+1551 surface brightness at LOSG_INCL (observer
     toward +x), 4 pi dL/dOmega per face-on area [erg/s/cm^2]: each ray's
     escaping C IV (Cloudy's, all directions) deposited as faceon_surface,
@@ -2120,34 +2125,42 @@ def civ_emission_map(out, dph):
                  alone, V_K = sqrt(G M / R)): Horne & Marsh (1986)
       kep0       the same with b thermal only (v_turb = 0; Cloudy's
                  total C IV is still its 10 km/s one)
-    plots/civ_emission.png, rows LOSG_INCL, one colour scale (MAP_DEX
-    decades, as faceon_map)."""
+    Saved to <out>/civ_emission.npz, plotted from it (plotonly: replot
+    only) to plots/civ_emission.png, rows LOSG_INCL, one colour scale."""
     plt = plot_style()
     from matplotlib.colors import LogNorm
     from mpl_toolkits.axes_grid1 import make_axes_locatable
-    sim = load_sim(DUMP)
-    phys = to_physical(sim, CONFIG)
-    r0 = CONFIG['R0_LD'] * LD_CM
-    rf, phf = sim['rf'], sim['phf']
-    names, L, ftab = civ_escape(out, sim, phys)
-    variants = CIV_VARIANTS
-    titles = CIV_TITLES
-    rows = []
-    for inc in LOSG_INCL:
-        row = [dict(zip(names, ftab[(inc, v)])) for v, _ in variants]
-        S, ok, _ = faceon_surface(out, sim, dph,
-                                  [((3, 4), rw) for rw in row])
-        rows.append((S, ok))
+    npz = os.path.join(out, 'civ_emission.npz')
+    if not plotonly:
+        sim = load_sim(DUMP)
+        phys = to_physical(sim, CONFIG)
+        r0 = CONFIG['R0_LD'] * LD_CM
+        rf, phf = sim['rf'], sim['phf']
+        names, L, ftab = civ_escape(out, sim, phys)
         area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
             np.diff(phf)[:, None]
-        print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) [erg/s]: " +
-              ', '.join(f"{v} {np.nansum(S[j] * area):.3g}"
-                        for j, (v, _) in enumerate(variants)) +
-              "; f median " + ', '.join(
-                  f"{v} {np.median(ftab[(inc, v)]):.2f}"
-                  for v, _ in variants))
-    S0, _, _ = faceon_surface(out, sim, dph, [((3, 4), None)])
-    print(f"intrinsic L(C IV) = {np.nansum(S0[0] * area):.3g} erg/s")
+        Ss, oks = [], []
+        for inc in LOSG_INCL:
+            row = [dict(zip(names, ftab[(inc, v)])) for v, _ in CIV_VARIANTS]
+            S, ok, _ = faceon_surface(out, sim, dph,
+                                      [((3, 4), rw) for rw in row])
+            Ss.append(S)
+            oks.append(ok)
+            print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) [erg/s]: " +
+                  ', '.join(f"{v} {np.nansum(S[j] * area):.3g}"
+                            for j, (v, _) in enumerate(CIV_VARIANTS)) +
+                  "; f median " + ', '.join(
+                      f"{v} {np.median(ftab[(inc, v)]):.2f}"
+                      for v, _ in CIV_VARIANTS))
+        S0, _, _ = faceon_surface(out, sim, dph, [((3, 4), None)])
+        print(f"intrinsic L(C IV) = {np.nansum(S0[0] * area):.3g} erg/s")
+        np.savez(npz, S=np.array(Ss), ok=np.array(oks), rf=rf, phf=phf,
+                 incl=np.array(LOSG_INCL),
+                 variants=np.array([v for v, _ in CIV_VARIANTS]),
+                 nrays=len(names))
+    d = np.load(npz)
+    rf, phf, variants = d['rf'], d['phf'], [str(v) for v in d['variants']]
+    rows = list(zip(d['S'], d['ok']))
     R2, P2 = np.meshgrid(rf, phf)
     X, Y = R2 * np.cos(P2), R2 * np.sin(P2)
     smax = max(np.nanmax(S) for S, _ in rows)
@@ -2158,7 +2171,7 @@ def civ_emission_map(out, dph):
     fig, axs = plt.subplots(len(rows), nv,
                             figsize=(7.2 * nv, 6.6 * len(rows)))
     axs = np.atleast_2d(axs)
-    for i, (inc, (S, ok)) in enumerate(zip(LOSG_INCL, rows)):
+    for i, (inc, (S, ok)) in enumerate(zip(d['incl'], rows)):
         for j in range(nv):
             ax = axs[i, j]
             pc = ax.pcolormesh(X, Y, np.where(ok, np.maximum(S[j], norm.vmin),
@@ -2173,7 +2186,8 @@ def civ_emission_map(out, dph):
                 ax.set_xlabel(r'$x\,[r_0]$')
             if j == 0:
                 ax.set_ylabel(r'$y\,[r_0]$')
-            ax.set_title(r'$\bm{i = %d^\circ}$\textbf{, }' % inc + titles[j],
+            ax.set_title(r'$\bm{i = %d^\circ}$\textbf{, }' % inc
+                         + CIV_LABELS.get(variants[j], variants[j]),
                          fontsize=23)
             cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
                                                       pad=0.1)
@@ -2189,7 +2203,8 @@ def civ_emission_map(out, dph):
     path = os.path.join(pdir, 'civ_emission.png')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f"wrote {path}: {len(names)} rays; observer toward +x at i > 0")
+    print(f"wrote {path}: {int(d['nrays'])} rays; observer toward +x at "
+          f"i > 0")
 
 
 CIV_DOUBLET = ((3, 1548.19), (4, 1550.77))   # (.ems column, rest [A])
@@ -2198,7 +2213,7 @@ PROF_NSUB = 8               # sub-samples per phi cell: one cell spans
                             # ~90 km/s of projected rotation at i = 45 deg
 
 
-def civ_profiles(out, dph):
+def civ_profiles(out, dph, plotonly=False):
     """Observed C IV 1548+1551 profiles at LOSG_INCL (observer toward +x)
     for CIV_VARIANTS: each ray's emission, binned into the sim's r cells
     (luminosity-weighted R, z per cell) and spread over its column's phi
@@ -2207,97 +2222,102 @@ def civ_profiles(out, dph):
     (civ_escape), Doppler-shifted by the sim velocity along the line of
     sight at that (phi cell, R, z): lambda = lambda0 (1 - v_los/c), v_los
     > 0 approaching. No local broadening (thermal + turbulent << the
-    PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A]:
-    plots/civ_profiles.png, <out>/civ_profiles.npz."""
+    PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A],
+    saved to <out>/civ_profiles.npz and plotted from it (plotonly: replot
+    only) to plots/civ_profiles.png."""
     plt = plot_style()
-    from scipy.interpolate import RegularGridInterpolator
-    from transient.sim_spectrum import vlos_cube
-    sim = load_sim(DUMP)
-    phys = to_physical(sim, CONFIG)
-    r0 = CONFIG['R0_LD'] * LD_CM
-    rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
-    nph, nr = len(ph), len(sim['r'])
-    names, L, ftab = civ_escape(out, sim, phys)
-    rays = load_rays(out)
-    geo, _, h = ray_geometry(out, sim, dph)
-    wedges = phi_wedges(out)
-    cols = {'ray': [], 'c': [], 'R': [], 'z': [], 'L0': [], 'L1': []}
-    for i, n in enumerate(names):
-        e = rays[n]['ems']
-        s0, sa, ca, dom = geo(n)
-        ss = s0 + e[:, 0]
-        dd = np.gradient(e[:, 0])
-        Rz, zz = ss * sa / r0, h + ss * ca / r0
-        ir = np.clip(np.searchsorted(rf, Rz) - 1, 0, nr - 1)
-        lr = [np.bincount(ir, e[:, k] * ss ** 2 * dom * dd, nr)
-              for k, _ in CIV_DOUBLET]
-        W = lr[0] + lr[1]
-        cel = np.nonzero(W > 0)[0]
-        w = (e[:, 3] + e[:, 4]) * ss ** 2 * dom * dd
-        Rm = np.bincount(ir, w * Rz, nr)[cel] / W[cel]
-        zm = np.bincount(ir, w * zz, nr)[cel] / W[cel]
-        iph = int(n[5:8])
-        if wedges is not None:
-            fr = cell_overlap(phf, *wedges[iph])
-        else:
-            fr = (np.arange(nph) == iph).astype(float)
-        for c in np.nonzero(fr > 0)[0]:
-            a = fr[c] / fr.sum()
-            cols['ray'].append(np.full(len(cel), i))
-            cols['c'].append(np.full(len(cel), c, float))
-            cols['R'].append(Rm)
-            cols['z'].append(zm)
-            cols['L0'].append(lr[0][cel] * a)
-            cols['L1'].append(lr[1][cel] * a)
-    P = {k: np.concatenate(v) for k, v in cols.items()}
-    # PROF_NSUB phi points across each cell, each with 1/PROF_NSUB of it
-    c = P['c'].astype(int)
-    sub = (np.arange(PROF_NSUB) + 0.5) / PROF_NSUB
-    P = {k: np.repeat(v, PROF_NSUB) for k, v in P.items()}
-    P['phi'] = (phf[c][:, None] + np.diff(phf)[c][:, None] * sub[None]
-                ).ravel() % (2 * np.pi)
-    P['L0'] = P['L0'] / PROF_NSUB
-    P['L1'] = P['L1'] / PROF_NSUB
-    P['ray'] = P['ray'].astype(int)
-    q = np.column_stack([P['phi'],
-                         np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
-                                 sim['th'][-1]),
-                         np.clip(np.hypot(P['R'], P['z']), sim['r'][0],
-                                 sim['r'][-1])])
-    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    npz = os.path.join(out, 'civ_profiles.npz')
+    if not plotonly:
+        from scipy.interpolate import RegularGridInterpolator
+        from transient.sim_spectrum import vlos_cube
+        sim = load_sim(DUMP)
+        phys = to_physical(sim, CONFIG)
+        r0 = CONFIG['R0_LD'] * LD_CM
+        rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
+        nph, nr = len(ph), len(sim['r'])
+        names, L, ftab = civ_escape(out, sim, phys)
+        rays = load_rays(out)
+        geo, _, h = ray_geometry(out, sim, dph)
+        wedges = phi_wedges(out)
+        cols = {'ray': [], 'c': [], 'R': [], 'z': [], 'L0': [], 'L1': []}
+        for i, n in enumerate(names):
+            e = rays[n]['ems']
+            s0, sa, ca, dom = geo(n)
+            ss = s0 + e[:, 0]
+            dd = np.gradient(e[:, 0])
+            Rz, zz = ss * sa / r0, h + ss * ca / r0
+            ir = np.clip(np.searchsorted(rf, Rz) - 1, 0, nr - 1)
+            lr = [np.bincount(ir, e[:, k] * ss ** 2 * dom * dd, nr)
+                  for k, _ in CIV_DOUBLET]
+            W = lr[0] + lr[1]
+            cel = np.nonzero(W > 0)[0]
+            w = (e[:, 3] + e[:, 4]) * ss ** 2 * dom * dd
+            Rm = np.bincount(ir, w * Rz, nr)[cel] / W[cel]
+            zm = np.bincount(ir, w * zz, nr)[cel] / W[cel]
+            iph = int(n[5:8])
+            if wedges is not None:
+                fr = cell_overlap(phf, *wedges[iph])
+            else:
+                fr = (np.arange(nph) == iph).astype(float)
+            for c in np.nonzero(fr > 0)[0]:
+                a = fr[c] / fr.sum()
+                cols['ray'].append(np.full(len(cel), i))
+                cols['c'].append(np.full(len(cel), c, float))
+                cols['R'].append(Rm)
+                cols['z'].append(zm)
+                cols['L0'].append(lr[0][cel] * a)
+                cols['L1'].append(lr[1][cel] * a)
+        P = {k: np.concatenate(v) for k, v in cols.items()}
+        # PROF_NSUB phi points across each cell, each with 1/PROF_NSUB of it
+        c = P['c'].astype(int)
+        sub = (np.arange(PROF_NSUB) + 0.5) / PROF_NSUB
+        P = {k: np.repeat(v, PROF_NSUB) for k, v in P.items()}
+        P['phi'] = (phf[c][:, None] + np.diff(phf)[c][:, None] * sub[None]
+                    ).ravel() % (2 * np.pi)
+        P['L0'] = P['L0'] / PROF_NSUB
+        P['L1'] = P['L1'] / PROF_NSUB
+        P['ray'] = P['ray'].astype(int)
+        q = np.column_stack([P['phi'],
+                             np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
+                                     sim['th'][-1]),
+                             np.clip(np.hypot(P['R'], P['z']), sim['r'][0],
+                                     sim['r'][-1])])
+        php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+        lam0 = [l0 for _, l0 in CIV_DOUBLET]
+        edges = np.arange(1500.0, 1600.0 + PROF_DL, PROF_DL)
+        wave = 0.5 * (edges[1:] + edges[:-1])
+        prof = {}
+        for inc in LOSG_INCL:
+            _, (r_o, t_o, p_o) = vlos_cube(sim, inc, 0.0)
+            vl = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
+            v = RegularGridInterpolator(
+                (php, sim['th'], sim['r']),
+                np.concatenate([vl[-1:], vl, vl[:1]], 0))(q)
+            for var, _ in CIV_VARIANTS:
+                f = ftab[(inc, var)][P['ray']]
+                prof[(inc, var)] = sum(
+                    np.histogram(l0 * (1 - v / C_KMS), edges,
+                                 weights=P[k] * f)[0]
+                    for k, l0 in zip(('L0', 'L1'), lam0)) / PROF_DL
+            print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) " + ', '.join(
+                f"{var} {prof[(inc, var)].sum() * PROF_DL:.3g}"
+                for var, _ in CIV_VARIANTS) + " erg/s; v_los 5-95% "
+                f"{np.percentile(v, 5):.0f} - {np.percentile(v, 95):.0f} km/s")
+        np.savez(npz, wave=wave,
+                 incl=np.array(LOSG_INCL),
+                 variants=np.array([v for v, _ in CIV_VARIANTS]),
+                 prof=np.array([[prof[(i, v)] for v, _ in CIV_VARIANTS]
+                                for i in LOSG_INCL]), nrays=len(names))
+    d = np.load(npz)
+    wave, variants = d['wave'], [str(v) for v in d['variants']]
     lam0 = [l0 for _, l0 in CIV_DOUBLET]
-    edges = np.arange(1500.0, 1600.0 + PROF_DL, PROF_DL)
-    wave = 0.5 * (edges[1:] + edges[:-1])
-    prof = {}
-    for inc in LOSG_INCL:
-        _, (r_o, t_o, p_o) = vlos_cube(sim, inc, 0.0)
-        vl = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
-        v = RegularGridInterpolator(
-            (php, sim['th'], sim['r']),
-            np.concatenate([vl[-1:], vl, vl[:1]], 0))(q)
-        for var, _ in CIV_VARIANTS:
-            f = ftab[(inc, var)][P['ray']]
-            prof[(inc, var)] = sum(
-                np.histogram(l0 * (1 - v / C_KMS), edges,
-                             weights=P[k] * f)[0]
-                for k, l0 in zip(('L0', 'L1'), lam0)) / PROF_DL
-        print(f"i = {inc:.0f} deg: 4 pi dL/dOmega(C IV) " + ', '.join(
-            f"{var} {prof[(inc, var)].sum() * PROF_DL:.3g}"
-            for var, _ in CIV_VARIANTS) + " erg/s; v_los 5-95% "
-            f"{np.percentile(v, 5):.0f} - {np.percentile(v, 95):.0f} km/s")
-    np.savez(os.path.join(out, 'civ_profiles.npz'), wave=wave,
-             incl=np.array(LOSG_INCL),
-             variants=np.array([v for v, _ in CIV_VARIANTS]),
-             prof=np.array([[prof[(i, v)] for v, _ in CIV_VARIANTS]
-                            for i in LOSG_INCL]))
-    labels = CIV_TITLES
-    colors = ['k', 'C3', 'C0', 'C2', 'C1', 'C4']
-    fig, axs = plt.subplots(1, len(LOSG_INCL),
-                            figsize=(8 * len(LOSG_INCL), 6.6))
-    for j, (ax, inc) in enumerate(zip(np.atleast_1d(axs), LOSG_INCL)):
-        for (var, _), lab, c in zip(CIV_VARIANTS, labels, colors):
-            ax.plot(wave, prof[(inc, var)] / 1e39, color=c, lw=2,
-                    label=lab, drawstyle='steps-mid')
+    fig, axs = plt.subplots(1, len(d['incl']),
+                            figsize=(8 * len(d['incl']), 6.6))
+    for j, (ax, inc) in enumerate(zip(np.atleast_1d(axs), d['incl'])):
+        for k, var in enumerate(variants):
+            ax.plot(wave, d['prof'][j, k] / 1e39,
+                    color=CIV_COLORS.get(var, '0.5'), lw=2,
+                    label=CIV_LABELS.get(var, var), drawstyle='steps-mid')
         for l0 in lam0:
             ax.axvline(l0, color='0.6', lw=1, ls=':')
         ax.set_xlim(1515, 1585)
@@ -2316,7 +2336,7 @@ def civ_profiles(out, dph):
     path = os.path.join(pdir, 'civ_profiles.png')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f"wrote {path} and civ_profiles.npz: {len(names)} rays")
+    print(f"wrote {path}: {int(d['nrays'])} rays")
 
 
 def velocity_maps(out, iphs, labels):
@@ -2421,6 +2441,8 @@ def main():
                          '(default: the column\'s brightest H alpha ray)')
     ap.add_argument('--iph', type=int, default=0,
                     help='plot: phi index of the rays')
+    ap.add_argument('--plotonly', action='store_true',
+                    help='civmap/civspec: replot from the saved .npz')
     ap.add_argument('--maponly', action='store_true',
                     help='plot: only the meridional map (all finished rays '
                          'of the phi column, no depth panels)')
@@ -2555,10 +2577,10 @@ def main():
         civ_tau_map(a.out)
 
     elif a.step == 'civmap':
-        civ_emission_map(a.out, a.dph)
+        civ_emission_map(a.out, a.dph, a.plotonly)
 
     elif a.step == 'civspec':
-        civ_profiles(a.out, a.dph)
+        civ_profiles(a.out, a.dph, a.plotonly)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

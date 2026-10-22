@@ -1458,17 +1458,17 @@ LOSG_INCL = (0.0, 45.0)     # observer inclinations [deg] (azimuth 0)
 
 
 def losgrad_map(out):
-    """Face-on maps of |dv_los/dl| = |n.e.n| (e the sim strain rate, n the
+    """Face-on maps of dv_los/dl = n.e.n (e the sim strain rate, n the
     observer direction, LOSG_INCL at azimuth 0, i.e. o = (sin i, 0, cos
     i)) at each finished ray's C IV layer: the point weighted by its
-    C IV 1548+1551 emissivity x s^2 (as faceon_map). A column's rays
-    each fill the radii out to the midpoints to their neighbours (by
-    centroid R) over the column's phi wedge. [km/s per 0.01 r0, as
-    velocity_fields]"""
+    C IV 1548+1551 emissivity x s^2 (as faceon_map). Signed (< 0:
+    converging along the line of sight), on a symmetric-log scale; in a
+    column it is linear in R between its rays' points, over the column's
+    phi wedge. [km/s per 0.01 r0, as velocity_fields]"""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
+    from matplotlib.colors import SymLogNorm
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from scipy.interpolate import RegularGridInterpolator
     from transient.sim_spectrum import vlos_cube
@@ -1515,36 +1515,36 @@ def losgrad_map(out):
              + 2 * (ert * no_r * no_t + erp * no_r * no_p
                     + etp * no_t * no_p)) * 0.01
         gp = np.concatenate([g[-1:], g, g[:1]], axis=0)
-        val = np.abs(RegularGridInterpolator(
-            (php, sim['th'], sim['r']), gp)(q))
+        val = RegularGridInterpolator((php, sim['th'], sim['r']), gp)(q)
         M = np.full((nph, nr), np.nan)
         for j in np.unique(iph):
             k = np.nonzero(iph == j)[0]
             k = k[np.argsort(R[k])]
-            edges = np.concatenate([[R[k][0]], 0.5 * (R[k][1:] + R[k][:-1]),
-                                    [R[k][-1]]])
-            i = np.clip(np.searchsorted(edges, sim['r']) - 1, 0, len(k) - 1)
-            row = np.where((sim['r'] >= edges[0]) & (sim['r'] <= edges[-1]),
-                           val[k][i], np.nan)
+            row = np.interp(sim['r'], R[k], val[k], left=np.nan,
+                            right=np.nan)
             if wedges is not None:
                 pin = cell_overlap(phf, *wedges[j]) > 0
             else:
                 pin = np.arange(nph) == j
             M[pin] = row
         maps.append(M)
-        print(f"i = {inc:.0f} deg: |dv_los/dl| at the C IV layer, median "
-              f"{np.median(val):.3g}, 5-95% {np.percentile(val, 5):.3g} - "
-              f"{np.percentile(val, 95):.3g} km/s per 0.01 r0")
+        av = np.abs(val)
+        print(f"i = {inc:.0f} deg: dv_los/dl at the C IV layer: |.| median "
+              f"{np.median(av):.3g}, 5-95% {np.percentile(av, 5):.3g} - "
+              f"{np.percentile(av, 95):.3g} km/s per 0.01 r0; "
+              f"{np.mean(val < 0):.0%} negative")
     R2, P2 = np.meshgrid(rf, phf)
     X, Y = R2 * np.cos(P2), R2 * np.sin(P2)
-    allv = np.concatenate([m[np.isfinite(m)] for m in maps])
-    norm = LogNorm(max(np.percentile(allv, 1), 1e-3), np.percentile(allv, 99.5))
-    cmap = plt.get_cmap('viridis').copy()
-    cmap.set_bad('white')
+    allv = np.abs(np.concatenate([m[np.isfinite(m)] for m in maps]))
+    vmax = np.percentile(allv, 99)
+    norm = SymLogNorm(linthresh=1.0, linscale=0.5, vmin=-vmax, vmax=vmax,
+                      base=10)
+    cmap = plt.get_cmap('RdBu_r').copy()
+    cmap.set_bad('lightgrey')
     fig, axs = plt.subplots(1, len(maps), figsize=(7.4 * len(maps), 6.6))
     for k, (ax, M, inc) in enumerate(zip(np.atleast_1d(axs), maps,
                                          LOSG_INCL)):
-        pc = ax.pcolormesh(X, Y, np.clip(M, norm.vmin, None), norm=norm,
+        pc = ax.pcolormesh(X, Y, np.clip(M, -vmax, vmax), norm=norm,
                            cmap=cmap, shading='flat', rasterized=True)
         ax.set_aspect('equal')
         ax.set_xlim(-rf[-1], rf[-1])
@@ -1560,7 +1560,7 @@ def losgrad_map(out):
                                                   pad=0.1)
         cb = fig.colorbar(pc, cax=cax)
         if k == len(maps) - 1:
-            cb.set_label(r'$|dv_{\rm los}/dl|$ \textbf{at the C\,IV layer} '
+            cb.set_label(r'$dv_{\rm los}/dl$ \textbf{at the C\,IV layer} '
                          r'$[\rm km\,s^{-1}/0.01\,r_0]$')
     fig.tight_layout()
     pdir = os.path.join(out, 'plots')

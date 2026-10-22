@@ -2335,7 +2335,7 @@ def civ_profiles(out, dph, plotonly=False):
             ax.axvline(l0, color='0.6', lw=1, ls=':')
         ax.set_xlim(1515, 1585)
         # top panel: below its right-hand legend
-        ax.text(0.97, 0.92 if j else 0.55, r'$\bm{i = %d^\circ}$' % inc
+        ax.text(0.97, 0.92 if j else 0.65, r'$\bm{i = %d^\circ}$' % inc
                 + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
                 transform=ax.transAxes, ha='right', va='top', fontsize=21)
         ax.minorticks_on()
@@ -2360,15 +2360,10 @@ def civ_profiles(out, dph, plotonly=False):
     # legend in the top panel, either side of the face-on doublet
     h, lab = axs[0].get_legend_handles_labels()
     m = (len(h) + 1) // 2
-    lg = axs[0].legend(h[:m], lab[:m], loc='upper left', fontsize=17,
-                       frameon=False, title=r'\textbf{escape weighting:}',
-                       title_fontsize=17)
-    lg._legend_box.align = 'left'
-    axs[0].add_artist(lg)
-    lg = axs[0].legend(h[m:], lab[m:], loc='upper right', fontsize=17,
-                       frameon=False, title=r'\textbf{(all Doppler-shifted '
-                       r'by the sim velocity)}', title_fontsize=17)
-    lg._legend_box.align = 'left'
+    axs[0].add_artist(axs[0].legend(h[:m], lab[:m], loc='upper left',
+                                    fontsize=17, frameon=False))
+    axs[0].legend(h[m:], lab[m:], loc='upper right', fontsize=17,
+                  frameon=False)
     fig.tight_layout(h_pad=0.2)
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)

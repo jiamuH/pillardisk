@@ -78,7 +78,7 @@ from multiprocessing import Pool
 import numpy as np
 
 from transient.sim_spectrum import (load_sim, to_physical, CONFIG, LD_CM,
-                                    C_KMS, KB, MH)
+                                    C_KMS, KB, MH, G, MSUN)
 from transient.sim_cloudy_spectrum import Q_ION
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2015,7 +2015,10 @@ def strain_at(sim, phys, L):
 
 
 CIV_VARIANTS = [('static', None), ('sim', None)] + \
-    [(f'vtz{v}', v) for v in CIV_VTZ]
+    [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep', None), ('kep0', None)]
+CIV_TITLES = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
+    [r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ] + \
+    [r'\textbf{Keplerian}', r'\textbf{Keplerian, }$\bm{v_{\rm turb} = 0}$']
 
 
 def civ_escape(out, sim, phys):
@@ -2040,6 +2043,8 @@ def civ_escape(out, sim, phys):
     dirs = np.stack([np.sqrt(1 - mu ** 2) * np.cos(az),
                      np.sqrt(1 - mu ** 2) * np.sin(az), mu], 1)
     variants = CIV_VARIANTS
+    php = sim['ph'][L['iph']]
+    vk = np.sqrt(G * CONFIG['MBH_MSUN'] * MSUN / r0) / 1e5 / np.sqrt(L['R'])
 
     def tau_dirs(n, var, vtz, floor):
         """own-layer tau (npt, nd) along unit directions n (nd, 3)"""
@@ -2047,9 +2052,21 @@ def civ_escape(out, sim, phys):
         cc = np.maximum(np.abs(c), 1e-3) if floor else np.where(
             c > 0, c, np.nan)
         nz2 = n[:, 2][None] ** 2
-        vh, vz = VTURB * 1e5, (vtz if vtz is not None else VTURB) * 1e5
+        vt = 0.0 if var == 'kep0' else VTURB
+        vh, vz = vt * 1e5, (vtz if vtz is not None else vt) * 1e5
         b = np.sqrt(bth2[:, None] + vh ** 2 * (1 - nz2) + vz ** 2 * nz2)
         t = k0 * (L['Nabove'] * sinpsi)[:, None] / cc / b
+        if var in ('kep', 'kep0'):
+            # thin Keplerian disk, v = V_K(R) e_phi: only e_R,phi =
+            # (R/2) d(v/R)/dR = -(3/4) V_K / R is nonzero, n.e.n = 2 e n_R n_phi
+            nR = np.cos(php)[:, None] * n[:, 0][None] + \
+                np.sin(php)[:, None] * n[:, 1][None]
+            nP = -np.sin(php)[:, None] * n[:, 0][None] + \
+                np.cos(php)[:, None] * n[:, 1][None]
+            ene = 2 * (-0.75 * vk / L['R'])[:, None] * nR * nP
+            ts = k0 * np.sqrt(np.pi) * L['nl'][:, None] / np.maximum(
+                np.abs(ene) * v2cm, 1e-30)
+            t = np.fmin(t, ts)
         if var == 'sim':
             nl = np.einsum('aij,dj->aid', basis, n)      # (3, npt, nd)
             ene = (e[:, 0, None] * nl[0] ** 2 + e[:, 1, None] * nl[1] ** 2
@@ -2098,6 +2115,10 @@ def civ_emission_map(out, dph):
       v_t,z      static with b^2 = 2kT/m_C + VTURB^2 (1 - n_z^2) +
                  v_tz^2 n_z^2 (vertical turbulence CIV_VTZ, in-plane
                  VTURB)
+      kep        min(static, Sobolev from a thin Keplerian disk's shear
+                 alone, V_K = sqrt(G M / R)): Horne & Marsh (1986)
+      kep0       the same with b thermal only (v_turb = 0; Cloudy's
+                 total C IV is still its 10 km/s one)
     plots/civ_emission.png, rows LOSG_INCL, one colour scale (MAP_DEX
     decades, as faceon_map)."""
     plt = plot_style()
@@ -2109,8 +2130,7 @@ def civ_emission_map(out, dph):
     rf, phf = sim['rf'], sim['phf']
     names, L, ftab = civ_escape(out, sim, phys)
     variants = CIV_VARIANTS
-    titles = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
-        [r'$\bm{v_{t,z} = %d}$' % v for v in CIV_VTZ]
+    titles = CIV_TITLES
     rows = []
     for inc in LOSG_INCL:
         row = [dict(zip(names, ftab[(inc, v)])) for v, _ in variants]
@@ -2269,9 +2289,8 @@ def civ_profiles(out, dph):
              variants=np.array([v for v, _ in CIV_VARIANTS]),
              prof=np.array([[prof[(i, v)] for v, _ in CIV_VARIANTS]
                             for i in LOSG_INCL]))
-    labels = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
-        [r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ]
-    colors = ['k', 'C3', 'C0', 'C2']
+    labels = CIV_TITLES
+    colors = ['k', 'C3', 'C0', 'C2', 'C1', 'C4']
     fig, axs = plt.subplots(1, len(LOSG_INCL),
                             figsize=(8 * len(LOSG_INCL), 6.6))
     for j, (ax, inc) in enumerate(zip(np.atleast_1d(axs), LOSG_INCL)):

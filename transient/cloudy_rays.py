@@ -2324,7 +2324,7 @@ def civ_profiles(out, dph, plotonly=False):
     wave, variants = d['wave'], [str(v) for v in d['variants']]
     lam0 = [l0 for _, l0 in CIV_DOUBLET]
     n = len(d['incl'])
-    fig, axs = plt.subplots(n, 1, sharex=True, figsize=(12, 4.6 * n))
+    fig, axs = plt.subplots(n, 1, sharex=True, figsize=(12, 6.0 * n))
     axs = np.atleast_1d(axs)
     for j, (ax, inc) in enumerate(zip(axs, d['incl'])):
         for k, var in enumerate(variants):

@@ -365,7 +365,7 @@ def plan_preview(out, h_ld, nrays, nphi):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     sim = load_sim(DUMP)
@@ -413,17 +413,17 @@ def plan_preview(out, h_ld, nrays, nphi):
                                                   pad=0.1)
         if ax is axs[0]:
             fig.colorbar(pm, cax=cax).set_label(
-                r'$N_{\rm H}\,[\rm cm^{-2}]$', fontsize=16)
+                r'$N_{\rm H}\,[\rm cm^{-2}]$', fontsize=22)
         else:
             fig.colorbar(sc, cax=cax).set_label(
-                r'$z_{\rm land}\,[r_0]$', fontsize=16)
+                r'$z_{\rm land}\,[r_0]$', fontsize=22)
         ax.set_aspect('equal')
         ax.set_xlim(-2.05, 2.05)
         ax.set_ylim(-2.05, 2.05)
         ax.set_xlabel(r'$x\,[r_0]$')
         ax.text(0.03, 0.95, r'\textbf{' + lab + '}', transform=ax.transAxes,
-                va='top', fontsize=16)
-        ax.tick_params(which='both', direction='in', labelsize=12)
+                va='top', fontsize=22)
+        ax.tick_params(which='both', direction='in', labelsize=17)
     axs[0].set_ylabel(r'$y\,[r_0]$')
     # meridional: one quiet and one arm column, adaptive rays as lines
     from transient.sim_spectrum import star_position
@@ -445,7 +445,7 @@ def plan_preview(out, h_ld, nrays, nphi):
                                                   pad=0.1)
         if k == 1:
             fig.colorbar(pm, cax=cax).set_label(
-                r'$n_{\rm H}\,[\rm cm^{-3}]$', fontsize=16)
+                r'$n_{\rm H}\,[\rm cm^{-3}]$', fontsize=22)
         else:
             cax.set_visible(False)
         for a in ac:
@@ -461,8 +461,8 @@ def plan_preview(out, h_ld, nrays, nphi):
             ax.set_ylabel(r'$z\,[r_0]$')
         ax.text(0.01, 0.9, rf'$\phi = {np.degrees(sim["ph"][j]):.0f}^\circ$ '
                 r'\textbf{(' + lab + f', {len(ac)} rays)' + '}',
-                transform=ax.transAxes, fontsize=16)
-        ax.tick_params(which='both', direction='in', labelsize=12)
+                transform=ax.transAxes, fontsize=22)
+        ax.tick_params(which='both', direction='in', labelsize=17)
     fig.tight_layout()
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
@@ -758,7 +758,7 @@ def plot_map(out, iph, ray=None):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     MAP_DEX, RGB_DEX, SEG = 4.0, 1.5, 0.004
@@ -816,15 +816,15 @@ def plot_map(out, iph, ray=None):
                       cmap=grey, shading='flat', rasterized=True,
                       edgecolors='face')
         ax.set_aspect('equal')
-        ax.tick_params(which='both', direction='in', labelsize=12)
+        ax.tick_params(which='both', direction='in', labelsize=17)
 
     for k, (ax, (_, lab, cm)) in enumerate(zip(axs.ravel(), lines)):
         base(ax)
         v = pts[:, 2 + k]
         if not np.isfinite(v).any() or lmax[k] <= 0:
             ax.text(0.3, 0.12, r'\textbf{not saved for these rays}',
-                    transform=ax.transAxes, ha='center', fontsize=16)
-            ax.set_title(lab, fontsize=16)
+                    transform=ax.transAxes, ha='center', fontsize=22)
+            ax.set_title(lab, fontsize=22)
             continue
         with np.errstate(invalid='ignore'):
             m = v > lmax[k] * 10 ** -MAP_DEX
@@ -837,12 +837,12 @@ def plot_map(out, iph, ray=None):
                                                   pad=0.08)
         fig.colorbar(sc, cax=cax).set_label(
             lab + r'$\,\int 4\pi j\,dl\,[\rm erg\,s^{-1}\,cm^{-2}]$',
-            fontsize=15)
+            fontsize=20)
     ax = axs[2, 0]
     base(ax)
     if not has_he.any():
         ax.text(0.3, 0.12, r'\textbf{no He\,II yet for these rays}',
-                transform=ax.transAxes, ha='center', fontsize=16)
+                transform=ax.transAxes, ha='center', fontsize=22)
     # hue from the local balance of the three lines (each normalized to
     # its own maximum, then relative to the point's strongest one, over
     # RGB_DEX); opacity from that strongest one over MAP_DEX - so every
@@ -860,9 +860,9 @@ def plot_map(out, iph, ray=None):
     for i, (k, c) in enumerate(((3, 'crimson'), (2, 'seagreen'),
                                 (1, 'royalblue'))):
         ax.text(0.03, 0.95 - 0.09 * i, lines[k][1], color=c,
-                transform=ax.transAxes, va='top', fontsize=16)
+                transform=ax.transAxes, va='top', fontsize=22)
     ax.text(0.03, 0.62, rf'\textbf{{hue: line balance ({RGB_DEX:g} dex)}}',
-            transform=ax.transAxes, va='top', fontsize=14)
+            transform=ax.transAxes, va='top', fontsize=19)
     make_axes_locatable(ax).append_axes('right', size='2.5%',
                                         pad=0.08).set_visible(False)
     # 6th panel: ionization structure along one ray (--ray, default a
@@ -892,15 +892,15 @@ def plot_map(out, iph, ray=None):
     ax.set_ylim(-0.02, 1.05)
     ax.set_xlabel(r'\textbf{depth along the ray} $[\rm cm]$')
     ax.set_ylabel(r'\textbf{ion fraction}')
-    ax.tick_params(which='both', direction='in', labelsize=12)
-    ax.legend(fontsize=13, loc='center left', ncol=1)
+    ax.tick_params(which='both', direction='in', labelsize=17)
+    ax.legend(fontsize=18, loc='center left', ncol=1)
     axt = ax.twinx()
     axt.semilogy(dep, ov['Te'], color='crimson', lw=1.5, ls='--')
     axt.set_ylabel(r'$T_e\,[\rm K]$', color='crimson')
     axt.tick_params(axis='y', which='both', direction='in', colors='crimson',
-                    labelsize=12)
+                    labelsize=17)
     ax.set_title(r'\textbf{' + rn.replace('_', r'\_') + r' (black line)}',
-                 fontsize=16)
+                 fontsize=22)
     for ax in (axs[2, 0], axs[1, 1]):
         ax.set_xlabel(r'$R\,[r_0]$')
     for ax in axs[:, 0]:
@@ -923,7 +923,7 @@ def plot_rays(out, iph, maponly=False):
     from matplotlib.colors import LogNorm
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     rdir = os.path.join(out, 'rays')
@@ -982,7 +982,7 @@ def plot_rays(out, iph, maponly=False):
     axz.set_xlim(0.47, 0.62)
     axz.set_ylim(-0.005, 0.09)
     axz.set_aspect('equal')
-    axz.tick_params(which='both', direction='in', labelsize=10)
+    axz.tick_params(which='both', direction='in', labelsize=14)
     ax.indicate_inset_zoom(axz, edgecolor='purple')
     for k, name in enumerate(names):
         ith = int(name[-2:])
@@ -1012,7 +1012,7 @@ def plot_rays(out, iph, maponly=False):
         if maponly:
             continue
         ax.text(r_end * np.sin(th) + 0.03, r_end * np.cos(th),
-                rf'$\rm {ith}$', color='purple', fontsize=14,
+                rf'$\rm {ith}$', color='purple', fontsize=19,
                 va='center')
         ems = np.loadtxt(os.path.join(rdir, name + '.ems'))
         a = fig.add_subplot(gs[1, k])
@@ -1037,11 +1037,11 @@ def plot_rays(out, iph, maponly=False):
         plt.setp(a.get_xticklabels(), visible=False)
         if k == 0:
             a.set_ylabel(r'$4\pi j\,[\rm erg\,s^{-1}\,cm^{-3}]$')
-            a.legend(fontsize=13, frameon=False, loc='lower left')
+            a.legend(fontsize=18, frameon=False, loc='lower left')
         d0txt = (rf',~d_0={d0:.2e}'.replace('e+', r'\times10^{') + '}\,cm'
                  if d0 > 0 else '')
         a.set_title(rf'$\rm ray~{ith}:~\theta={np.degrees(th):.1f}^\circ'
-                    rf'{d0txt}$', fontsize=15)
+                    rf'{d0txt}$', fontsize=20)
         m = d > 0
         a.set_xlim(d[m].min(), d[m].max())
         b.plot(depth, nh, '-', color='0.3', lw=2)
@@ -1055,15 +1055,15 @@ def plot_rays(out, iph, maponly=False):
         if k == len(names) - 1:
             c.set_ylabel(r'$T_e\,[\rm K]$', color='darkorange')
         for x in (a, b, c):
-            x.tick_params(which='both', direction='in', labelsize=12)
+            x.tick_params(which='both', direction='in', labelsize=17)
         c.tick_params(axis='y', colors='darkorange')
     for i, (_, c, lab) in enumerate(lines):
         ax.text(0.03, 0.95 - 0.08 * i, lab, color=c, transform=ax.transAxes,
-                va='top', fontsize=15)
+                va='top', fontsize=20)
     ax.set_aspect('equal')
     ax.set_xlabel(r'$R\,[r_0]$')
     ax.set_ylabel(r'$z\,[r_0]$')
-    ax.tick_params(which='both', direction='in', labelsize=12)
+    ax.tick_params(which='both', direction='in', labelsize=17)
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
     path = os.path.join(pdir, f'rays_{"map_" if maponly else ""}'
@@ -1117,7 +1117,7 @@ def faceon_map(out, dph):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     rdir = os.path.join(out, 'rays')
@@ -1239,13 +1239,14 @@ def faceon_map(out, dph):
         pc = ax.pcolormesh(X, Y, m, norm=norm, cmap=cmap, shading='flat',
                            rasterized=True)
         ax.set_aspect('equal')
-        ax.set_title(lab + r'$\,[\rm erg\,s^{-1}\,cm^{-2}]$', fontsize=17)
+        ax.set_title(lab + r'$\,[\rm erg\,s^{-1}\,cm^{-2}]$', fontsize=23)
         ax.set_xlabel(r'$x\,[r_0]$')
         if k % 3 == 0:
             ax.set_ylabel(r'$y\,[r_0]$')
         ax.set_xlim(-rf[-1], rf[-1])
         ax.set_ylim(-rf[-1], rf[-1])
-        ax.tick_params(which='both', direction='in', labelsize=13)
+        ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
+        ax.tick_params(which='both', direction='in', labelsize=19)
         cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
                                                   pad=0.1)
         fig.colorbar(pc, cax=cax)
@@ -1272,14 +1273,15 @@ def faceon_map(out, dph):
     ax.set_aspect('equal')
     ax.set_xlim(-rf[-1], rf[-1])
     ax.set_ylim(-rf[-1], rf[-1])
+    ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
     ax.set_xlabel(r'$x\,[r_0]$')
-    ax.tick_params(which='both', direction='in', labelsize=13)
-    ax.set_title(r'$\rm Mg\,II~/~C\,IV~/~He\,II~(R/G/B)$', fontsize=17)
+    ax.tick_params(which='both', direction='in', labelsize=19)
+    ax.set_title(r'$\rm Mg\,II~/~C\,IV~/~He\,II~(R/G/B)$', fontsize=23)
     for i, (t, c) in enumerate(((r'$\rm Mg\,II$', 'crimson'),
                                 (r'$\rm C\,IV$', 'seagreen'),
                                 (r'$\rm He\,II$', 'royalblue'))):
         ax.text(0.03, 0.97 - 0.07 * i, t, color=c, transform=ax.transAxes,
-                va='top', fontsize=15)
+                va='top', fontsize=20)
     make_axes_locatable(ax).append_axes('right', size='4.5%',
                                         pad=0.1).set_visible(False)
     fig.tight_layout()
@@ -1306,7 +1308,7 @@ def spectrum_plots(out, dph):
     from matplotlib.ticker import ScalarFormatter, NullFormatter
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     sim = load_sim(DUMP)
@@ -1345,8 +1347,8 @@ def spectrum_plots(out, dph):
     ax.set_xlabel(r'$\rm wavelength~[\AA]$')
     ax.set_ylabel(r'$\lambda L_\lambda~[\rm erg~s^{-1}]$')
     ax.set_title(rf'$\rm Cloudy~per~ray,~i={i_deg:.0f}^\circ;~{tag}$',
-                 fontsize=16)
-    ax.legend(fontsize=13, frameon=False, loc='upper right')
+                 fontsize=22)
+    ax.legend(fontsize=18, frameon=False, loc='upper right')
     ax.tick_params(which='both', direction='in', top=True, right=True)
     fig.savefig(os.path.join(pdir, 'spectrum.png'), dpi=140,
                 bbox_inches='tight')
@@ -1377,7 +1379,7 @@ def spectrum_plots(out, dph):
               f" observed {np.sum((R['line'] * dl)[wi]):.2e}  all-sky "
               f"{np.sum((R['line_all'] * dl)[wi]):.2e} erg/s")
     fig.suptitle(rf'$\rm Cloudy~per~ray~line~profiles,~i={i_deg:.0f}'
-                 rf'^\circ;~{tag}$', fontsize=17)
+                 rf'^\circ;~{tag}$', fontsize=23)
     fig.tight_layout()
     fig.savefig(os.path.join(pdir, 'line_profiles.png'), dpi=140,
                 bbox_inches='tight')
@@ -1561,7 +1563,7 @@ def plot_style():
     import matplotlib.pyplot as plt
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     return plt
@@ -1605,26 +1607,26 @@ def losgrad_map(out):
         ax.set_aspect('equal')
         ax.set_xlim(-rf[-1], rf[-1])
         ax.set_ylim(-rf[-1], rf[-1])
+        ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
         ax.set_xlabel(r'$x\,[r_0]$')
         if k == 0:
             ax.set_ylabel(r'$y\,[r_0]$')
-        ax.set_title(r'$\bm{i = %d^\circ}$' % inc
-                     + (r'\textbf{ (observer toward} $\bm{+x}$\textbf{)}'
-                        if inc > 0 else ''), fontsize=17)
-        ax.tick_params(which='both', direction='in', labelsize=13)
+        ax.set_title(r'\textbf{C\,IV layer, }$\bm{i = %d^\circ}$' % inc
+                     + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}'
+                        if inc > 0 else ''), fontsize=23)
+        ax.tick_params(which='both', direction='in', labelsize=19)
         cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
                                                   pad=0.1)
         cb = fig.colorbar(pc, cax=cax)
         if k == len(maps) - 1:
-            cb.set_label(r'$dv_{\rm los}/dl$ \textbf{at the C\,IV layer} '
-                         r'$[\rm km\,s^{-1}/0.01\,r_0]$')
+            cb.set_label(r'$dv_{\rm los}/dl\,[\rm km\,s^{-1}/0.01\,r_0]$')
     fig.tight_layout()
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
     path = os.path.join(pdir, 'losgrad_civ.png')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f"wrote {path}: {len(pts)} rays")
+    print(f"wrote {path}: {len(L['R'])} rays")
 
 
 def occulted(sim, phys, L, inc):
@@ -1744,13 +1746,14 @@ def civ_tau_map(out):
             ax.set_aspect('equal')
             ax.set_xlim(-rf[-1], rf[-1])
             ax.set_ylim(-rf[-1], rf[-1])
-            ax.tick_params(which='both', direction='in', labelsize=13)
+            ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
+            ax.tick_params(which='both', direction='in', labelsize=19)
             if i == len(rows) - 1:
                 ax.set_xlabel(r'$x\,[r_0]$')
             if j == 0:
                 ax.set_ylabel(r'$y\,[r_0]$')
             ax.set_title(r'$\bm{i = %d^\circ}$\textbf{: }' % inc + lab,
-                         fontsize=17)
+                         fontsize=23)
             cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
                                                       pad=0.1)
             fig.colorbar(pc, cax=cax)
@@ -1775,7 +1778,7 @@ def velocity_maps(out, iphs, labels):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     plt.rcParams.update({'text.usetex': True, 'axes.linewidth': 2,
                          'font.family': 'serif', 'font.weight': 'heavy',
-                         'font.size': 18})
+                         'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
     sim = load_sim(DUMP)
@@ -1820,7 +1823,7 @@ def velocity_maps(out, iphs, labels):
                        levels=[9, 10, 11], colors='k',
                        linewidths=[0.6, 1.0, 1.6])
             ax.set_aspect('equal')
-            ax.tick_params(which='both', direction='in', labelsize=12)
+            ax.tick_params(which='both', direction='in', labelsize=17)
             if iph == ist:
                 ax.plot(np.hypot(xs, ys), 0.0, marker='*', ms=22,
                         mfc='white', mec='black', mew=1.5, ls='none',
@@ -1829,13 +1832,13 @@ def velocity_maps(out, iphs, labels):
             ax.set_ylim(0, 0.64)
             ax.text(0.03, 0.9, rf'$\phi = {np.degrees(sim["ph"][iph]):.0f}'
                     rf'^\circ$ \textbf{{({tag})}}', transform=ax.transAxes,
-                    fontsize=16)
+                    fontsize=22)
             if j == len(iphs) - 1:
                 ax.set_xlabel(r'$R\,[r_0]$')
             ax.set_ylabel(r'$z\,[r_0]$')
             cax = make_axes_locatable(ax).append_axes('right', size='2.5%',
                                                       pad=0.08)
-            fig.colorbar(pc, cax=cax).set_label(lab, fontsize=15)
+            fig.colorbar(pc, cax=cax).set_label(lab, fontsize=20)
         fig.tight_layout(h_pad=0.3)
         path = os.path.join(pdir, f'vel_{key}.png')
         fig.savefig(path, dpi=120, bbox_inches='tight')

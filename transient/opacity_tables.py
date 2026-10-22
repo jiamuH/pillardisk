@@ -121,16 +121,17 @@ def saha_rhs(T, chi, g=1.0):
         np.exp(-chi / (KB_EV * T))
 
 
-def ionization(T, nH):
+def ionization(T, nH, zfac=1.0, y_he=Y_HE):
     """(n_e, n_H0, n_p) [cm^-3] from Saha for H, He (I, II) and the
-    DONORS, n_e found by bisection in log"""
+    DONORS (abundances x zfac; He/H y_he), n_e found by bisection in
+    log"""
     def ne_of(ne):
         sH = saha_rhs(T, 13.598)
         xp = sH / (sH + ne)
         s1, s2 = saha_rhs(T, 24.587, 4.0), saha_rhs(T, 54.418, 0.25)
         d = 1 + s1 / ne + s1 * s2 / ne ** 2
-        he_e = Y_HE * (s1 / ne + 2 * s1 * s2 / ne ** 2) / d
-        m_e = sum(a * saha_rhs(T, c) / (saha_rhs(T, c) + ne)
+        he_e = y_he * (s1 / ne + 2 * s1 * s2 / ne ** 2) / d
+        m_e = sum(zfac * a * saha_rhs(T, c) / (saha_rhs(T, c) + ne)
                   for a, c in DONORS)
         return nH * (xp + he_e + m_e), xp
     lo, hi = -30.0, np.log10(nH * 3)
@@ -163,10 +164,10 @@ def hminus_ff(lam, T):
     return 1e-26 * 10 ** (f0 + f1 * lt + f2 * lt ** 2)
 
 
-def components(T, nH):
+def components(T, nH, zfac=1.0, y_he=Y_HE):
     """monochromatic opacities [cm^-1] on NU of the processes:
     H- bf, H- ff, H bf (n = 1-8, hydrogenic), H ff (Kramers), e scattering"""
-    ne, n0, npr = ionization(T, nH)
+    ne, n0, npr = ionization(T, nH, zfac, y_he)
     lam = CL / NU * 1e8                                   # [A]
     stim = -np.expm1(-HPL * NU / (KB_CGS * T))
     th = 5040.0 / T
@@ -218,7 +219,7 @@ COMP_STYLE = (('hm_bf', r'$\bm{{\rm H}^-}$\textbf{ bound-free}', 'dodgerblue', '
 PLOT_COMP = PLOT.replace('.png', '_components.png')
 
 
-def plot_components():
+def plot_components(z=0.02):
     """per density (stacked panels): the table kappa_R, the analytic gas
     kappa_R and each process's additive share of it (rosseland_shares;
     gas only: no molecules, dust, metal lines)"""
@@ -230,7 +231,11 @@ def plot_components():
                          'font.size': 24})
     plt.rcParams['text.latex.preamble'] = \
         r'\usepackage{amsmath} \usepackage{bm} \boldmath'
-    f05, opal = read_f05(), read_opal()
+    zz = [m for m in METALS if m[0] == z][0]
+    f05 = read_f05(os.path.join(TABLE_DIR, 'f05', 'x', zz[1]))
+    opal = read_opal(table=zz[2])
+    zfac = z / 0.02
+    y_he = (1 - 0.70 - z) / 4 / 0.70          # He/H by number, X = 0.70
     logT = np.linspace(3.0, 5.3, 160)
     T = 10 ** logT
     fig, axs = plt.subplots(len(LOG_NH), 1, sharex=True,
@@ -246,7 +251,7 @@ def plot_components():
         comp = {k: [] for k, *_ in COMP_STYLE}
         tot = []
         for t in T:
-            kr, sh = rosseland_shares(components(t, nH), t)
+            kr, sh = rosseland_shares(components(t, nH, zfac, y_he), t)
             for k in comp:
                 comp[k].append(sh[k] / rho)
             tot.append(kr / rho)
@@ -255,7 +260,8 @@ def plot_components():
         ax.loglog(T, tot, 'k--', lw=1.8, label=r'\textbf{analytic total}')
         for t in (T_SUB, T_COLOR):
             ax.axvline(t, color='0.6', lw=1.2, ls='--')
-        ax.text(0.03, 0.92, r'$\bm{n_{\rm H} = 10^{%d}}\,\rm\bf cm^{-3}$' % n,
+        ax.text(0.03, 0.92, r'$\bm{n_{\rm H} = 10^{%d}}\,\rm\bf cm^{-3}$' % n
+                + r'\textbf{, }' + zz[4],
                 transform=ax.transAxes, va='top', fontsize=21)
         ax.set_ylim(1e-5, 3e2)
         ax.minorticks_on()
@@ -277,8 +283,10 @@ def plot_components():
     axs[-1].set_xlim(T[0], T[-1])
     axs[0].legend(fontsize=15, frameon=False, loc='upper right', ncol=2)
     fig.tight_layout(h_pad=0.2)
-    fig.savefig(PLOT_COMP, dpi=130, bbox_inches='tight')
-    print(f"wrote {PLOT_COMP}")
+    path = PLOT_COMP if z == 0.02 else PLOT_COMP.replace(
+        '.png', f'_z{z / 0.02:g}.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    print(f"wrote {path}")
 
 
 def main():
@@ -339,4 +347,8 @@ def main():
 
 if __name__ == '__main__':
     import sys
-    plot_components() if 'components' in sys.argv[1:] else main()
+    if 'components' in sys.argv[1:]:
+        for m in METALS:
+            plot_components(m[0])
+    else:
+        main()

@@ -2014,9 +2014,9 @@ def strain_at(sim, phys, L):
     return e, basis
 
 
-CIV_VARIANTS = [('static', None), ('sim', None)] + \
+CIV_VARIANTS = [('noshear', None), ('sim', None)] + \
     [(f'vtz{v}', v) for v in CIV_VTZ] + [('kep', None), ('kep0', None)]
-CIV_TITLES = [r'\textbf{static}', r'\textbf{sim velocity}'] + \
+CIV_TITLES = [r'\textbf{no shear}', r'\textbf{sim velocity}'] + \
     [r'$\bm{v_{t,z} = %d}\,\rm\bf km\,s^{-1}$' % v for v in CIV_VTZ] + \
     [r'\textbf{Keplerian}', r'\textbf{Keplerian, }$\bm{v_{\rm turb} = 0}$']
 
@@ -2108,14 +2108,15 @@ def civ_emission_map(out, dph):
     (civ_layers): the own layer along each direction (as civ_tau_map,
     floored |cos theta| for the observer) plus, toward the observer, the
     layers the line of sight leaves dense gas through. Columns:
-      static     b^2 = 2kT/m_C + VTURB^2: geometry only, the same for any
+      noshear    static tau, b^2 = 2kT/m_C + VTURB^2, no velocity
+                 gradient: geometry only (limb darkening), the same for any
                  isotropic turbulence (tau >> 1: f ~ (1/tau_obs)/<1/tau>)
-      sim        min(static, Sobolev from the sim velocity along each
+      sim        min(noshear, Sobolev from the sim velocity along each
                  direction)
       v_t,z      static with b^2 = 2kT/m_C + VTURB^2 (1 - n_z^2) +
                  v_tz^2 n_z^2 (vertical turbulence CIV_VTZ, in-plane
                  VTURB)
-      kep        min(static, Sobolev from a thin Keplerian disk's shear
+      kep        min(noshear, Sobolev from a thin Keplerian disk's shear
                  alone, V_K = sqrt(G M / R)): Horne & Marsh (1986)
       kep0       the same with b thermal only (v_turb = 0; Cloudy's
                  total C IV is still its 10 km/s one)

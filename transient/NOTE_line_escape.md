@@ -145,7 +145,7 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
    vturb = 0, 10, 100 km/s (~30 runs, user runs); compare with the
    1-iteration 100 km/s outputs; record tau0 per line.
    Decks: `python3 -m transient.cloudy_rays vtest --out
-   /data2/jhuang/runs/cloudy_rays/vtest` (VTEST_RAYS: t13 and t31 at phi
+   /data2/jhuang/runs/cloudy_rays/test/vtest` (VTEST_RAYS: t13 and t31 at phi
    index 0, 48 arm, 140 quiet, 240 star; plus t16, t24 at 0; `iterate to
    convergence 4`; saves `.tau`). Run with the `run` step on that dir.
    RESULT (2026-10-17, all 30 exited OK; sum over the 10 rays relative to

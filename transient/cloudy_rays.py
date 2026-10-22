@@ -49,6 +49,8 @@ Steps (all with --out DIR):
   civspec  the observed C IV line profiles of the same (civ_profiles.png)
   linespec the same for --line (mg2, hb, he2: escape from each line's own
            emitting layer; <line>_profiles.png)
+  lines    C IV, He II, Mg II, H beta in the fiducial model (Keplerian
+           shear escape at VTURB, Keplerian Doppler; lines_fiducial.png)
   plot     finished rays of one phi column (--iph): their paths over the
            sim's n_H in the meridional plane, and per ray the depth
            profiles of the H alpha, Mg II, C IV emissivities (red, green,
@@ -2035,7 +2037,8 @@ CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
 # vtz300 dropped then)
 
 
-def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None):
+def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None,
+               variants=None):
     """Escape weights of each ray's C IV toward an observer at LOSG_INCL,
     f = beta(tau_obs) / <beta> (see civ_emission_map) for CIV_VARIANTS:
     (names, L, {(inc, variant): f}), f aligned with names and civ_layers
@@ -2056,12 +2059,12 @@ def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None):
     if k0 is None:
         k0 = PIE2_MC * CIV_F * CIV_LAM / np.sqrt(np.pi)
     v2cm = 1e5 / (r0)                 # km/s per r0 -> s^-1
+    variants = CIV_VARIANTS if variants is None else variants
     # directions: Fibonacci sphere
     k = np.arange(N_DIRS) + 0.5
     mu, az = 1 - 2 * k / N_DIRS, np.pi * (1 + 5 ** 0.5) * k
     dirs = np.stack([np.sqrt(1 - mu ** 2) * np.cos(az),
                      np.sqrt(1 - mu ** 2) * np.sin(az), mu], 1)
-    variants = CIV_VARIANTS
     php = sim['ph'][L['iph']]
     vk = np.sqrt(G * CONFIG['MBH_MSUN'] * MSUN / r0) / 1e5 / np.sqrt(L['R'])
 
@@ -2173,14 +2176,15 @@ def line_layers(out, sim, key):
     return names, L
 
 
-def line_escape(out, sim, phys, key):
+def line_escape(out, sim, phys, key, variants=None):
     """civ_escape for line key: C IV from its C3+ column, the others
     from line_layers"""
     if key == 'c4':
-        return civ_escape(out, sim, phys)
+        return civ_escape(out, sim, phys, variants=variants)
     names, L = line_layers(out, sim, key)
     return civ_escape(out, sim, phys, L=L, names=names,
-                      mass=LINE_SPECS[key]['mass'], k0=1 / np.sqrt(np.pi))
+                      mass=LINE_SPECS[key]['mass'], k0=1 / np.sqrt(np.pi),
+                      variants=variants)
 
 
 def civ_emission_map(out, dph, plotonly=False):
@@ -2300,6 +2304,99 @@ PROF_NSUB = 8               # sub-samples per phi cell: one cell spans
                             # ~90 km/s of projected rotation at i = 45 deg
 
 
+def line_profile_data(out, dph, key, variants=None, doppler='sim'):
+    """The binned profiles of line_profiles: (wave [A], {(inc, variant):
+    4 pi dL/dOmega/dlambda}, the rays' median T_e [K], nrays). doppler:
+    'sim' (the sim's velocity field) or 'kep' (Keplerian rotation alone,
+    v = V_K(R) e_phi)."""
+    variants = CIV_VARIANTS if variants is None else variants
+    spec = LINE_SPECS[key]
+    lam0, lc = list(spec['lam']), spec['lam_c']
+    from scipy.interpolate import RegularGridInterpolator
+    from transient.sim_spectrum import vlos_cube
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
+    nph, nr = len(ph), len(sim['r'])
+    names, L, ftab = line_escape(out, sim, phys, key, variants)
+    rays = load_rays(out)
+    geo, _, h = ray_geometry(out, sim, dph)
+    wedges = phi_wedges(out)
+    cols = {'ray': [], 'c': [], 'R': [], 'z': []}
+    cols.update({f'L{m}': [] for m in range(len(lam0))})
+    for i, n in enumerate(names):
+        e = rays[n]['ems']
+        s0, sa, ca, dom = geo(n)
+        ss = s0 + e[:, 0]
+        dd = np.gradient(e[:, 0])
+        Rz, zz = ss * sa / r0, h + ss * ca / r0
+        ir = np.clip(np.searchsorted(rf, Rz) - 1, 0, nr - 1)
+        lr = [np.bincount(ir, e[:, k] * ss ** 2 * dom * dd, nr)
+              for k in spec['cols']]
+        W = sum(lr)
+        cel = np.nonzero(W > 0)[0]
+        w = e[:, list(spec['cols'])].sum(axis=1) * ss ** 2 * dom * dd
+        Rm = np.bincount(ir, w * Rz, nr)[cel] / W[cel]
+        zm = np.bincount(ir, w * zz, nr)[cel] / W[cel]
+        iph = int(n[5:8])
+        if wedges is not None:
+            fr = cell_overlap(phf, *wedges[iph])
+        else:
+            fr = (np.arange(nph) == iph).astype(float)
+        for c in np.nonzero(fr > 0)[0]:
+            a = fr[c] / fr.sum()
+            cols['ray'].append(np.full(len(cel), i))
+            cols['c'].append(np.full(len(cel), c, float))
+            cols['R'].append(Rm)
+            cols['z'].append(zm)
+            for m in range(len(lam0)):
+                cols[f'L{m}'].append(lr[m][cel] * a)
+    P = {k: np.concatenate(v) for k, v in cols.items()}
+    # PROF_NSUB phi points across each cell, each with 1/PROF_NSUB of it
+    c = P['c'].astype(int)
+    sub = (np.arange(PROF_NSUB) + 0.5) / PROF_NSUB
+    P = {k: np.repeat(v, PROF_NSUB) for k, v in P.items()}
+    P['phi'] = (phf[c][:, None] + np.diff(phf)[c][:, None] * sub[None]
+                ).ravel() % (2 * np.pi)
+    for m in range(len(lam0)):
+        P[f'L{m}'] = P[f'L{m}'] / PROF_NSUB
+    P['ray'] = P['ray'].astype(int)
+    q = np.column_stack([P['phi'],
+                         np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
+                                 sim['th'][-1]),
+                         np.clip(np.hypot(P['R'], P['z']), sim['r'][0],
+                                 sim['r'][-1])])
+    php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
+    dl = PROF_DL * lc / CIV_LAM_C        # the same ~48 km/s bins
+    edges = np.arange(lc * (1 - 0.035), lc * (1 + 0.035) + dl, dl)
+    wave = 0.5 * (edges[1:] + edges[:-1])
+    prof = {}
+    vk = np.sqrt(G * CONFIG['MBH_MSUN'] * MSUN / r0) / 1e5 / np.sqrt(P['R'])
+    for inc in LOSG_INCL:
+        if doppler == 'kep':
+            # v = V_K(R) e_phi toward o = (sin i, 0, cos i)
+            v = -vk * np.sin(P['phi']) * np.sin(np.radians(inc))
+        else:
+            _, (r_o, t_o, p_o) = vlos_cube(sim, inc, 0.0)
+            vl = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
+            v = RegularGridInterpolator(
+                (php, sim['th'], sim['r']),
+                np.concatenate([vl[-1:], vl, vl[:1]], 0))(q)
+        for var, _ in variants:
+            f = ftab[(inc, var)][P['ray']]
+            prof[(inc, var)] = sum(
+                np.histogram(l0 * (1 - v / C_KMS), edges,
+                             weights=P[k] * f)[0]
+                for k, l0 in zip([f'L{m}' for m in range(len(lam0))],
+                                 lam0)) / dl
+        print(f"i = {inc:.0f} deg: 4 pi dL/dOmega({key}) " + ', '.join(
+            f"{var} {prof[(inc, var)].sum() * dl:.3g}"
+            for var, _ in variants) + " erg/s; v_los 5-95% "
+            f"{np.percentile(v, 5):.0f} - {np.percentile(v, 95):.0f} km/s")
+    return wave, prof, float(np.median(L['Te'])), len(names)
+
+
 def line_profiles(out, dph, key='c4', plotonly=False):
     """Observed profiles of line key (LINE_SPECS; C IV 1548+1551 by
     default) at LOSG_INCL (observer toward +x)
@@ -2323,88 +2420,12 @@ def line_profiles(out, dph, key='c4', plotonly=False):
     tag = 'civ' if key == 'c4' else key       # civ_*: the C IV files
     npz = os.path.join(out, f'{tag}_profiles.npz')
     if not plotonly:
-        from scipy.interpolate import RegularGridInterpolator
-        from transient.sim_spectrum import vlos_cube
-        sim = load_sim(DUMP)
-        phys = to_physical(sim, CONFIG)
-        r0 = CONFIG['R0_LD'] * LD_CM
-        rf, phf, ph = sim['rf'], sim['phf'], sim['ph']
-        nph, nr = len(ph), len(sim['r'])
-        names, L, ftab = line_escape(out, sim, phys, key)
-        rays = load_rays(out)
-        geo, _, h = ray_geometry(out, sim, dph)
-        wedges = phi_wedges(out)
-        cols = {'ray': [], 'c': [], 'R': [], 'z': []}
-        cols.update({f'L{m}': [] for m in range(len(lam0))})
-        for i, n in enumerate(names):
-            e = rays[n]['ems']
-            s0, sa, ca, dom = geo(n)
-            ss = s0 + e[:, 0]
-            dd = np.gradient(e[:, 0])
-            Rz, zz = ss * sa / r0, h + ss * ca / r0
-            ir = np.clip(np.searchsorted(rf, Rz) - 1, 0, nr - 1)
-            lr = [np.bincount(ir, e[:, k] * ss ** 2 * dom * dd, nr)
-                  for k in spec['cols']]
-            W = sum(lr)
-            cel = np.nonzero(W > 0)[0]
-            w = e[:, list(spec['cols'])].sum(axis=1) * ss ** 2 * dom * dd
-            Rm = np.bincount(ir, w * Rz, nr)[cel] / W[cel]
-            zm = np.bincount(ir, w * zz, nr)[cel] / W[cel]
-            iph = int(n[5:8])
-            if wedges is not None:
-                fr = cell_overlap(phf, *wedges[iph])
-            else:
-                fr = (np.arange(nph) == iph).astype(float)
-            for c in np.nonzero(fr > 0)[0]:
-                a = fr[c] / fr.sum()
-                cols['ray'].append(np.full(len(cel), i))
-                cols['c'].append(np.full(len(cel), c, float))
-                cols['R'].append(Rm)
-                cols['z'].append(zm)
-                for m in range(len(lam0)):
-                    cols[f'L{m}'].append(lr[m][cel] * a)
-        P = {k: np.concatenate(v) for k, v in cols.items()}
-        # PROF_NSUB phi points across each cell, each with 1/PROF_NSUB of it
-        c = P['c'].astype(int)
-        sub = (np.arange(PROF_NSUB) + 0.5) / PROF_NSUB
-        P = {k: np.repeat(v, PROF_NSUB) for k, v in P.items()}
-        P['phi'] = (phf[c][:, None] + np.diff(phf)[c][:, None] * sub[None]
-                    ).ravel() % (2 * np.pi)
-        for m in range(len(lam0)):
-            P[f'L{m}'] = P[f'L{m}'] / PROF_NSUB
-        P['ray'] = P['ray'].astype(int)
-        q = np.column_stack([P['phi'],
-                             np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
-                                     sim['th'][-1]),
-                             np.clip(np.hypot(P['R'], P['z']), sim['r'][0],
-                                     sim['r'][-1])])
-        php = np.concatenate([[ph[-1] - 2 * np.pi], ph, [ph[0] + 2 * np.pi]])
-        dl = PROF_DL * lc / CIV_LAM_C        # the same ~48 km/s bins
-        edges = np.arange(lc * (1 - 0.035), lc * (1 + 0.035) + dl, dl)
-        wave = 0.5 * (edges[1:] + edges[:-1])
-        prof = {}
-        for inc in LOSG_INCL:
-            _, (r_o, t_o, p_o) = vlos_cube(sim, inc, 0.0)
-            vl = phys['vr'] * r_o + phys['vt'] * t_o + phys['vp'] * p_o
-            v = RegularGridInterpolator(
-                (php, sim['th'], sim['r']),
-                np.concatenate([vl[-1:], vl, vl[:1]], 0))(q)
-            for var, _ in CIV_VARIANTS:
-                f = ftab[(inc, var)][P['ray']]
-                prof[(inc, var)] = sum(
-                    np.histogram(l0 * (1 - v / C_KMS), edges,
-                                 weights=P[k] * f)[0]
-                    for k, l0 in zip([f'L{m}' for m in range(len(lam0))],
-                                     lam0)) / dl
-            print(f"i = {inc:.0f} deg: 4 pi dL/dOmega({key}) " + ', '.join(
-                f"{var} {prof[(inc, var)].sum() * dl:.3g}"
-                for var, _ in CIV_VARIANTS) + " erg/s; v_los 5-95% "
-                f"{np.percentile(v, 5):.0f} - {np.percentile(v, 95):.0f} km/s")
+        wave, prof, _, nrays = line_profile_data(out, dph, key)
         np.savez(npz, wave=wave,
                  incl=np.array(LOSG_INCL),
                  variants=np.array([v for v, _ in CIV_VARIANTS]),
                  prof=np.array([[prof[(i, v)] for v, _ in CIV_VARIANTS]
-                                for i in LOSG_INCL]), nrays=len(names))
+                                for i in LOSG_INCL]), nrays=nrays)
     d = np.load(npz)
     wave, variants = d['wave'], [str(v) for v in d['variants']]
     from scipy.ndimage import gaussian_filter1d
@@ -2460,6 +2481,77 @@ def line_profiles(out, dph, key='c4', plotonly=False):
     plt.close(fig)
     print(f"wrote {path}" + (f": {int(d['nrays'])} rays"
                               if 'nrays' in d.files else ''))
+
+
+FID_LINES = ('c4', 'he2', 'mg2', 'hb')
+FID_COLORS = dict(c4='dodgerblue', he2='darkviolet', mg2='orangered',
+                  hb='k')
+FID_LABELS = dict(c4=r'\textbf{C\,IV\,1549}', he2=r'\textbf{He\,II\,1640}',
+                  mg2=r'\textbf{Mg\,II\,2800}', hb=r'\textbf{H}$\bm{\beta}$')
+
+
+def lines_fiducial(out, dph, plotonly=False):
+    """All lines in the fiducial model, one figure: escape weighted with
+    Keplerian shear at v_turb = VTURB (variant 'kep', consistent with
+    Cloudy's totals) and Doppler-shifted by Keplerian rotation alone (v =
+    V_K(R) e_phi: the sim's non-Keplerian motions come from its inflated
+    H/R), each line convolved with its local width (thermal at the rays'
+    median T_e + VTURB) and the PROF_FWHM instrument. Velocity about each
+    line's lam_c (doublets: f-weighted centre), each normalised to its
+    own peak; rows LOSG_INCL. <out>/lines_fiducial.npz (unsmoothed),
+    plots/lines_fiducial.png."""
+    plt = plot_style()
+    from scipy.ndimage import gaussian_filter1d
+    npz = os.path.join(out, 'lines_fiducial.npz')
+    if not plotonly:
+        save = {}
+        for key in FID_LINES:
+            wave, prof, te, nrays = line_profile_data(
+                out, dph, key, [('kep', None)], doppler='kep')
+            save[f'wave_{key}'] = wave
+            save[f'prof_{key}'] = np.array([prof[(i, 'kep')]
+                                            for i in LOSG_INCL])
+            save[f'te_{key}'] = te
+        np.savez(npz, incl=np.array(LOSG_INCL), nrays=nrays, **save)
+    d = np.load(npz)
+    n = len(d['incl'])
+    fig, axs = plt.subplots(n, 1, sharex=True, figsize=(12, 6.0 * n))
+    axs = np.atleast_1d(axs)
+    for key in FID_LINES:
+        spec = LINE_SPECS[key]
+        wave, P = d[f'wave_{key}'], d[f'prof_{key}']
+        v = (wave / spec['lam_c'] - 1) * C_KMS / 1e3        # [10^3 km/s]
+        dv = np.median(np.diff(wave)) / spec['lam_c'] * C_KMS
+        b = np.sqrt(2 * KB * float(d[f'te_{key}']) / (spec['mass'] * MH)
+                    / 1e10 + VTURB ** 2)                   # [km/s]
+        sig = np.sqrt((PROF_FWHM / 2.3548) ** 2 + b ** 2 / 2) / dv
+        for j in range(n):
+            p = gaussian_filter1d(P[j] * wave, sig, mode='constant')
+            axs[j].plot(v, p / p.max(), color=FID_COLORS[key], lw=2,
+                        label=FID_LABELS[key], drawstyle='steps-mid')
+    for j, (ax, inc) in enumerate(zip(axs, d['incl'])):
+        ax.axvline(0, color='0.6', lw=1, ls=':')
+        ax.set_xlim(-7, 7)
+        ax.set_ylim(0, 1.12)
+        ax.text(0.97, 0.92, r'$\bm{i = %d^\circ}$' % inc
+                + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
+                transform=ax.transAxes, ha='right', va='top', fontsize=21)
+        ax.minorticks_on()
+        ax.tick_params(which='both', direction='in', labelsize=19,
+                       right=True, top=True)
+        ax.tick_params(which='major', length=10, width=2)
+        ax.tick_params(which='minor', length=5, width=1.5)
+        if j == n // 2:
+            ax.set_ylabel(r'$\lambda L_\lambda$\textbf{ / peak}')
+    axs[0].legend(fontsize=19, frameon=False, loc='upper left')
+    axs[-1].set_xlabel(r'$v\ [10^3\,\rm km\,s^{-1}]$')
+    fig.tight_layout(h_pad=0.2)
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'lines_fiducial.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}")
 
 
 def velocity_maps(out, iphs, labels):
@@ -2557,7 +2649,7 @@ def main():
     ap.add_argument('step', choices=['write', 'run', 'extract', 'plot',
                                      'faceon', 'spectrum', 'vmaps',
                                      'losgrad', 'civtau', 'civmap',
-                                     'civspec', 'linespec',
+                                     'civspec', 'linespec', 'lines',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -2709,6 +2801,9 @@ def main():
 
     elif a.step == 'linespec':
         line_profiles(a.out, a.dph, a.line, a.plotonly)
+
+    elif a.step == 'lines':
+        lines_fiducial(a.out, a.dph, a.plotonly)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

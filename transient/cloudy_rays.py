@@ -2024,6 +2024,8 @@ CIV_LABELS = dict(
        for v in CIV_VTZ})
 CIV_COLORS = dict(noshear='k', sim='C3', vtz100='C0', vtz300='C2', kep='C1',
                   kep0='C4')
+CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
+# ('static': the no-shear variant's name in files saved before 2026-10-22)
 
 
 def civ_escape(out, sim, phys):
@@ -2222,8 +2224,9 @@ def civ_profiles(out, dph, plotonly=False):
     (civ_escape), Doppler-shifted by the sim velocity along the line of
     sight at that (phi cell, R, z): lambda = lambda0 (1 - v_los/c), v_los
     > 0 approaching. No local broadening (thermal + turbulent << the
-    PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A],
-    saved to <out>/civ_profiles.npz and plotted from it (plotonly: replot
+    PROF_DL bins and the rotation). 4 pi dL/dOmega/dlambda [erg/s/A] (the
+    isotropic-equivalent L_lambda = 4 pi D^2 F_lambda; plotted as lambda
+    L_lambda), saved to <out>/civ_profiles.npz and plotted from it (plotonly: replot
     only) to plots/civ_profiles.png."""
     plt = plot_style()
     npz = os.path.join(out, 'civ_profiles.npz')
@@ -2315,7 +2318,7 @@ def civ_profiles(out, dph, plotonly=False):
                             figsize=(8 * len(d['incl']), 6.6))
     for j, (ax, inc) in enumerate(zip(np.atleast_1d(axs), d['incl'])):
         for k, var in enumerate(variants):
-            ax.plot(wave, d['prof'][j, k] / 1e39,
+            ax.plot(wave, wave * d['prof'][j, k] / 1e42,
                     color=CIV_COLORS.get(var, '0.5'), lw=2,
                     label=CIV_LABELS.get(var, var), drawstyle='steps-mid')
         for l0 in lam0:
@@ -2327,8 +2330,8 @@ def civ_profiles(out, dph, plotonly=False):
         ax.set_xlabel(r'$\lambda_{\rm rest}\,[\rm\AA]$')
         ax.tick_params(which='both', direction='in', labelsize=19)
         if j == 0:
-            ax.set_ylabel(r'$4\pi\,dL/d\Omega\,d\lambda\ '
-                          r'[10^{39}\,\rm erg\,s^{-1}\,\AA^{-1}]$')
+            ax.set_ylabel(r'$\lambda L_\lambda\ [10^{42}\,\rm erg\,'
+                          r's^{-1}]$ \textbf{(isotropic equiv.)}')
             ax.legend(fontsize=17, frameon=False, loc='upper left')
     fig.tight_layout()
     pdir = os.path.join(out, 'plots')
@@ -2336,7 +2339,8 @@ def civ_profiles(out, dph, plotonly=False):
     path = os.path.join(pdir, 'civ_profiles.png')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f"wrote {path}: {int(d['nrays'])} rays")
+    print(f"wrote {path}" + (f": {int(d['nrays'])} rays"
+                              if 'nrays' in d.files else ''))
 
 
 def velocity_maps(out, iphs, labels):

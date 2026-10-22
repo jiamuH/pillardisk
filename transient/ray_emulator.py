@@ -11,8 +11,12 @@ ray (dlaw table). The ray "lands" where n_H first exceeds N_SURF:
   ln_p1, ln_p3   log n_H 0.01 and 0.03 r0 past it
   lN_post    log column from there to the ray's end
   lnmax      log of the highest n_H along the ray
-  alpha, R_skin, z_skin   direction from the lamp, landing point [r0]
+  sin_graze  sine of the angle between the ray and the skin there (|ray .
+             grad n_H| / |grad n_H|, from the sim): unlike the direction
+             from the lamp, comparable between lamp heights
+  R_skin, z_skin   the landing point [r0]
   lands      1 if n_H ever exceeds N_SURF (else the skin is the n_H peak)
+  h          the lamp height [r0]
 Targets (from the run's ray cache), per line (Ha, Hb, C IV, Mg II, He II):
   lL_<line>  log sum 4 pi j s^2 ds [erg/s/sr x 4 pi]
   dc_<line>  its emissivity-weighted point minus the skin [r0]
@@ -22,26 +26,35 @@ Targets (from the run's ray cache), per line (Ha, Hb, C IV, Mg II, He II):
 in a column are correlated) and compares, ray by ray and per held-out column
 total, the emulator (one gradient-boosted tree model per target) with a
 baseline that interpolates the two neighbouring training columns in alpha
-and phi.
+and phi. `heights` trains on all but one lamp height (HEIGHT_RUNS) and
+predicts the one left out: can a height be emulated from the others?
 
 Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
-(cap the tree models' threads, e.g. OMP_NUM_THREADS=8, on a busy machine)
+      python3 -m transient.ray_emulator heights
+(the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
 import argparse
 import os
 
-import numpy as np
+EMU_THREADS = 8
+os.environ.setdefault('OMP_NUM_THREADS', str(EMU_THREADS))
 
-from transient.cloudy_rays import (load_rays, ray_geometry, N_SURF,
-                                   plot_style)
-from transient.sim_spectrum import CONFIG, LD_CM
+import numpy as np                                        # noqa: E402
+
+from transient.cloudy_rays import (load_rays, N_SURF, plot_style,  # noqa
+                                   density_interp, DUMP)
+from transient.sim_spectrum import (CONFIG, LD_CM, load_sim,  # noqa: E402
+                                    to_physical)
 
 LINES = dict(ha=(1,), hb=(2,), c4=(3, 4), mg2=(5, 6), he2=(7,))
 LINE_TEX = dict(ha=r'H$\bm{\alpha}$', hb=r'H$\bm{\beta}$', c4=r'C\,IV',
                 mg2=r'Mg\,II', he2=r'He\,II\,1640')
 FEATURES = ('lphi_skin', 'lN_pre', 'lL_skin', 'ln_p1', 'ln_p3', 'lN_post',
-            'lnmax', 'alpha', 'R_skin', 'z_skin', 'lands')
+            'lnmax', 'sin_graze', 'R_skin', 'z_skin', 'lands', 'h')
+RUNS = '/data2/jhuang/runs/cloudy_rays'
+HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
+               f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
 GROUP_FOLDS = 8
 
 
@@ -84,6 +97,25 @@ def ray_features(lphi, s, n, alpha, h, r0):
                 lands=float(len(hit) > 0)), sk
 
 
+def sin_graze(sim, itp, phi, alpha, h, sk_r0, eps=0.005):
+    """|ray . grad n_H| / |grad n_H| at the landing point (sk_r0 [r0]
+    from the lamp at z = h along (alpha, phi)), log n_H differenced over
+    +- eps r0 in x, y, z"""
+    d = np.array([np.sin(alpha) * np.cos(phi), np.sin(alpha) * np.sin(phi),
+                  np.cos(alpha)])
+    p = np.array([0.0, 0.0, h]) + sk_r0 * d
+    pts = p[None, :] + eps * np.concatenate([np.eye(3), -np.eye(3)])
+    r = np.linalg.norm(pts, axis=1)
+    q = np.column_stack([np.mod(np.arctan2(pts[:, 1], pts[:, 0]), 2 * np.pi),
+                         np.clip(np.arccos(pts[:, 2] / r), sim['th'][0],
+                                 sim['th'][-1]),
+                         np.clip(r, sim['r'][0], sim['r'][-1])])
+    v = itp(q)
+    g = (v[:3] - v[3:]) / (2 * eps)
+    gn = np.linalg.norm(g)
+    return float(abs(g @ d) / gn) if gn > 0 else 0.0
+
+
 def ray_targets(e, s0, sk, r0):
     """the targets of one ray from its .ems (depth, 4 pi j columns)"""
     d = e[:, 0]
@@ -111,7 +143,10 @@ def build_table(out):
     path = os.path.join(out, 'emulator', 'table.npz')
     if os.path.exists(path):
         d = np.load(path)
-        return {k: d[k] for k in d.files}
+        if all(k in d.files for k in FEATURES):
+            return {k: d[k] for k in d.files}
+    sim = load_sim(DUMP)
+    itp = density_interp(sim, to_physical(sim, CONFIG))
     m = np.load(os.path.join(out, 'rays_meta.npz'))
     h, r0 = float(m['hlamp_r0']), CONFIG['R0_LD'] * LD_CM
     meta = {str(n): (int(p), float(a), float(d0)) for n, p, a, d0 in
@@ -124,6 +159,8 @@ def build_table(out):
         iph, al, _ = meta[name]
         lphi, s, n = read_deck(os.path.join(out, 'rays', name + '.in'))
         f, sk = ray_features(lphi, s, n, al, h, r0)
+        f['sin_graze'] = sin_graze(sim, itp, sim['ph'][iph], al, h, sk / r0)
+        f['h'] = h
         t = ray_targets(ray['ems'], s[0], sk, r0)
         rows.append(dict(name=name, iph=iph, **f, **t))
     tab = {k: np.array([r[k] for r in rows]) for k in rows[0]}
@@ -250,17 +287,70 @@ def validate(out, max_iter=400):
     print(f"wrote {path}")
 
 
+def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
+    """Leave one lamp height out: for each run in runs (one lamp height
+    each), train on all the others' rays and predict its rays; prints the
+    errors per target and of the run's total luminosity per line (what its
+    maps and spectra sum, weighted by each ray's solid angle)"""
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    runs = [r for r in runs if os.path.exists(os.path.join(r, 'rays_meta.npz'))]
+    tabs = [build_table(r) for r in runs]
+    doms = []
+    for r, t in zip(runs, tabs):
+        m = np.load(os.path.join(r, 'rays_meta.npz'))
+        dom = dict(zip(m['name'].astype(str), m['domega']))
+        doms.append(np.array([dom[str(n)] for n in t['name']]))
+    targets = [k for k in tabs[0] if k.split('_')[0] in ('lL', 'dc', 'lw')
+               and k not in FEATURES]
+    print(f"leave-one-height-out over {len(runs)} runs: " + ', '.join(
+        f"h = {float(t['h'][0]):.2f} r0 ({len(t['h'])} rays)" for t in tabs))
+    for i, (r, t) in enumerate(zip(runs, tabs)):
+        rest = [tt for j, tt in enumerate(tabs) if j != i]
+        X = np.column_stack([np.concatenate([tt[k] for tt in rest])
+                             for k in FEATURES])
+        Xt = np.column_stack([t[k] for k in FEATURES])
+        lo, hi = np.percentile(X, 1, axis=0), np.percentile(X, 99, axis=0)
+        cov = [j for j, k in enumerate(FEATURES) if k != 'h']  # h always is
+        outside = np.mean(((Xt < lo) | (Xt > hi))[:, cov].any(axis=1))
+        print(f"== held out h = {float(t['h'][0]):.2f} r0 ({r}); "
+              f"rays with a feature outside the others' 1-99%: "
+              f"{outside:.0%}")
+        for k in targets:
+            y = np.concatenate([tt[k] for tt in rest])
+            ok = np.isfinite(y)
+            mdl = HistGradientBoostingRegressor(max_iter=max_iter,
+                                                learning_rate=0.05,
+                                                random_state=0)
+            mdl.fit(X[ok], y[ok])
+            p = mdl.predict(Xt)
+            e = np.abs(p - t[k])[np.isfinite(t[k])]
+            line = (f"  {k:8s} median {np.median(e):6.3f} 84% "
+                    f"{np.percentile(e, 84):6.3f} "
+                    f"{'dex' if k.startswith('l') else 'r0'}")
+            if k.startswith('lL_'):
+                s_ = np.isfinite(t[k])
+                tot = np.log10(np.sum(10 ** t[k][s_] * doms[i][s_]))
+                pt = np.log10(np.sum(10 ** p[s_] * doms[i][s_]))
+                line += f";  run total {pt - tot:+.3f} dex"
+            print(line, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('step', choices=['table', 'validate'])
-    ap.add_argument('--out', required=True)
+    ap.add_argument('step', choices=['table', 'validate', 'heights'])
+    ap.add_argument('--out', default=None,
+                    help='table / validate: the run directory')
+    ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
+                    help='heights: one run per lamp height')
     ap.add_argument('--max-iter', type=int, default=400,
                     help='boosting iterations per target model')
     a = ap.parse_args()
     if a.step == 'table':
         build_table(a.out)
-    else:
+    elif a.step == 'validate':
         validate(a.out, a.max_iter)
+    else:
+        validate_heights(a.runs, a.max_iter)
 
 
 if __name__ == '__main__':

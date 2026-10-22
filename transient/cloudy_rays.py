@@ -2173,13 +2173,16 @@ def civ_emission_map(out, dph):
 
 CIV_DOUBLET = ((3, 1548.19), (4, 1550.77))   # (.ems column, rest [A])
 PROF_DL = 0.25              # [A] profile bin (~50 km/s)
+PROF_NSUB = 8               # sub-samples per phi cell: one cell spans
+                            # ~90 km/s of projected rotation at i = 45 deg
 
 
 def civ_profiles(out, dph):
     """Observed C IV 1548+1551 profiles at LOSG_INCL (observer toward +x)
     for CIV_VARIANTS: each ray's emission, binned into the sim's r cells
     (luminosity-weighted R, z per cell) and spread over its column's phi
-    wedge (cell overlap, as faceon_surface), times its escape weight f
+    wedge (cell overlap, as faceon_surface; PROF_NSUB points across each
+    cell, so the rotation shift varies within it), times its escape weight f
     (civ_escape), Doppler-shifted by the sim velocity along the line of
     sight at that (phi cell, R, z): lambda = lambda0 (1 - v_los/c), v_los
     > 0 approaching. No local broadening (thermal + turbulent << the
@@ -2220,13 +2223,22 @@ def civ_profiles(out, dph):
         for c in np.nonzero(fr > 0)[0]:
             a = fr[c] / fr.sum()
             cols['ray'].append(np.full(len(cel), i))
-            cols['c'].append(np.full(len(cel), c))
+            cols['c'].append(np.full(len(cel), c, float))
             cols['R'].append(Rm)
             cols['z'].append(zm)
             cols['L0'].append(lr[0][cel] * a)
             cols['L1'].append(lr[1][cel] * a)
     P = {k: np.concatenate(v) for k, v in cols.items()}
-    q = np.column_stack([ph[P['c']],
+    # PROF_NSUB phi points across each cell, each with 1/PROF_NSUB of it
+    c = P['c'].astype(int)
+    sub = (np.arange(PROF_NSUB) + 0.5) / PROF_NSUB
+    P = {k: np.repeat(v, PROF_NSUB) for k, v in P.items()}
+    P['phi'] = (phf[c][:, None] + np.diff(phf)[c][:, None] * sub[None]
+                ).ravel() % (2 * np.pi)
+    P['L0'] = P['L0'] / PROF_NSUB
+    P['L1'] = P['L1'] / PROF_NSUB
+    P['ray'] = P['ray'].astype(int)
+    q = np.column_stack([P['phi'],
                          np.clip(np.arctan2(P['R'], P['z']), sim['th'][0],
                                  sim['th'][-1]),
                          np.clip(np.hypot(P['R'], P['z']), sim['r'][0],

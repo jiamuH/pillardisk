@@ -36,7 +36,7 @@ OPAL_TABLE = 73                         # X = 0.70, Z = 0.02
 METALS = ((0.02, 'g7.02.tron', 73, '-', r'$\bm{Z_\odot}$'),
           (0.10, 'g7.1.tron', 78, '--', r'$\bm{5\,Z_\odot}$'))
 T_JOIN = 4.0                            # log T: F05 below, OPAL above
-LOG_NH = (10, 12, 14)                   # n_H [cm^-3] (components plot)
+LOG_NH = (13, 14, 15)                   # n_H [cm^-3] (components plot)
 # main plot: a real disk at ~2 ld around 1e7 M_sun (midplane n_H ~ 6e14;
 # photosphere, where winds launch, ~1e13 - 1e14)
 LOG_NH_REAL = (13, 14, 15)
@@ -257,7 +257,7 @@ def plot_components():
             ax.axvline(t, color='0.6', lw=1.2, ls='--')
         ax.text(0.03, 0.92, r'$\bm{n_{\rm H} = 10^{%d}}\,\rm\bf cm^{-3}$' % n,
                 transform=ax.transAxes, va='top', fontsize=21)
-        ax.set_ylim(1e-6, 1e3)
+        ax.set_ylim(1e-5, 3e2)
         ax.minorticks_on()
         ax.tick_params(which='both', direction='in', labelsize=19,
                        top=True, right=True)

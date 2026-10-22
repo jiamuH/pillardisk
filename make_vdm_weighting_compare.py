@@ -94,9 +94,10 @@ def _build_disk_with_n100(config_file):
     modify_T = bool(pillars_cfg.get('modify_temp_pillar', True))
     temp_factor = float(pillars_cfg.get('temp_factor_pillar', 1.0))
 
-    np.random.seed(42)  # reproducibility for the comparison plot
-    r_pillars = np.clip(np.random.normal(r_mean, sig_r, N), rmin, disk.rout)
-    phi_pillars = np.random.uniform(0, 2 * np.pi, N)
+    from pillardisk.pillar_disk import PILLAR_SEED
+    rng = np.random.default_rng(PILLAR_SEED)  # same pillars as Figures 6 and 8
+    r_pillars = np.clip(rng.normal(r_mean, sig_r, N), max(disk.rin, rmin), disk.rout)
+    phi_pillars = rng.uniform(0, 2 * np.pi, N)
     for r_p, phi_p in zip(r_pillars, phi_pillars):
         disk.add_pillar(r_pillar=float(r_p), phi_pillar=float(phi_p),
                         height=h_p, sigma_r=sigma_r_p, sigma_phi=sigma_phi_p,

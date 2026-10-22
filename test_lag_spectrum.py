@@ -12,10 +12,12 @@ config = load_config('config_line.yaml')
 wavelengths = np.logspace(np.log10(1000), np.log10(10000), 60)
 
 
-BETA = 50.0  # bowl steepness — high beta keeps outer edge out of shadow
+# Bowl steepness: taken from config_line.yaml (beta = 10), the same bowl as
+# the emission-line figures. Until 2026-10-04 this script overrode it with
+# beta = 50; that version is archived in plots/archive/lag_beta50_2026-10-04/.
 
 # Ripple-disc reference (axisymmetric Starkey+23-style structure).
-# Because our bowl uses a steep beta (h_bowl ~ 0 except near r_out), we
+# Because our bowl is nearly flat except near r_out, we
 # add the ripple ADDITIVELY on top of the bowl, like the pillars, with
 # amplitude in light-days. Set h_ripple = 0 to disable.
 # Parameters otherwise follow bowl.for / Starkey+23 conventions.
@@ -107,7 +109,6 @@ def build_disk(hlamp=None):
     temp_params = config.get('temperature', {}).copy()
     lamp_params = config.get('lamp', {}).copy()
     obs_params = config.get('observation', {}).copy()
-    temp_params['beta'] = BETA
     if hlamp is not None:
         lamp_params['hlamp'] = hlamp
     float_params = ['rin', 'rout', 'h1', 'r0', 'beta', 'tv1', 'alpha',
@@ -864,5 +865,6 @@ if __name__ == '__main__':
     else:
         data = run_scan()
 
-    plot_all(data)
-    plot_sed(data)
+    # Only the sigma_phi response map is a paper figure (Figure 11); the SED
+    # plot and the other scans' response maps are not used, so skip them.
+    plot_all(data, response_map_scans=['vary_sp'])

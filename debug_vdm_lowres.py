@@ -10,7 +10,7 @@ import tempfile
 
 import yaml
 
-from pillardisk.regenerate_figures import _run_cloudy_vdm
+from pillardisk.make_disc_figures import _run_cloudy_vdm
 
 CONFIG = 'config_line.yaml'
 CACHE = 'plots/vdm_manual_pillars_maps_lowres.npz'

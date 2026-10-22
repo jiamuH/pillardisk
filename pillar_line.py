@@ -859,12 +859,14 @@ def main(config_file='config_line.yaml'):
         
         # Generate random pillar positions
         # r: Gaussian distribution, clipped to disk range
-        r_pillar_random = np.random.normal(r_mean, sig_r, N_pillar)
+        from pillardisk.pillar_disk import PILLAR_SEED
+        rng = np.random.default_rng(PILLAR_SEED)
+        r_pillar_random = rng.normal(r_mean, sig_r, N_pillar)
         rmin_eff = max(disk.rin, rmin) if rmin is not None else disk.rin
         r_pillar_random = np.clip(r_pillar_random, rmin_eff, disk.rout)
         
         # phi: Uniform distribution from 0 to 2*pi
-        phi_pillar_random = np.random.uniform(0, 2*np.pi, N_pillar)
+        phi_pillar_random = rng.uniform(0, 2*np.pi, N_pillar)
         
         # Convert boolean strings if needed
         def convert_bool(val):

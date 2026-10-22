@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate just fig_vdm_frame.png (responsivity-weighted multi-line VDM).
 
-Equivalent to step 8 of regenerate_figures.py, but skips steps 1-7
+Equivalent to step 8 of make_disc_figures.py, but skips steps 1-7
 when only the VDM colormap needs refreshing.
 
 The 100 pillars are drawn with a fixed random seed, and the maps are cached
@@ -15,7 +15,7 @@ import argparse
 import os
 import shutil
 
-from pillardisk.regenerate_figures import _make_figdir, make_config, move
+from pillardisk.make_disc_figures import _make_figdir, make_config, move
 
 
 SEED = 1

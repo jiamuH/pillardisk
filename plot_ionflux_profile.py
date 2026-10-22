@@ -84,7 +84,7 @@ Phi_visc_exact = np.array([
     for T_v in T_visc
 ])
 
-Phi_total = Phi_lamp + Phi_visc_exact
+Phi_total = Phi_lamp + Phi_visc      # lamp + Wien tail (Eq. B1), as in the paper
 
 i_tmax = np.argmax(T_visc)
 T_visc_max = T_visc[i_tmax]
@@ -101,13 +101,10 @@ logT = np.log10(np.maximum(Phi_total, 1e-30))
 ax.semilogx(r, logL, color='royalblue', lw=3, alpha=0.9,
             label=r'$\Phi_{\rm irrad}~(\rm lamp)$')
 ax.semilogx(r, logV, color='orangered', lw=3, ls='--', alpha=0.9,
-            label=r'$\Phi_{\rm visc}~(\nu_0^2\,kT/h)$')
-logV_kdh = np.log10(np.maximum(Phi_visc_kdh, 1e-30))
-ax.semilogx(r, logV_kdh, color='darkviolet', lw=3, ls=':', alpha=0.9,
-            label=r'$\Phi_{\rm visc}~(\nu_0\,(kT/h)^2)$')
-logV_exact = np.log10(np.maximum(Phi_visc_exact, 1e-30))
-ax.semilogx(r, logV_exact, color='black', lw=2.5, ls='-', alpha=0.85,
-            label=r'$\Phi_{\rm visc}~(\rm exact)$')
+            label=r'$\Phi_{\rm visc}~(\rm Wien~tail)$')
+# The paper figure shows only the Wien tail of Eq. (B1). KDH's earlier
+# (R-J + Wien hybrid) form and the exact integral are kept above as
+# Phi_visc_kdh and Phi_visc_exact for checking, but not plotted.
 ax.semilogx(r, logT, color='black', lw=2.5, ls=':', alpha=0.9,
             label=r'$\Phi_{\rm total}$')
 
@@ -117,23 +114,24 @@ XMIN = 1.5e-3
 # Cloudy grid band log Phi in [15, 21]
 ax.axhspan(15, 21, color='forestgreen', alpha=0.12)
 ax.text(0.015, 18.0, r'$\rm Cloudy~grid~range$',
-        color='forestgreen', fontsize=16, ha='left', va='center',
+        color='forestgreen', fontsize=20, ha='left', va='center',
         bbox=dict(facecolor='white', alpha=0.7, edgecolor='none',
                   boxstyle='round,pad=0.3'))
 
 # r < r_ISCO band
 ax.axvspan(XMIN, r_in, color='gray', alpha=0.25)
 ax.text(np.sqrt(XMIN * r_in), 0.5 * (YMIN + YMAX),
-        r'$\rm r < r_{ISCO}$',
-        color='dimgray', fontsize=15, rotation=90, ha='center', va='center')
+        r'$r < r_{\rm ISCO}$',
+        color='dimgray', fontsize=20, rotation=90, ha='center', va='center')
 
 # T_visc,max annotation: point to peak of Phi_visc, place text in empty upper-right
 i_peak = np.argmax(Phi_visc)
 T_at_peak = T_visc[i_peak]
-ax.annotate(rf'$T_{{\rm visc,max}} \approx {T_at_peak:,.0f}~\rm K$',
+T_label = f'{round(T_at_peak, -3):,.0f}'.replace(',', '{,}')   # no math space after comma
+ax.annotate(rf'$T_{{\rm visc,max}} \approx {T_label}~\rm K$',
             xy=(r[i_peak], logV[i_peak]),
-            xytext=(np.sqrt(0.01 * 0.1), 23.0),
-            color='orangered', fontsize=16, ha='center',
+            xytext=(0.27, 25.5),
+            color='orangered', fontsize=20, ha='center', va='center',
             arrowprops=dict(arrowstyle='->', color='orangered', lw=1.5),
             bbox=dict(facecolor='white', alpha=0.7, edgecolor='none',
                       boxstyle='round,pad=0.3'))
@@ -142,13 +140,13 @@ ax.annotate(rf'$T_{{\rm visc,max}} \approx {T_at_peak:,.0f}~\rm K$',
 ax.axvline(R_PILLAR_MIN, color='purple', ls='-.', lw=2, alpha=0.8)
 ax.text(R_PILLAR_MIN * 0.9, 22.5,
         r'$r_{\rm min}^{\rm pillar}$',
-        color='purple', fontsize=15, rotation=90, ha='right', va='center')
+        color='purple', fontsize=20, rotation=90, ha='right', va='center')
 
 # Disc outer edge r_out
 ax.axvline(R_OUT, color='purple', ls='-.', lw=2, alpha=0.8)
 ax.text(R_OUT * 0.9, 22.5,
         r'$r_{\rm out}$',
-        color='purple', fontsize=15, rotation=90, ha='right', va='center')
+        color='purple', fontsize=20, rotation=90, ha='right', va='center')
 
 ax.set_xlim(XMIN, ROUT)
 ax.set_ylim(YMIN, YMAX)
@@ -165,7 +163,7 @@ ax.minorticks_on()
 ax2 = ax.twiny()
 ax2.set_xscale('log')
 ax2.set_xlim(XMIN / r_g_ld, ROUT / r_g_ld)
-ax2.set_xlabel(r'$\rm Radius~[r_g]$')
+ax2.set_xlabel(r'${\rm Radius}~[r_{\rm g}]$')
 ax2.tick_params(which='major', length=8, width=1.5, direction='in')
 ax2.tick_params(which='minor', length=4, width=1, direction='in')
 ax2.minorticks_on()
@@ -173,11 +171,9 @@ ax2.minorticks_on()
 handles, labels = ax.get_legend_handles_labels()
 order = [labels.index(r'$\Phi_{\rm total}$'),
          labels.index(r'$\Phi_{\rm irrad}~(\rm lamp)$'),
-         labels.index(r'$\Phi_{\rm visc}~(\rm exact)$'),
-         labels.index(r'$\Phi_{\rm visc}~(\nu_0^2\,kT/h)$'),
-         labels.index(r'$\Phi_{\rm visc}~(\nu_0\,(kT/h)^2)$')]
+         labels.index(r'$\Phi_{\rm visc}~(\rm Wien~tail)$')]
 ax.legend([handles[i] for i in order], [labels[i] for i in order],
-          loc='lower left', fontsize=13, framealpha=0.95)
+          loc='lower left', fontsize=16, framealpha=0.95)
 
 os.makedirs('plots', exist_ok=True)
 out = 'plots/fig_ionflux_profile.png'

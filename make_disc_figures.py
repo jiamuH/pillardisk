@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Regenerate all paper figures with updated NGC 5548 parameters.
+Make the disc figures, which need no Cloudy line emissivity:
+  Figure 2  3D disc geometry (single pillar and 100 pillars)
+  Figure 1  face-on ionizing-flux map, 100 pillars (and the single-pillar version)
+
+The figures that use the Cloudy line emissivity are made by
+make_line_figures.py. This module also holds the helpers (_make_figdir,
+make_config, move, _run_cloudy_vdm) that the make_* scripts import.
 
 Usage:
-    python3 regenerate_figures.py [config_line.yaml]
-
-Calls the existing main() functions from each module.
+    python3 make_disc_figures.py [config_line.yaml]
 """
 
 import os
@@ -205,14 +209,14 @@ def main(config_file='config_line.yaml'):
 
     # ── 1. 3D geometry two-panel ──────────────────────────
     print('\n' + '='*50)
-    print(' [1/9] 3D geometry two-panel figure')
+    print(' [1/3] 3D geometry two-panel figure')
     print('='*50)
     from plot_geometry_figures import main as geom_main
     geom_main(config_file=config_file, outdir=FIGDIR)
 
     # ── 2. Single-pillar ionflux (t=0 face-on) ───────────
     print('\n' + '='*50)
-    print(' [2/9] Single-pillar ionflux map (plot-only)')
+    print(' [2/3] Single-pillar ionflux map (plot-only)')
     print('='*50)
     tmp = make_config(config_file, make_many=False)
     try:
@@ -225,7 +229,7 @@ def main(config_file='config_line.yaml'):
 
     # ── 3. N100 ionflux (t=0 face-on) ────────────────────
     print('\n' + '='*50)
-    print(' [3/9] 100-pillar ionflux map (plot-only)')
+    print(' [3/3] 100-pillar ionflux map (plot-only)')
     print('='*50)
     tmp = make_config(config_file, make_many=True)
     try:
@@ -235,78 +239,14 @@ def main(config_file='config_line.yaml'):
     move('plots/geometry_t0_faceon.png', f'{FIGDIR}/fig_ionflux_N100.png')
     cleanup_geometry_snapshots()
 
-    # ── 4. Single-pillar (two-pillar) RGB / line-emission map ─
-    # Disabled to save time: the single/two-pillar RGB map is not used
-    # in the current paper figures — only the 2-pillar VDM (step 6) and
-    # the 100-pillar RGB (step 5) are kept. Re-enable if needed.
-    # print('\n' + '='*50)
-    # print(' [4/9] Single-pillar RGB map (pillar_line_cloudy.py)')
-    # print('='*50)
-    # tmp = make_config(config_file, make_many=False)
-    # try:
-    #     from pillardisk.pillar_line_cloudy import main as cloudy_main
-    #     cloudy_main(config_file=tmp, use_absolute_flux=False)
-    # finally:
-    #     os.unlink(tmp)
-    # for suffix in ['_xy', '_rphi', '_ionizing_flux', '_logF_logphi', '_EW_xy', '_EW_rphi']:
-    #     move(f'plots/line_intensity_rgb{suffix}.png', f'{FIGDIR}/fig_rgb_1pillar{suffix}.png')
-
-    # ── 5. 100-pillar RGB map ─────────────────────────────
-    print('\n' + '='*50)
-    print(' [5/9] 100-pillar RGB map (pillar_line_cloudy.py)')
-    print('='*50)
-    tmp = make_config(config_file, make_many=True)
-    try:
-        from pillardisk.pillar_line_cloudy import main as cloudy_main
-        cloudy_main(config_file=tmp, use_absolute_flux=False)
-    finally:
-        os.unlink(tmp)
-    # r-phi panels disabled to save iteration time; only x-y panels and
-    # the ionizing-flux / logF-logphi maps are kept.
-    for suffix in ['_xy', '_ionizing_flux', '_logF_logphi', '_EW_xy']:
-        move(f'plots/line_intensity_rgb{suffix}.png', f'{FIGDIR}/fig_rgb_N100{suffix}.png')
-
-    # ── 6. Single-pillar Cloudy-weighted Hα VDM (slower) ──
-    # Pulled out into make_vdm_1pillar.py for faster iteration on this one
-    # figure. Run `python3 -m pillardisk.make_vdm_1pillar` to regenerate it.
-
-    # ── 7. Movie frame at t=0 (with geometry) ────────────
-    # Disabled to save time: only the VDM-only movie frame (step 8)
-    # is needed for the paper figure (fig_vdm_frame). Re-enable if the
-    # geometry-included version is wanted.
-    # print('\n' + '='*50)
-    # print(' [7/10] Movie frame at t=0 (with geometry)')
-    # print('='*50)
-    # tmp = make_config(config_file, make_many=True)
-    # try:
-    #     from pillardisk.pillar_line_time_cloudy import generate_movie_frames
-    #     generate_movie_frames(config_file=tmp, n_frames=1, output_dir='plots/_tmp_movie')
-    # finally:
-    #     os.unlink(tmp)
-    # move('plots/_tmp_movie/frame_0000.png', f'{FIGDIR}/fig_movie_frame.png')
-    # if os.path.exists('plots/_tmp_movie'):
-    #     shutil.rmtree('plots/_tmp_movie')
-
-    # ── 8. Movie frame at t=0 (VDM only, no geometry) ───
-    print('\n' + '='*50)
-    print(' [8/10] Movie frame at t=0 (VDM only)')
-    print('='*50)
-    tmp = make_config(config_file, make_many=True)
-    try:
-        from pillardisk.pillar_line_time_cloudy import generate_movie_frames
-        generate_movie_frames(config_file=tmp, n_frames=1, output_dir='plots/_tmp_movie',
-                              skip_geometry=True)
-    finally:
-        os.unlink(tmp)
-    move('plots/_tmp_movie/frame_0000.png', f'{FIGDIR}/fig_vdm_frame.png')
-    if os.path.exists('plots/_tmp_movie'):
-        shutil.rmtree('plots/_tmp_movie')
+    # Every figure that uses the Cloudy line emissivity (the RGB map,
+    # Figures 5-8, C1 and the appendix line figures) is made by
+    # make_line_figures.py.
 
     # ── Done ──────────────────────────────────────────────
-    # Time-evolving (slow) maps live in make_time_evolving_figures.py.
     print('\n' + '='*50)
-    print(f' All fast figures saved to {FIGDIR}/')
-    print(' Time-evolving maps: run make_time_evolving_figures.py separately.')
+    print(f' Disc figures saved to {FIGDIR}/')
+    print(' Line figures: run python3 -m pillardisk.make_line_figures')
     print('='*50)
     for f in sorted(os.listdir(FIGDIR)):
         if f.startswith('fig_') and f.endswith('.png'):
@@ -315,7 +255,7 @@ def main(config_file='config_line.yaml'):
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Regenerate paper figures (fast plots only)')
+    parser = argparse.ArgumentParser(description='Make the disc figures (Figures 1 and 2)')
     parser.add_argument('config', nargs='?', default='config_line.yaml',
                         help='Config YAML file (default: config_line.yaml)')
     args = parser.parse_args()

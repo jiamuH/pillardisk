@@ -114,12 +114,15 @@ def main(config_file='config_line.yaml', outdir=None):
 
     # 100 pillars
     d2 = make_disk(config)
-    np.random.seed(42)
-    for _ in range(int(pc.get('N_pillar', 100))):
-        r_p = -1
-        while r_p < float(pc.get('rmin', 2.0)) or r_p > d2.rout:
-            r_p = np.random.normal(float(pc.get('r_mean', 10.0)), float(pc.get('sig_r', 5.0)))
-        d2.add_pillar(r_pillar=r_p, phi_pillar=np.random.uniform(0, 2*np.pi),
+    # Same draws as every other 100-pillar figure (pillar_disk.PILLAR_SEED)
+    from pillardisk.pillar_disk import PILLAR_SEED
+    rng = np.random.default_rng(PILLAR_SEED)
+    n_p = int(pc.get('N_pillar', 100))
+    r_all = np.clip(rng.normal(float(pc.get('r_mean', 10.0)), float(pc.get('sig_r', 5.0)), n_p),
+                    max(d2.rin, float(pc.get('rmin', 2.0))), d2.rout)
+    phi_all = rng.uniform(0, 2*np.pi, n_p)
+    for r_p, phi_p in zip(r_all, phi_all):
+        d2.add_pillar(r_pillar=float(r_p), phi_pillar=float(phi_p),
                       height=float(pc.get('h_pillar', 0.04)) * 0.5,
                       sigma_r=float(pc.get('sigma_r_pillar', 0.2)),
                       sigma_phi=float(pc.get('sigma_phi_pillar', 0.1)),

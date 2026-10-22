@@ -1187,11 +1187,12 @@ def main(config_file='config_line.yaml', cloudy_file=None,
         modify_temp_pillar_list = expand_list(modify_temp_pillar_list, N_pillar, True)
         temp_factor_pillar_list = expand_list(temp_factor_pillar_list, N_pillar, 1.5)
         
-        np.random.seed(42)
-        r_pillar_random = np.random.normal(r_mean, sig_r, N_pillar)
+        from pillardisk.pillar_disk import PILLAR_SEED
+        rng = np.random.default_rng(PILLAR_SEED)
+        r_pillar_random = rng.normal(r_mean, sig_r, N_pillar)
         rmin_eff = max(disk.rin, rmin) if rmin is not None else disk.rin
         r_pillar_random = np.clip(r_pillar_random, rmin_eff, disk.rout)
-        phi_pillar_random = np.random.uniform(0, 2*np.pi, N_pillar)
+        phi_pillar_random = rng.uniform(0, 2*np.pi, N_pillar)
         
         def convert_bool(val):
             if isinstance(val, str):

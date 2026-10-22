@@ -17,6 +17,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
 import os
+
+# Random seed for the make_many pillar positions. Every figure draws its
+# pillars with np.random.default_rng(PILLAR_SEED), normal radii first, then
+# uniform azimuths, so all 100-pillar figures show the same pillars.
+PILLAR_SEED = 1
 plt.rcParams.update({
     'text.usetex': True,
     'axes.linewidth': 2,
@@ -1225,7 +1230,7 @@ class PillarDisk:
         if not self.no_fluxfloor:
             # Clip lower bound to the extended Cloudy grid min, log Phi = 15
             # (was 17 before 2026-10-03, which raised ~25% of the disc;
-            # see plots/archive_logphi_floor17_2026-10-03/)
+            # see plots/archive/archive_logphi_floor17_2026-10-03/)
             log_phi = np.clip(log_phi, 15.0, None)
         return log_phi
 
@@ -1727,12 +1732,13 @@ def main(config_file='config.yaml'):
             
             # Generate random pillar positions
             # r: Gaussian distribution, clipped to disk range
-            r_pillar_random = np.random.normal(r_mean, sig_r, N_pillar)
+            rng = np.random.default_rng(PILLAR_SEED)
+            r_pillar_random = rng.normal(r_mean, sig_r, N_pillar)
             rmin_eff = max(disk_params['rin'], rmin) if rmin is not None else disk_params['rin']
             r_pillar_random = np.clip(r_pillar_random, rmin_eff, disk_params['rout'])
             
             # phi: Uniform distribution from 0 to 2*pi
-            phi_pillar_random = np.random.uniform(0, 2*np.pi, N_pillar)
+            phi_pillar_random = rng.uniform(0, 2*np.pi, N_pillar)
             
             # Convert boolean strings if needed
             def convert_bool(val):

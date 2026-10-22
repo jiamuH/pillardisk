@@ -3,7 +3,7 @@ r"""
 Generate the responsivity-weighted velocity-delay-map figure.
 
 This is the companion to the emissivity-weighted ``fig_vdm_frame.png``
-produced by ``regenerate_figures.py`` step 8. It reuses the same
+produced by ``make_disc_figures.py`` step 8. It reuses the same
 ``generate_movie_frames`` pipeline but with ``weighting='responsivity'``,
 so each cell's per-line weight is
 
@@ -25,7 +25,7 @@ import tempfile
 
 import yaml
 
-from pillardisk.regenerate_figures import _make_figdir, move
+from pillardisk.make_disc_figures import _make_figdir, move
 
 
 def make_n100_config(config_file):

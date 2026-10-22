@@ -1366,8 +1366,65 @@ def plot_time_evolving_lightcurves(lambda_grid_dict, time_grid, flux_map_dict,
     plt.close()
 
 
+def _plot_geometry_snapshots(disk, config):
+    """3D geometry plots of the pillars at four orbital phases (debugging)."""
+    # 3D geometry plots at different orbital phases for debugging foreshortening
+    # The observer is FIXED (looking from +x direction at inclination i)
+    # We show the pillar at different azimuthal positions (simulating rotation)
+    # - near: φ=0 (pillar between observer and lamp) → observer sees shadow side
+    # - quad1: φ=π/2 (pillar at +y) → observer sees pillar from side
+    # - far: φ=π (pillar behind lamp from observer) → observer sees illuminated side
+    # - quad2: φ=3π/2 (pillar at -y) → observer sees pillar from other side
+
+    # Save original pillar positions
+    original_pillars = [p.copy() for p in disk.pillars]
+
+    # Get v_virial from config for orbital period calculation
+    line_params = config.get('emission_line', {})
+    if 'M_BH' in line_params:
+        v_virial_geom = v_virial_from_mbh(float(line_params['M_BH']), disk.r0)
+    else:
+        v_virial_geom = float(line_params.get('v_virial', 1000.0))
+
+    # Compute orbital period at pillar radius for time labels
+    r_pillar = original_pillars[0]['r'] if len(original_pillars) > 0 else disk.r0
+    T_orbital_pillar = compute_orbital_period(r_pillar, v_virial_geom, disk.r0)
+
+    orbital_phases = [
+        (0.0, 'phi0_near'),           # φ=0: near side (shadow visible)
+        (np.pi/2, 'phi90_quad1'),     # φ=π/2: quadrature 1
+        (np.pi, 'phi180_far'),        # φ=π: far side (illuminated visible)
+        (3*np.pi/2, 'phi270_quad2'),  # φ=3π/2: quadrature 2
+    ]
+
+    for phi_offset, label in orbital_phases:
+        # Temporarily move all pillars to the new azimuthal position
+        for i, p in enumerate(disk.pillars):
+            p['phi'] = phi_offset + (original_pillars[i]['phi'] - original_pillars[0]['phi'])
+
+        # Compute time corresponding to this orbital phase
+        t_days = phi_offset / (2 * np.pi) * T_orbital_pillar
+        title = f't = {t_days:.0f} days'
+
+        filename_3d = f'plots/geometry_{label}.png'
+        os.makedirs('plots', exist_ok=True)
+        # Lower resolution for faster plotting
+        disk.plot_3d_geometry(show_light_rays=False, color_by='flux', filename=filename_3d,
+                              title=title, n_phi_plot=180, n_r_plot=100)
+
+    # Restore original pillar positions
+    for i, p in enumerate(disk.pillars):
+        p['phi'] = original_pillars[i]['phi']
+
+    print(f"  Saved 3D geometry snapshots at different orbital phases:")
+    print(f"    phi0_near: pillar at φ=0, observer sees shadow side")
+    print(f"    phi180_far: pillar at φ=π, observer sees illuminated side")
+    print(f"    phi90_quad1, phi270_quad2: pillar at quadratures")
+
+
+
 def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False,
-         seed=None, cache_file=None):
+         seed=1, cache_file=None):
     """
     Main function to compute and plot time-evolving velocity maps with Cloudy models.
     
@@ -1378,7 +1435,8 @@ def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False
     use_absolute_flux : bool
         Whether to use absolute flux (True) or Hbeta-normalized flux (False)
     seed : int or None
-        Random seed for the make_many pillar positions (None: not reproducible).
+        Random seed for the make_many pillar positions (default 1, as
+        pillar_disk.PILLAR_SEED; None: not reproducible).
     cache_file : str or None
         npz file holding the time-evolving flux maps. If it exists and its
         pillars match, the maps are read from it instead of recomputed;
@@ -1583,104 +1641,60 @@ def main(config_file='config_line.yaml', use_absolute_flux=True, plot_only=False
     # ---- Geometry visualization at t=0 ----
     print("\n--- Geometry check at t=0 ---")
 
-    # 3D geometry plots at different orbital phases for debugging foreshortening
-    # The observer is FIXED (looking from +x direction at inclination i)
-    # We show the pillar at different azimuthal positions (simulating rotation)
-    # - near: φ=0 (pillar between observer and lamp) → observer sees shadow side
-    # - quad1: φ=π/2 (pillar at +y) → observer sees pillar from side
-    # - far: φ=π (pillar behind lamp from observer) → observer sees illuminated side
-    # - quad2: φ=3π/2 (pillar at -y) → observer sees pillar from other side
+    # 3D geometry snapshots at four orbital phases. A debugging aid for the
+    # foreshortening effect, not a paper figure, so off unless
+    # plotting.debug_geometry_snapshots is true in the config.
+    if config.get('plotting', {}).get('debug_geometry_snapshots', False):
+        _plot_geometry_snapshots(disk, config)
 
-    # Save original pillar positions
-    original_pillars = [p.copy() for p in disk.pillars]
+    # Face-on map: Figure 1 needs it (make_disc_figures calls with
+    # plot_only=True); the time-evolving runs do not.
+    if plot_only or config.get('plotting', {}).get('faceon_map', False):
+        # Face-on ionizing flux + height map (r-phi plane)
+        # Build radial grid with refinement around each pillar so that narrow
+        # pillars (sigma_r << global grid spacing) are properly resolved.
+        nphi_plot = 360
+        r_coarse = np.linspace(disk.rin, disk.rout, 200)
+        r_refined_parts = [r_coarse]
+        for p in disk.pillars:
+            sr = max(p['sigma_r'], 0.01)
+            r_lo = max(disk.rin, p['r'] - 5*sr)
+            r_hi = min(disk.rout, p['r'] + 5*sr)
+            r_refined_parts.append(np.linspace(r_lo, r_hi, 60))
+        r_plot = np.unique(np.concatenate(r_refined_parts))
+        phi_plot = np.linspace(0, 2*np.pi, nphi_plot)
+        r_2d_plot, phi_2d_plot = np.meshgrid(r_plot, phi_plot, indexing='ij')
 
-    # Get v_virial from config for orbital period calculation
-    line_params = config.get('emission_line', {})
-    if 'M_BH' in line_params:
-        v_virial_geom = v_virial_from_mbh(float(line_params['M_BH']), disk.r0)
-    else:
-        v_virial_geom = float(line_params.get('v_virial', 1000.0))
+        h_2d_plot = disk.get_height(r_2d_plot, phi_2d_plot)
+        log_phi_2d_plot = compute_ionizing_flux(disk, r_2d_plot, phi_2d_plot)
 
-    # Compute orbital period at pillar radius for time labels
-    r_pillar = original_pillars[0]['r'] if len(original_pillars) > 0 else disk.r0
-    T_orbital_pillar = compute_orbital_period(r_pillar, v_virial_geom, disk.r0)
+        fig, axes = plt.subplots(2, 1, figsize=(7, 12), subplot_kw={'projection': 'polar'})
 
-    orbital_phases = [
-        (0.0, 'phi0_near'),           # φ=0: near side (shadow visible)
-        (np.pi/2, 'phi90_quad1'),     # φ=π/2: quadrature 1
-        (np.pi, 'phi180_far'),        # φ=π: far side (illuminated visible)
-        (3*np.pi/2, 'phi270_quad2'),  # φ=3π/2: quadrature 2
-    ]
+        for ax in axes:
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(pad=5)
+            angle_labels = [rf'$\bf{{{int(a)}}}$°' for a in np.degrees(ax.get_xticks())]
+            ax.set_xticklabels(angle_labels)
 
-    for phi_offset, label in orbital_phases:
-        # Temporarily move all pillars to the new azimuthal position
-        for i, p in enumerate(disk.pillars):
-            p['phi'] = phi_offset + (original_pillars[i]['phi'] - original_pillars[0]['phi'])
+        ax0 = axes[0]
+        c0 = ax0.pcolormesh(phi_2d_plot, r_2d_plot, h_2d_plot, shading='auto', cmap='terrain')
+        ax0.set_title(r'$\rm Disk~Height$', pad=15)
+        cbar0 = fig.colorbar(c0, ax=ax0, pad=0.1)
+        cbar0.set_label(r'$H~\rm [ld]$')
 
-        # Compute time corresponding to this orbital phase
-        t_days = phi_offset / (2 * np.pi) * T_orbital_pillar
-        title = f't = {t_days:.0f} days'
+        ax1 = axes[1]
+        c1 = ax1.pcolormesh(phi_2d_plot, r_2d_plot, log_phi_2d_plot, shading='auto', cmap='inferno',
+                            vmin=15.0, vmax=21.5)
+        ax1.set_title(r'$\rm Ionizing~Flux$', pad=15)
+        cbar1 = fig.colorbar(c1, ax=ax1, pad=0.1)
+        cbar1.set_label(r'$\log\Phi~\rm [photons~cm^{-2}~s^{-1}]$')
 
-        filename_3d = f'plots/geometry_{label}.png'
-        os.makedirs('plots', exist_ok=True)
-        # Lower resolution for faster plotting
-        disk.plot_3d_geometry(show_light_rays=False, color_by='flux', filename=filename_3d,
-                              title=title, n_phi_plot=180, n_r_plot=100)
-
-    # Restore original pillar positions
-    for i, p in enumerate(disk.pillars):
-        p['phi'] = original_pillars[i]['phi']
-
-    print(f"  Saved 3D geometry snapshots at different orbital phases:")
-    print(f"    phi0_near: pillar at φ=0, observer sees shadow side")
-    print(f"    phi180_far: pillar at φ=π, observer sees illuminated side")
-    print(f"    phi90_quad1, phi270_quad2: pillar at quadratures")
-
-    # Face-on ionizing flux + height map (r-phi plane)
-    # Build radial grid with refinement around each pillar so that narrow
-    # pillars (sigma_r << global grid spacing) are properly resolved.
-    nphi_plot = 360
-    r_coarse = np.linspace(disk.rin, disk.rout, 200)
-    r_refined_parts = [r_coarse]
-    for p in disk.pillars:
-        sr = max(p['sigma_r'], 0.01)
-        r_lo = max(disk.rin, p['r'] - 5*sr)
-        r_hi = min(disk.rout, p['r'] + 5*sr)
-        r_refined_parts.append(np.linspace(r_lo, r_hi, 60))
-    r_plot = np.unique(np.concatenate(r_refined_parts))
-    phi_plot = np.linspace(0, 2*np.pi, nphi_plot)
-    r_2d_plot, phi_2d_plot = np.meshgrid(r_plot, phi_plot, indexing='ij')
-
-    h_2d_plot = disk.get_height(r_2d_plot, phi_2d_plot)
-    log_phi_2d_plot = compute_ionizing_flux(disk, r_2d_plot, phi_2d_plot)
-
-    fig, axes = plt.subplots(2, 1, figsize=(7, 12), subplot_kw={'projection': 'polar'})
-
-    for ax in axes:
-        ax.grid(True, alpha=0.3)
-        ax.tick_params(pad=5)
-        angle_labels = [rf'$\bf{{{int(a)}}}$°' for a in np.degrees(ax.get_xticks())]
-        ax.set_xticklabels(angle_labels)
-
-    ax0 = axes[0]
-    c0 = ax0.pcolormesh(phi_2d_plot, r_2d_plot, h_2d_plot, shading='auto', cmap='terrain')
-    ax0.set_title(r'$\rm Disk~Height$', pad=15)
-    cbar0 = fig.colorbar(c0, ax=ax0, pad=0.1)
-    cbar0.set_label(r'$H~\rm [ld]$')
-
-    ax1 = axes[1]
-    c1 = ax1.pcolormesh(phi_2d_plot, r_2d_plot, log_phi_2d_plot, shading='auto', cmap='inferno',
-                        vmin=15.0, vmax=21.5)
-    ax1.set_title(r'$\rm Ionizing~Flux$', pad=15)
-    cbar1 = fig.colorbar(c1, ax=ax1, pad=0.1)
-    cbar1.set_label(r'$\log\Phi~\rm [photons~cm^{-2}~s^{-1}]$')
-
-    plt.tight_layout()
-    _geom_out = 'plots/geometry_t0_faceon.png'
-    os.makedirs(os.path.dirname(_geom_out), exist_ok=True)
-    plt.savefig(_geom_out, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved face-on map: {_geom_out}")
+        plt.tight_layout()
+        _geom_out = 'plots/geometry_t0_faceon.png'
+        os.makedirs(os.path.dirname(_geom_out), exist_ok=True)
+        plt.savefig(_geom_out, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved face-on map: {_geom_out}")
     print("--- End geometry check ---\n")
 
     if plot_only:
@@ -1829,32 +1843,37 @@ def _plot_time_evolving_figures(config, lambda_grid_dict, time_grid,
     # through plots/ so intermediate files don't pollute the project root.
     plot_params = config.get('plotting', {})
     os.makedirs('plots', exist_ok=True)
-    filename = plot_params.get('velocity_time_cloudy_filename',
-                               'plots/velocity_time_cloudy.png')
-    plot_time_evolving_cloudy_map(
-        lambda_grid_dict, time_grid, flux_with_pillars, lambda0_dict,
-        filename=filename, use_absolute_flux=use_absolute_flux,
-        normalize_output=False
-    )
+    # Only the combined figure (Figures 7 and 8) is in the paper; the
+    # separate raw, difference, residual and light-curve plots are made
+    # only when plotting.extra_time_evolving_plots is true.
+    extras = plot_params.get('extra_time_evolving_plots', False)
+    if extras:
+        filename = plot_params.get('velocity_time_cloudy_filename',
+                                   'plots/velocity_time_cloudy.png')
+        plot_time_evolving_cloudy_map(
+            lambda_grid_dict, time_grid, flux_with_pillars, lambda0_dict,
+            filename=filename, use_absolute_flux=use_absolute_flux,
+            normalize_output=False
+        )
 
-    # Plot difference maps (with pillars - without pillars)
-    diff_filename = plot_params.get('velocity_time_cloudy_diff_filename',
-                                    'plots/velocity_time_cloudy_diff.png')
-    plot_time_evolving_diff_map(
-        lambda_grid_dict, time_grid,
-        flux_with_pillars, flux_without_pillars,
-        lambda0_dict,
-        filename=diff_filename
-    )
+        # Plot difference maps (with pillars - without pillars)
+        diff_filename = plot_params.get('velocity_time_cloudy_diff_filename',
+                                        'plots/velocity_time_cloudy_diff.png')
+        plot_time_evolving_diff_map(
+            lambda_grid_dict, time_grid,
+            flux_with_pillars, flux_without_pillars,
+            lambda0_dict,
+            filename=diff_filename
+        )
 
-    # Plot true residual maps (flux - time-averaged flux)
-    residual_filename = plot_params.get('velocity_time_cloudy_residual_filename',
-                                        'plots/velocity_time_cloudy_residual.png')
-    plot_time_evolving_residual_map(
-        lambda_grid_dict, time_grid,
-        flux_with_pillars, lambda0_dict,
-        filename=residual_filename
-    )
+        # Plot true residual maps (flux - time-averaged flux)
+        residual_filename = plot_params.get('velocity_time_cloudy_residual_filename',
+                                            'plots/velocity_time_cloudy_residual.png')
+        plot_time_evolving_residual_map(
+            lambda_grid_dict, time_grid,
+            flux_with_pillars, lambda0_dict,
+            filename=residual_filename
+        )
 
     # Combined 3x2 figure: rows = lines (CIV/MgII/Halpha), cols = (raw, residual)
     combined_filename = plot_params.get('velocity_time_cloudy_combined_filename',
@@ -1865,14 +1884,15 @@ def _plot_time_evolving_figures(config, lambda_grid_dict, time_grid,
         filename=combined_filename
     )
 
-    # Wavelength-integrated lightcurves (velocity-integrated time series).
-    lightcurve_filename = plot_params.get('velocity_time_cloudy_lightcurves_filename',
-                                           'plots/velocity_time_cloudy_lightcurves.png')
-    plot_time_evolving_lightcurves(
-        lambda_grid_dict, time_grid,
-        flux_with_pillars,
-        filename=lightcurve_filename
-    )
+    if extras:
+        # Wavelength-integrated lightcurves (velocity-integrated time series).
+        lightcurve_filename = plot_params.get('velocity_time_cloudy_lightcurves_filename',
+                                               'plots/velocity_time_cloudy_lightcurves.png')
+        plot_time_evolving_lightcurves(
+            lambda_grid_dict, time_grid,
+            flux_with_pillars,
+            filename=lightcurve_filename
+        )
     print("Plotting complete.")
     
     print("\nSummary:")
@@ -2047,7 +2067,7 @@ def _compute_vdmap_for_line_cloudy(args):
 
 def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_dir='movie_frames',
                           use_absolute_flux=True, skip_geometry=False,
-                          weighting='emissivity', seed=None, cache_file=None):
+                          weighting='emissivity', seed=1, cache_file=None):
     """
     Generate movie frames showing velocity-delay maps and 3D geometry at each orbital phase.
 
@@ -2061,7 +2081,8 @@ def generate_movie_frames(config_file='config_line.yaml', n_frames=50, output_di
     skip_geometry : bool
         If True, omit the 3D geometry panel (produces a 2-row figure).
     seed : int or None
-        Random seed for the make_many pillar positions (None: not reproducible).
+        Random seed for the make_many pillar positions (default 1, as
+        pillar_disk.PILLAR_SEED; None: not reproducible).
     cache_file : str or None
         npz file holding the baseline and first-frame maps. If it exists and
         its pillars match, the maps are read from it instead of recomputed;

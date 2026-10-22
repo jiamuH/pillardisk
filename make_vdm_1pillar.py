@@ -2,7 +2,7 @@
 r"""
 Single-pillar Cloudy-weighted H-alpha velocity-delay map figure.
 
-Runs the same computation that step 6 of ``regenerate_figures.py`` did:
+Runs the same computation that step 6 of ``make_disc_figures.py`` did:
 build the disk with one manual pillar, compute the H-alpha
 \Psi(\lambda, \tau) with and without the pillar via Cloudy LOC weights,
 and save the resulting figure into the parameter-tagged
@@ -15,7 +15,7 @@ Usage:
 import argparse
 import os
 
-from pillardisk.regenerate_figures import (
+from pillardisk.make_disc_figures import (
     _make_figdir,
     _run_cloudy_vdm,
     make_config,

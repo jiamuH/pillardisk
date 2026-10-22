@@ -7,7 +7,7 @@ both a single co-rotating pillar AND the 100-pillar random ensemble, saving
 each set of figures separately into the parameter-tagged output directory
 under ``pillar_disc_draft/figures``.
 
-This is split out from ``regenerate_figures.py`` so the fast plots there can
+This is split out from ``make_disc_figures.py`` so the fast plots there can
 be regenerated without paying the cost of the time-evolving computation.
 
 The 100 pillars are drawn with a fixed random seed (the same as Figure 6), and
@@ -24,7 +24,7 @@ import tempfile
 
 import yaml
 
-from pillardisk.regenerate_figures import (
+from pillardisk.make_disc_figures import (
     _make_figdir,
     cleanup_geometry_snapshots,
     move,

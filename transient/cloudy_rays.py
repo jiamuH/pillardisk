@@ -1562,6 +1562,7 @@ LOSG_INCL = (0.0, 45.0, 60.0)   # observer inclinations [deg] (azimuth 0)
 CIV_F, CIV_LAM = 0.190, 1548.19e-8   # C IV 1548: oscillator strength, [cm]
 PIE2_MC = 0.02654           # pi e^2 / (m_e c) [cm^2 s^-1]
 OCC_STEP = 0.005            # [r0] step of the occultation march
+CIV_VTURBS = (0, 100, 300)  # [km/s] constant-turbulence static tau maps
 
 
 def civ_layers(out, sim):
@@ -1768,7 +1769,10 @@ def civ_tau_map(out):
     mapped: tau = min(static, Sobolev), and L_Sob / l_los = (b/|dv/dl|) /
     (the ray's C3+ path x sin(psi) / cos(theta_o)): > 1 where the sim's
     velocity gradient does not matter. Grey: no line of sight (normal
-    away from the observer, or n_H > N_SURF in the way: occulted)."""
+    away from the observer, or n_H > N_SURF in the way: occulted).
+    plots/civ_tau_vturb.png: the static tau alone (no sim velocity) for
+    constant turbulence CIV_VTURBS, b^2 = 2kT/m_C + v_turb^2, one colour
+    scale."""
     plt = plot_style()
     from matplotlib.colors import LogNorm, ListedColormap
     from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -1795,7 +1799,7 @@ def civ_tau_map(out):
     b = np.sqrt(2 * KB * L['Te'] / (12 * MH) + (VTURB * 1e5) ** 2)
     k0 = PIE2_MC * CIV_F * CIV_LAM
     ph = sim['ph'][iph]
-    rows = []
+    rows, vrows = [], []
     for inc in LOSG_INCL:
         si, ci = np.sin(np.radians(inc)), np.cos(np.radians(inc))
         # layer normal (-sin beta e_R + cos beta e_z), e_R = (cos ph, sin ph)
@@ -1816,6 +1820,10 @@ def civ_tau_map(out):
         rows.append([column_map(sim, wedges, iph, R, np.log10(v))
                      for v in (tau, ratio)]
                     + [column_map(sim, wedges, iph, R, hid.astype(float))])
+        vrows.append([column_map(sim, wedges, iph, R, np.log10(
+            k0 * Nlos / (np.sqrt(np.pi) * np.sqrt(
+                2 * KB * L['Te'] / (12 * MH) + (vt * 1e5) ** 2))))
+            for vt in CIV_VTURBS])
     print(f"{nfloor} rays with the layer angle floored (sin psi < 1e-3)")
     R2, P2 = np.meshgrid(rf, phf)
     X, Y = R2 * np.cos(P2), R2 * np.sin(P2)
@@ -1823,41 +1831,74 @@ def civ_tau_map(out):
     specs = [(r'$\log\,\tau_{\rm los}(\rm C\,IV\,1548)$', 'viridis',
               np.percentile(tv, 1), np.percentile(tv, 99)),
              (r'$\log\,L_{\rm Sob}/\ell_{\rm los}$', 'RdBu_r', -2.0, 2.0)]
-    fig, axs = plt.subplots(len(rows), 2, figsize=(15, 6.6 * len(rows)))
-    axs = np.atleast_2d(axs)
     grey = ListedColormap(['0.6'])
-    for i, (inc, row) in enumerate(zip(LOSG_INCL, rows)):
-        for j, (lab, cm, lo, hi) in enumerate(specs):
-            ax = axs[i, j]
-            cmap = plt.get_cmap(cm).copy()
-            cmap.set_bad('white')
-            M = np.where(row[2] > 0.5, np.nan, row[j])
-            pc = ax.pcolormesh(X, Y, np.clip(M, lo, hi), cmap=cmap,
-                               vmin=lo, vmax=hi, shading='flat',
-                               rasterized=True)
-            ax.pcolormesh(X, Y, np.ma.masked_where(~(row[2] > 0.5), row[2]),
-                          cmap=grey, shading='flat', rasterized=True)
-            ax.set_aspect('equal')
-            ax.set_xlim(-rf[-1], rf[-1])
-            ax.set_ylim(-rf[-1], rf[-1])
-            ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
-            ax.tick_params(which='both', direction='in', labelsize=19)
-            if i == len(rows) - 1:
-                ax.set_xlabel(r'$x\,[r_0]$')
-            if j == 0:
-                ax.set_ylabel(r'$y\,[r_0]$')
-            ax.set_title(r'$\bm{i = %d^\circ}$\textbf{: }' % inc + lab,
-                         fontsize=23)
-            cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
-                                                      pad=0.1)
-            fig.colorbar(pc, cax=cax)
-    fig.tight_layout()
     pdir = os.path.join(out, 'plots')
     os.makedirs(pdir, exist_ok=True)
+
+    def panel(ax, M, hid, title, cm, lo, hi, last_row, first_col, cbar,
+              clab=None):
+        cmap = plt.get_cmap(cm).copy()
+        cmap.set_bad('white')
+        pc = ax.pcolormesh(X, Y, np.clip(np.where(hid > 0.5, np.nan, M),
+                                         lo, hi), cmap=cmap, vmin=lo,
+                           vmax=hi, shading='flat', rasterized=True)
+        ax.pcolormesh(X, Y, np.ma.masked_where(~(hid > 0.5), hid),
+                      cmap=grey, shading='flat', rasterized=True)
+        ax.set_aspect('equal')
+        ax.set_xlim(-rf[-1], rf[-1])
+        ax.set_ylim(-rf[-1], rf[-1])
+        ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
+        ax.tick_params(which='both', direction='in', labelsize=19)
+        if last_row:
+            ax.set_xlabel(r'$x\,[r_0]$')
+        if first_col:
+            ax.set_ylabel(r'$y\,[r_0]$')
+        ax.set_title(title, fontsize=23)
+        cax = make_axes_locatable(ax).append_axes('right', size='4.5%',
+                                                  pad=0.1)
+        if cbar:
+            cb = fig.colorbar(pc, cax=cax)
+            if clab:
+                cb.set_label(clab)
+        else:
+            cax.set_visible(False)
+
+    fig, axs = plt.subplots(len(rows), 2, figsize=(15, 6.6 * len(rows)))
+    axs = np.atleast_2d(axs)
+    for i, (inc, row) in enumerate(zip(LOSG_INCL, rows)):
+        for j, (lab, cm, lo, hi) in enumerate(specs):
+            panel(axs[i, j], row[j], row[2],
+                  r'$\bm{i = %d^\circ}$\textbf{: }' % inc + lab, cm, lo, hi,
+                  i == len(rows) - 1, j == 0, True)
+    fig.tight_layout()
     path = os.path.join(pdir, 'civ_tau.png')
     fig.savefig(path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"wrote {path}: {len(R)} rays; observer toward +x at i > 0")
+    # static tau at constant turbulence, no sim velocity
+    vv = np.concatenate([m[np.isfinite(m)] for r in vrows for m in r])
+    lo, hi = np.percentile(vv, [1, 99])
+    nv = len(CIV_VTURBS)
+    fig, axs = plt.subplots(len(vrows), nv,
+                            figsize=(7.2 * nv, 6.6 * len(vrows)))
+    axs = np.atleast_2d(axs)
+    for i, (inc, vrow, row) in enumerate(zip(LOSG_INCL, vrows, rows)):
+        for j, vt in enumerate(CIV_VTURBS):
+            panel(axs[i, j], vrow[j], row[2],
+                  r'$\bm{i = %d^\circ,\ v_{\rm turb} = %d}$' % (inc, vt)
+                  + r'$\,\rm\bf km\,s^{-1}$', 'viridis', lo, hi,
+                  i == len(vrows) - 1, j == 0, j == nv - 1,
+                  r'$\log\,\tau_{\rm los}(\rm C\,IV\,1548)$')
+    fig.tight_layout()
+    path = os.path.join(pdir, 'civ_tau_vturb.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    for inc, vrow in zip(LOSG_INCL, vrows):
+        print(f"i = {inc:.0f} deg static log tau median: " + ', '.join(
+            f"{vt} km/s {np.nanmedian(m):.2f}"
+            for vt, m in zip(CIV_VTURBS, vrow)))
+    print(f"wrote {path}: log tau(C IV 1548) colour range "
+          f"{lo:.2f} - {hi:.2f}")
 
 
 def velocity_maps(out, iphs, labels):

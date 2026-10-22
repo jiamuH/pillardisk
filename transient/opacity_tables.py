@@ -36,7 +36,10 @@ OPAL_TABLE = 73                         # X = 0.70, Z = 0.02
 METALS = ((0.02, 'g7.02.tron', 73, '-', r'$\bm{Z_\odot}$'),
           (0.10, 'g7.1.tron', 78, '--', r'$\bm{5\,Z_\odot}$'))
 T_JOIN = 4.0                            # log T: F05 below, OPAL above
-LOG_NH = (10, 12, 14)                   # n_H [cm^-3]
+LOG_NH = (10, 12, 14)                   # n_H [cm^-3] (components plot)
+# main plot: a real disk at ~2 ld around 1e7 M_sun (midplane n_H ~ 6e14;
+# photosphere, where winds launch, ~1e13 - 1e14)
+LOG_NH_REAL = (13, 14, 15)
 T_SUB, T_COLOR = 1500.0, 9000.0         # [K] marked
 MH = 1.6726e-24
 PLOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots',
@@ -290,11 +293,11 @@ def main():
     logT = np.linspace(2.7, 5.3, 400)
     T = 10 ** logT
     fig, ax = plt.subplots(figsize=(12, 8))
-    cols = dict(zip(LOG_NH, ('dodgerblue', 'darkviolet', 'orangered')))
+    cols = dict(zip(LOG_NH_REAL, ('dodgerblue', 'darkviolet', 'orangered')))
     for z, ffile, otab, ls, zlab in METALS:
         f05 = read_f05(os.path.join(TABLE_DIR, 'f05', 'x', ffile))
         opal = read_opal(table=otab)
-        for n in LOG_NH:
+        for n in LOG_NH_REAL:
             logrho = np.log10(1.4 * MH) + n
             lo = logT <= T_JOIN
             k1, c1 = kappa_at(f05, logT[lo], logrho)

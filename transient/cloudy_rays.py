@@ -2554,6 +2554,80 @@ def lines_fiducial(out, dph, plotonly=False):
     print(f"wrote {path}")
 
 
+def sigma_phi_plot(out):
+    """The adaptive ray plan against the disk's surface density in phi.
+    Top: N_H = int n_H r dtheta [cm^-2] averaged over R, vs phi, with the
+    run's phi columns as dots, and the phi_structure weight (+ PHI_FLOOR)
+    that placed them (right axis). Bottom: N_H(phi, R) with each finished
+    ray's H ionization front (first zone with H+ < 0.5, from the ray
+    cache; its last zone if none) as a dot - where it meets the disk.
+    plots/sigma_phi.png."""
+    plt = plot_style()
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    sim = load_sim(DUMP)
+    phys = to_physical(sim, CONFIG)
+    r0 = CONFIG['R0_LD'] * LD_CM
+    ph = sim['ph']
+    dth = np.diff(sim['thf'])
+    sig = (phys['nH'] * (sim['r'][None, None, :] * dth[None, :, None])
+           ).sum(1) * r0                                   # (ph, r)
+    w = PHI_FLOOR + phi_structure(sim, phys)
+    geo, _, h = ray_geometry(out, sim)
+    pts = []
+    for name, ray in sorted(load_rays(out).items()):
+        ov = ray['ovr']
+        if not ray['finl'] or len(ov) < 2:
+            continue
+        k = np.nonzero(ov[:, 1 + CACHE_OVR.index('HII')] < 0.5)[0]
+        s0, sa, _, _ = geo(name)
+        pts.append((int(name[5:8]),
+                    (s0 + ov[k[0] if len(k) else -1, 0]) * sa / r0))
+    pts = np.array(pts)
+    cols = np.unique(pts[:, 0].astype(int))
+    deg = np.degrees(ph)
+    smean = sig.mean(axis=1)
+    fig, (a1, a2) = plt.subplots(2, 1, sharex=True, figsize=(16, 13),
+                                 gridspec_kw=dict(height_ratios=[1, 1.6]))
+    a1.semilogy(deg, smean, 'k', lw=2)
+    a1.plot(deg[cols], smean[cols], 'o', color='crimson', ms=7,
+            label=r'\textbf{phi columns (%d)}' % len(cols))
+    a1.set_ylabel(r'$\langle N_{\rm H}\rangle_R\,[\rm cm^{-2}]$')
+    a1t = a1.twinx()
+    a1t.plot(deg, w, color='dodgerblue', lw=1.5, ls='--')
+    a1t.set_ylabel(r'\textbf{column weight}', color='dodgerblue')
+    a1t.tick_params(axis='y', colors='dodgerblue', direction='in',
+                    labelsize=19)
+    a1.legend(fontsize=17, frameon=False, loc='lower left')
+    P, Rg = np.meshgrid(np.degrees(sim['phf']), sim['rf'], indexing='ij')
+    pm = a2.pcolormesh(P, Rg, sig, norm=LogNorm(*np.percentile(sig, [1, 99.5])),
+                       cmap='Greys', shading='flat', rasterized=True)
+    a2.plot(deg[pts[:, 0].astype(int)], pts[:, 1], '.', color='crimson',
+            ms=4)
+    a2.set_ylabel(r'$R_{\rm H\,front}\,[r_0]$')
+    a2.set_xlabel(r'$\phi\,[^\circ]$')
+    a2.set_xlim(0, 360)
+    a2.set_ylim(sim['rf'][0], sim['rf'][-1])
+    for ax in (a1, a2):
+        ax.minorticks_on()
+        ax.tick_params(which='both', direction='in', labelsize=19,
+                       top=True, right=ax is a2)
+        ax.tick_params(which='major', length=10, width=2)
+        ax.tick_params(which='minor', length=5, width=1.5)
+    cax = make_axes_locatable(a2).append_axes('right', size='2.5%', pad=0.1)
+    fig.colorbar(pm, cax=cax).set_label(r'$N_{\rm H}\,[\rm cm^{-2}]$')
+    # keep the top panel as wide as the bottom one
+    make_axes_locatable(a1).append_axes('right', size='2.5%',
+                                        pad=0.1).set_visible(False)
+    fig.tight_layout(h_pad=0.3)
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'sigma_phi.png')
+    fig.savefig(path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}: {len(pts)} rays in {len(cols)} columns")
+
+
 def velocity_maps(out, iphs, labels):
     """meridional maps of velocity_fields at the phi indices iphs plus
     the cut through the embedded star (marked), one figure per field,
@@ -2650,6 +2724,7 @@ def main():
                                      'faceon', 'spectrum', 'vmaps',
                                      'losgrad', 'civtau', 'civmap',
                                      'civspec', 'linespec', 'lines',
+                                     'sigmaphi',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -2804,6 +2879,9 @@ def main():
 
     elif a.step == 'lines':
         lines_fiducial(a.out, a.dph, a.plotonly)
+
+    elif a.step == 'sigmaphi':
+        sigma_phi_plot(a.out)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

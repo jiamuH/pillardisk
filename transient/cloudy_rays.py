@@ -49,6 +49,8 @@ Steps (all with --out DIR):
   civspec  the observed C IV line profiles of the same (civ_profiles.png)
   linespec the same for --line (mg2, hb, he2: escape from each line's own
            emitting layer; <line>_profiles.png)
+  fine     an interpolated fine ray set in --out from the run --src (all
+           256 sim phi columns, no Cloudy; load_rays follows it to --src)
   lines    C IV, He II, Mg II, H beta in the fiducial model (Keplerian
            shear escape at VTURB, Keplerian Doppler; lines_fiducial.png)
   plot     finished rays of one phi column (--iph): their paths over the
@@ -581,7 +583,13 @@ def load_rays(out, ncpu=16):
     """{name: entry} for every ray with a .out (see _parse_ray), from
     <out>/rays_cache.npz; rays whose .out is new or changed (mtime, size)
     are re-read from their text output and the cache rewritten. Depths
-    float64, the rest float32."""
+    float64, the rest float32. A fine_rays set (<out>/synthetic.npz) maps
+    its rays onto its source run's (shared, not copied)."""
+    syn = os.path.join(out, 'synthetic.npz')
+    if os.path.exists(syn):
+        d = np.load(syn)
+        srays = load_rays(str(d['src_out']), ncpu)
+        return {str(n): srays[str(s)] for n, s in zip(d['name'], d['src'])}
     rdir = os.path.join(out, 'rays')
     path = os.path.join(out, 'rays_cache.npz')
     names = sorted(os.path.basename(o)[:-4] for o in
@@ -2628,6 +2636,63 @@ def sigma_phi_plot(out):
     print(f"wrote {path}: {len(pts)} rays in {len(cols)} columns")
 
 
+def fine_rays(src, out):
+    """An interpolated fine ray set in <out>: no new Cloudy runs. For every
+    sim phi cell, a column made of the rays of the two finished columns of
+    the adaptive run <src> on either side of it: each source ray keeps its
+    Cloudy output, alpha and d_in, but sits at the cell's phi, its solid
+    angle scaled from its source wedge to the cell and weighted linearly
+    in phi ((1 - w) for the near-side column, w for the far one) - the
+    emission field interpolated linearly in phi between computed columns
+    (per-ray outputs vary smoothly: ray_emulator's validation). Writes
+    <out>/rays_meta.npz (as an adaptive run, one cell per column) and
+    <out>/synthetic.npz (each ray's source), which load_rays follows to
+    <src>'s ray cache; every map and profile step then runs on <out>.
+    Crashed source rays are left out."""
+    sim = load_sim(DUMP)
+    phc_all, phf = sim['ph'], sim['phf']
+    m = np.load(os.path.join(src, 'rays_meta.npz'))
+    rays = load_rays(src)
+    keep = np.array([str(n) in rays and bool(rays[str(n)]['finl'])
+                     for n in m['name']])
+    names, iph = m['name'][keep].astype(str), m['iph'][keep]
+    cols = np.unique(iph)
+    pc = phc_all[cols]
+    rec = []
+    for c, phi in enumerate(phc_all):
+        # the computed columns on either side (periodic)
+        d = np.mod(phi - pc, 2 * np.pi)
+        a = np.argmin(d)                         # nearest at or below
+        b = np.argmin(np.mod(pc - phi, 2 * np.pi))
+        gap = np.mod(pc[b] - pc[a], 2 * np.pi)
+        w = d[a] / gap if gap > 0 else 0.0
+        for j, wt in ((cols[a], 1 - w), (cols[b], w)):
+            if wt <= 0:
+                continue
+            for k in np.nonzero(iph == j)[0]:
+                wsrc = m['phi_hi'][keep][k] - m['phi_lo'][keep][k]
+                rec.append((f'ray_p{c:03d}_q{j:03d}a{names[k][-2:]}',
+                            names[k], c, int(names[k][-2:]),
+                            m['alpha'][keep][k], m['d_in'][keep][k],
+                            m['domega'][keep][k] / wsrc * (phf[c + 1]
+                                                           - phf[c]) * wt,
+                            phf[c], phf[c + 1]))
+    os.makedirs(out, exist_ok=True)
+    col = list(zip(*rec))
+    np.savez(os.path.join(out, 'rays_meta.npz'), name=np.array(col[0]),
+             iph=np.array(col[2]), ia=np.array(col[3]),
+             alpha=np.array(col[4]), d_in=np.array(col[5]),
+             domega=np.array(col[6]), phi_lo=np.array(col[7]),
+             phi_hi=np.array(col[8]), hlamp_r0=m['hlamp_r0'])
+    np.savez(os.path.join(out, 'synthetic.npz'), name=np.array(col[0]),
+             src=np.array(col[1]), src_out=os.path.abspath(src))
+    om0 = m['domega'][keep].sum()
+    print(f"fine ray set: {len(rec)} rays in {len(phc_all)} phi columns "
+          f"from {len(names)} rays in {len(cols)} columns of {src} -> "
+          f"{out} (total solid angle {np.sum(col[6]) / om0:.4f} x the "
+          f"source's)")
+
+
 def velocity_maps(out, iphs, labels):
     """meridional maps of velocity_fields at the phi indices iphs plus
     the cut through the embedded star (marked), one figure per field,
@@ -2724,7 +2789,7 @@ def main():
                                      'faceon', 'spectrum', 'vmaps',
                                      'losgrad', 'civtau', 'civmap',
                                      'civspec', 'linespec', 'lines',
-                                     'sigmaphi',
+                                     'sigmaphi', 'fine',
                                      'vtest', 'rayplan'])
     ap.add_argument('--ray', default=None,
                     help='plot --maponly: ray for the ionization panel '
@@ -2739,6 +2804,8 @@ def main():
                     help='plot: only the meridional map (all finished rays '
                          'of the phi column, no depth panels)')
     ap.add_argument('--out', required=True)
+    ap.add_argument('--src', default=None,
+                    help='fine: the adaptive run to interpolate')
     ap.add_argument('--dph', type=int, default=2,
                     help='take every dph-th phi (sim has 256)')
     ap.add_argument('--ncpu', type=int, default=90)
@@ -2882,6 +2949,9 @@ def main():
 
     elif a.step == 'sigmaphi':
         sigma_phi_plot(a.out)
+
+    elif a.step == 'fine':
+        fine_rays(a.src, a.out)
 
     elif a.step == 'vtest':
         sim = load_sim(DUMP)

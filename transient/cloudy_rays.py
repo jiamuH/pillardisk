@@ -2337,15 +2337,21 @@ def civ_profiles(out, dph, plotonly=False):
         ax.text(0.97, 0.92, r'$\bm{i = %d^\circ}$' % inc
                 + (r'\textbf{ (obs. }$\bm{+x}$\textbf{)}' if inc else ''),
                 transform=ax.transAxes, ha='right', va='top', fontsize=21)
-        ax.tick_params(which='both', direction='in', labelsize=19)
-        ax.tick_params(axis='x', top=True)
+        ax.minorticks_on()
+        ax.tick_params(which='both', direction='in', labelsize=19,
+                       right=True, top=j > 0)   # top panel: velocity axis
+        ax.tick_params(which='major', length=10, width=2)
+        ax.tick_params(which='minor', length=5, width=1.5)
         if j == 0:
             # velocity about the doublet centre [10^3 km/s], top panel only
             top = ax.secondary_xaxis('top', functions=(
                 lambda x: (x / CIV_LAM_C - 1) * C_KMS / 1e3,
                 lambda v: CIV_LAM_C * (1 + v * 1e3 / C_KMS)))
             top.set_xlabel(r'$v\ [10^3\,\rm km\,s^{-1}]$')
+            top.minorticks_on()
             top.tick_params(which='both', direction='in', labelsize=19)
+            top.tick_params(which='major', length=10, width=2)
+            top.tick_params(which='minor', length=5, width=1.5)
         if j == n // 2:
             ax.set_ylabel(r'$\lambda L_\lambda\ [10^{42}\,\rm erg\,'
                           r's^{-1}]$ \textbf{(isotropic equiv.)}')

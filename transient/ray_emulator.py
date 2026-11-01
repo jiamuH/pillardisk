@@ -86,6 +86,8 @@ TABLE_VERSION = 3           # + layer quantiles, T_e, doublet ratio, C3+
 RUNS = '/data2/jhuang/runs/cloudy_rays'
 HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
+VAL_RUNS = {'h0.0': HEIGHT_RUNS[0], 'h0.2': HEIGHT_RUNS[1],
+            'h0.5': HEIGHT_RUNS[2], 'h1.0': HEIGHT_RUNS[3]}
 GROUP_FOLDS = 8
 MIN_RAYS = 50               # heights: a run needs this many finished rays
 HEIGHTS_NPZ = f'{RUNS}/train/emulator_heights.npz'   # heights' predictions
@@ -843,6 +845,10 @@ def main():
     ap.add_argument('--train', nargs='+', default=None,
                     help='emulate: training runs (default: the heights '
                     'runs but --src)')
+    ap.add_argument('--val', choices=sorted(VAL_RUNS), default=None,
+                    help='emulate / compare: a Cloudy run to check the '
+                    'emulator on (emulated with that height held out, into '
+                    '<RUNS>/emulated/<val>_val; emulate then compares)')
     ap.add_argument('--h', type=float, default=0.5,
                     help='dense: lamp height [ld]')
     ap.add_argument('--nrays', type=int, default=30000,
@@ -872,8 +878,11 @@ def main():
     elif a.step == 'validate':
         validate(a.out, a.max_iter)
     elif a.step == 'emulate':
-        emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
-                a.max_iter)
+        src = VAL_RUNS[a.val] if a.val else a.src
+        out = a.out or f'{RUNS}/emulated/{a.val or "h0.5"}_val'
+        emulate(src, out, a.train, a.max_iter)
+        if a.val:
+            compare_faceon(out)
     elif a.step == 'redo':
         redo(a.run, a.max_iter)
     elif a.step == 'gapfill':
@@ -885,7 +894,7 @@ def main():
     elif a.step == 'dense':
         dense(a.h, a.nrays, a.nphi, a.out, a.max_iter)
     elif a.step == 'compare':
-        compare_faceon(a.out or f'{RUNS}/emulated/h0.5_val')
+        compare_faceon(a.out or f'{RUNS}/emulated/{a.val or "h0.5"}_val')
     elif a.step == 'heights':
         validate_heights(a.runs, a.max_iter)
     else:

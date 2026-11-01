@@ -1,7 +1,7 @@
 """Shared machinery for the pillar-disc flux-flux experiments.
 
-Holds the pieces that `test_fluxflux_embedded.py` (single geometry, embedded
-mass scan) and `test_fluxflux_sigmaphi.py` (pillar width scan) both need: the
+Holds the pieces that `tests/test_fluxflux_embedded.py` (single geometry, embedded
+mass scan) and `tests/test_fluxflux_sigmaphi.py` (pillar width scan) both need: the
 disc surface integration, the embedded-star hot spot temperature map, the
 diffuse shadow glow, the lamp sweep, the PyROA-style driving light curve, the
 observed PG 0844+349 decomposition, and the line-of-sight temperature render.
@@ -81,7 +81,7 @@ def spot_t4(grid, m_embedded):
     pillar: one pillar is raised by one object, so this is an individual mass,
     not a summed population. Reproducing the observed PG 0844 constant component
     needs about 1e4 to 1e5 Msun here, i.e. an intermediate-mass black hole
-    rather than a star (see debug_one_star_per_pillar.py). Also returns
+    rather than a star (see debug/debug_one_star_per_pillar.py). Also returns
     the per-pillar footprint areas (cm^2) and peak spot temperatures (K)."""
     dk = grid.dk
     t4 = np.zeros_like(grid.r2)
@@ -283,7 +283,7 @@ def ticks(ax):
 def los_map(grid, T2d, fname, notes=(), lim=20.0, vmin=5.0e2, vmax=4.0e4,
             spots=None, spot_T=None):
     """Depth-sorted sky-plane render of a surface temperature map, as in
-    transient/plot_los_view.py: the surface is projected for the observer
+    transient/scripts/plot_los_view.py: the surface is projected for the observer
     direction e = (sin i, 0, cos i) and drawn far to near so raised pillars
     cover what they hide."""
     dk = grid.dk

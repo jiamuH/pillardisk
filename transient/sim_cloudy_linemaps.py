@@ -151,7 +151,7 @@ def main():
     # ~1-cell-wide spikes at positions (front gap)/NSUP apart, so NSUP
     # must be large enough for the spikes to overlap at the radial cell
     # scale or the map shows a picket fence of 'rose petal' rings
-    # (verified in debug_rose_rings.py: peak spacing = front gap / NSUP)
+    # (verified in transient/debug/debug_rose_rings.py: peak spacing = front gap / NSUP)
     NSUP = 64
     rf_edges = sim['rf']
     drc = np.diff(rf_edges)

@@ -16,7 +16,7 @@ without modifying the parent:
    tall, azimuthally extended pillar sits on the near side (phi = 0).
 
 Also provides a vectorized compute_sed() that reproduces the parent's
-discretization exactly (verified in test_transient.py) and applies the
+discretization exactly (verified in transient/tests/test_transient.py) and applies the
 occultation mask.
 """
 

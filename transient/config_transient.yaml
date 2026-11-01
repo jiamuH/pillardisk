@@ -20,7 +20,7 @@ lamp:
 
 observation:
   dmpc: auto         # luminosity distance from redshift (FlatLambdaCDM H0=70 Om0=0.3)
-  inclination: 60.0  # degrees (interior optimum of fit_incl_scan.py, ~58; adopted 60)
+  inclination: 60.0  # degrees (interior optimum of transient/scripts/fit_incl_scan.py, ~58; adopted 60)
   redshift: 0.494
 
 transient:

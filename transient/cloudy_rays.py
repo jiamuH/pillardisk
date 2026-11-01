@@ -103,7 +103,7 @@ STOP_COL = 24.0
 # the iterate line:
 # one pass leaves a ray's far side as transparent as its lamp side; 2
 # passes close it at ~2x the cost (4 did not converge either, at 3-5x;
-# transient/NOTE_line_escape.md)
+# transient/docs/NOTE_line_escape.md)
 VTURB = 10
 ITERATE = 'iterate 2'
 WMIN, WMAX = 300.0, 12000.0
@@ -487,7 +487,7 @@ def plan_preview(out, h_ld, nrays, nphi):
     print(f"wrote {path}")
 
 
-# line-escape test set (transient/NOTE_line_escape.md, step 2): for each
+# line-escape test set (transient/docs/NOTE_line_escape.md, step 2): for each
 # column (phi index 0, the arm 48, the quiet column 140, next to the star
 # 240) the H alpha-bright high ray t13 and the Mg II-bright rim ray t31,
 # plus t16 and t24 at phi 0

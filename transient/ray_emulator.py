@@ -52,6 +52,7 @@ Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator heightsplot   (replot, no training)
       python3 -m transient.ray_emulator emulate --src RUN --out DIR
       python3 -m transient.ray_emulator compare --out DIR   (face-on maps)
+      python3 -m transient.ray_emulator dense --h 0.5 --nrays 30000
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
@@ -549,11 +550,24 @@ def emulate(src, out, train=None, max_iter=400):
                 Ntot_c4=10 ** pred['lNtot_c4'],
                 thick_c4=10 ** pred['lthk_c4'])
     os.makedirs(out, exist_ok=True)
-    shutil.copy(os.path.join(src, 'rays_meta.npz'),
-                os.path.join(out, 'rays_meta.npz'))
+    if os.path.abspath(out) != src:
+        shutil.copy(os.path.join(src, 'rays_meta.npz'),
+                    os.path.join(out, 'rays_meta.npz'))
     path = os.path.join(out, 'emulated.npz')
     np.savez(path, **save)
     print(f"wrote {path}: {len(names)} emulated rays of {src}")
+
+
+def dense(h_ld, nrays, nphi, out=None, max_iter=400):
+    """A dense emulated run: cloudy_rays' adaptive plan of ~nrays rays in
+    nphi phi columns (at most one per sim phi cell) for a lamp at h_ld
+    [ld], traced (decks only, no Cloudy) into out, then emulated there by
+    models trained on all HEIGHT_RUNS. Returns out."""
+    from transient.cloudy_rays import write_adaptive
+    out = out or f'{RUNS}/emulated/h{h_ld:g}_n{nrays}'
+    write_adaptive(out, h_ld, nrays, nphi)
+    emulate(out, out, list(HEIGHT_RUNS), max_iter)
+    return out
 
 
 CMP_LINES = (('ha', (1,), r'H$\bm{\alpha}$'), ('he2', (7,), r'He\,II'),
@@ -657,7 +671,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', choices=['table', 'validate', 'heights',
                                        'heightsplot', 'emulate',
-                                       'compare'])
+                                       'compare', 'dense'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -667,6 +681,12 @@ def main():
     ap.add_argument('--train', nargs='+', default=None,
                     help='emulate: training runs (default: the heights '
                     'runs but --src)')
+    ap.add_argument('--h', type=float, default=0.5,
+                    help='dense: lamp height [ld]')
+    ap.add_argument('--nrays', type=int, default=30000,
+                    help='dense: rays in the plan')
+    ap.add_argument('--nphi', type=int, default=256,
+                    help='dense: phi columns (at most the sim phi cells)')
     ap.add_argument('--max-iter', type=int, default=400,
                     help='boosting iterations per target model')
     a = ap.parse_args()
@@ -677,6 +697,8 @@ def main():
     elif a.step == 'emulate':
         emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
                 a.max_iter)
+    elif a.step == 'dense':
+        dense(a.h, a.nrays, a.nphi, a.out, a.max_iter)
     elif a.step == 'compare':
         compare_faceon(a.out or f'{RUNS}/emulated/h0.5_val')
     elif a.step == 'heights':

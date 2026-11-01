@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pillardisk"
 version = "0.1.0"
 description = "AGN accretion disc lag spectra and emission-line VDMs with Gaussian pillar bumps."
-requires-python = ">=3.9"
+requires-python = ">=3.7"
 dependencies = [
     "numpy",
     "matplotlib",
@@ -16,11 +16,12 @@ dependencies = [
 [project.optional-dependencies]
 extras = ["scipy", "pandas", "tqdm"]
 
-# The project root and the package directory are the same path; tell
-# setuptools that the package "pillardisk" lives at "." rather than
-# trying auto-discovery (which would look for a pillardisk/ subdir).
-[tool.setuptools]
-packages = ["pillardisk"]
+# src layout: the package lives in src/pillardisk (core disc/line modules
+# and the transient/ subpackage); scripts/, debug/, tests/ and docs/ at the
+# repo root use it after `pip install -e .`
+[project.scripts]
+emu = "pillardisk.transient.ray_emulator:main"
+rays = "pillardisk.transient.cloudy_rays:main"
 
-[tool.setuptools.package-dir]
-pillardisk = "."
+[tool.setuptools.packages.find]
+where = ["src"]

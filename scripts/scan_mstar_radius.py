@@ -14,7 +14,7 @@ observed component, which bracket the plausible temperature.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from fluxflux_lib import load_pg0844, SIGMA_SB, L_EDD_PER_MSUN, AU_CM, b_nu, ticks
+from pillardisk.fluxflux_lib import load_pg0844, SIGMA_SB, L_EDD_PER_MSUN, AU_CM, b_nu, ticks
 from pillardisk.pillar_disk import C, ANGSTROM
 
 MJY = 1e-26

@@ -15,7 +15,7 @@ function (up to the global $1/L_{\rm ion}$ factor that is constant
 across cells).
 
 Usage:
-    python3 -m pillardisk.scripts.make_vdm_responsivity [config_line.yaml]
+    python3 -m scripts.make_vdm_responsivity [config_line.yaml]
 """
 
 import argparse
@@ -25,7 +25,7 @@ import tempfile
 
 import yaml
 
-from pillardisk.scripts.make_disc_figures import _make_figdir, move
+from scripts.make_disc_figures import _make_figdir, move
 
 
 def make_n100_config(config_file):

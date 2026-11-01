@@ -14,7 +14,7 @@ scan over temperature with the amplitude solved in closed form.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from fluxflux_lib import load_pg0844, SIGMA_SB, L_EDD_PER_MSUN, AU_CM, b_nu, ticks
+from pillardisk.fluxflux_lib import load_pg0844, SIGMA_SB, L_EDD_PER_MSUN, AU_CM, b_nu, ticks
 from pillardisk.pillar_disk import C, ANGSTROM
 
 DL_CM = 287.0 * 3.086e24

@@ -10,7 +10,7 @@ achievable nu L_nu against the observed constant component.
 """
 import numpy as np
 
-from fluxflux_lib import load_pg0844, SIGMA_SB, L_EDD_PER_MSUN, AU_CM, b_nu
+from pillardisk.fluxflux_lib import load_pg0844, SIGMA_SB, L_EDD_PER_MSUN, AU_CM, b_nu
 from pillardisk.pillar_disk import C, ANGSTROM
 
 DL_CM = 287.0 * 3.086e24

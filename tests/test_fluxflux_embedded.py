@@ -34,7 +34,7 @@ from matplotlib.lines import Line2D
 
 from pillardisk.pillar_disk import C, ANGSTROM, PC_TO_LD
 from tests.test_lag_spectrum import build_disk, add_pillars
-from fluxflux_lib import (LD_CM, SIGMA_SB, L_EDD_PER_MSUN, DiscGrid, spot_t4,
+from pillardisk.fluxflux_lib import (LD_CM, SIGMA_SB, L_EDD_PER_MSUN, DiscGrid, spot_t4,
                           diffuse_amplitude, diffuse_flux, lamp_states, eta_lp,
                           driving_lc as _driving_lc, nonvar_anchor, load_pg0844,
                           overlay_pg0844 as _overlay_pg0844, PG_KEYS,
@@ -475,7 +475,7 @@ if OBS is not None:
               f"{OBS['faint'][k]:>11.3f}{f_mod[k]:>11.3f}")
 
 # --- Figure 4: line-of-sight view of the surface temperature ---------------
-# Same rendering as transient/scripts/plot_los_view.py: the surface is projected onto
+# Same rendering as src/pillardisk/transient/scripts/plot_los_view.py: the surface is projected onto
 # the sky plane for the observer direction e = (sin i, 0, cos i), depth sorted
 # so raised pillars cover what they hide, and colored by surface temperature.
 LOS_LIM = 20.0                 # sky half-width, light days

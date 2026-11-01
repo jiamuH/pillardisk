@@ -20,4 +20,4 @@ __pycache__/
 *.o
 
 # transient: simulation dumps, Cloudy caches, photoionization run folders
-transient/data/
+src/pillardisk/transient/data/

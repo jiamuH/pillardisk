@@ -27,7 +27,7 @@ from matplotlib.lines import Line2D
 
 from pillardisk.pillar_disk import C, ANGSTROM, PC_TO_LD
 import tests.test_lag_spectrum as tls
-from fluxflux_lib import (LD_CM, DiscGrid, spot_t4, diffuse_amplitude,
+from pillardisk.fluxflux_lib import (LD_CM, DiscGrid, spot_t4, diffuse_amplitude,
                           diffuse_flux, lamp_states, eta_lp, driving_lc,
                           nonvar_anchor, load_pg0844, overlay_pg0844, PG_KEYS,
                           mass_label, ticks, los_map, L_EDD_PER_MSUN, AU_CM)

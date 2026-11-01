@@ -2,7 +2,7 @@
 on a very coarse grid. Runs it twice with the same seed: the first run computes
 and writes the cache, the second must read it and give the same figure.
 
-Run:  python3 -m pillardisk.debug.debug_vdm_frame_cache
+Run:  python3 -m debug.debug_vdm_frame_cache
 """
 import os
 import shutil

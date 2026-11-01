@@ -10,7 +10,7 @@ heating has to compete against is measured rather than assumed.
 import numpy as np
 
 import tests.test_lag_spectrum as tls
-from fluxflux_lib import DiscGrid, eta_lp
+from pillardisk.fluxflux_lib import DiscGrid, eta_lp
 
 HLAMP = 50 * 0.00399
 tls.config['disk']['nphi'] = 720

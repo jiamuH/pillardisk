@@ -1,7 +1,7 @@
 """Replot the manual-pillar (two-pillar) H-alpha velocity-delay figure from the
 cached maps written by make_disc_figures._run_cloudy_vdm, without recomputing.
 
-Run:  python3 -m pillardisk.scripts.replot_vdm_manual_pillars [cache.npz] [output.png]
+Run:  python3 -m scripts.replot_vdm_manual_pillars [cache.npz] [output.png]
 """
 import sys
 

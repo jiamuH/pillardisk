@@ -246,7 +246,7 @@ def main(config_file='config_line.yaml'):
     # ── Done ──────────────────────────────────────────────
     print('\n' + '='*50)
     print(f' Disc figures saved to {FIGDIR}/')
-    print(' Line figures: run python3 -m pillardisk.scripts.make_line_figures')
+    print(' Line figures: run python3 -m scripts.make_line_figures')
     print('='*50)
     for f in sorted(os.listdir(FIGDIR)):
         if f.startswith('fig_') and f.endswith('.png'):

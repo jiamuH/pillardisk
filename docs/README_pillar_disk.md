@@ -41,7 +41,7 @@ python3 pillar_disk.py my_config.yaml
 ### Basic Example
 
 ```python
-from pillar_disk import PillarDisk
+from pillardisk.pillar_disk import PillarDisk
 import numpy as np
 
 # Create a disk model

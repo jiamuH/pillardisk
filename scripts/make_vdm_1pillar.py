@@ -9,13 +9,13 @@ and save the resulting figure into the parameter-tagged
 pillar_disc_draft/figures/ directory.
 
 Usage:
-    python3 -m pillardisk.scripts.make_vdm_1pillar [config_line.yaml]
+    python3 -m scripts.make_vdm_1pillar [config_line.yaml]
 """
 
 import argparse
 import os
 
-from pillardisk.scripts.make_disc_figures import (
+from scripts.make_disc_figures import (
     _make_figdir,
     _run_cloudy_vdm,
     make_config,

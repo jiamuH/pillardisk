@@ -8,7 +8,7 @@ Compares, for C IV, Mg II and H-alpha:
   (b) the paper's stated method (and Fig. 3): natural cubic spline in log flux,
       differentiated analytically.
 
-Run:  python3 -m pillardisk.debug.debug_eta_interpolation
+Run:  python3 -m debug.debug_eta_interpolation
 """
 import os
 

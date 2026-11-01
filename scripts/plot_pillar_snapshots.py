@@ -9,7 +9,7 @@ that the pillar position, shadow, and disc tilt look correct at every step
 of the time-evolving computation (independently of the spectral output).
 
 Usage:
-    python3 -m pillardisk.scripts.plot_pillar_snapshots [config_line.yaml]
+    python3 -m scripts.plot_pillar_snapshots [config_line.yaml]
 """
 
 import argparse

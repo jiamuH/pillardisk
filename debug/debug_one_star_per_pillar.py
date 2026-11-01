@@ -9,7 +9,7 @@ actually deliver.
 """
 import numpy as np
 
-from fluxflux_lib import load_pg0844, L_EDD_PER_MSUN
+from pillardisk.fluxflux_lib import load_pg0844, L_EDD_PER_MSUN
 from pillardisk.pillar_disk import C, ANGSTROM
 
 MPC_CM = 3.086e24

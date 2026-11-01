@@ -8,14 +8,14 @@ The 100 pillars are drawn with a fixed random seed, and the maps are cached
 in plots/vdm_frame_maps.npz, so a rerun after a plotting change only replots.
 
 Usage:
-    python3 -m pillardisk.scripts.make_vdm_frame [config_line.yaml] [--seed N] [--recompute]
+    python3 -m scripts.make_vdm_frame [config_line.yaml] [--seed N] [--recompute]
 """
 
 import argparse
 import os
 import shutil
 
-from pillardisk.scripts.make_disc_figures import _make_figdir, make_config, move
+from scripts.make_disc_figures import _make_figdir, make_config, move
 
 
 SEED = 1

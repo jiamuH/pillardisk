@@ -15,7 +15,7 @@ import numpy as np
 
 from pillardisk.pillar_disk import C, DAY
 import tests.test_lag_spectrum as tls
-from fluxflux_lib import DiscGrid, eta_lp, SIGMA_SB, L_EDD_PER_MSUN, AU_CM
+from pillardisk.fluxflux_lib import DiscGrid, eta_lp, SIGMA_SB, L_EDD_PER_MSUN, AU_CM
 
 G = 6.674e-8
 M_SUN = 1.989e33

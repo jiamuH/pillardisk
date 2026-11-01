@@ -15,7 +15,7 @@ the flux maps are cached in plots/time_evolving_maps_<1pillar|N100>.npz, so a
 rerun after a plotting change only replots.
 
 Usage:
-    python3 -m pillardisk.scripts.make_time_evolving_figures [config_line.yaml] [--seed N] [--recompute]
+    python3 -m scripts.make_time_evolving_figures [config_line.yaml] [--seed N] [--recompute]
 """
 
 import argparse
@@ -24,7 +24,7 @@ import tempfile
 
 import yaml
 
-from pillardisk.scripts.make_disc_figures import (
+from scripts.make_disc_figures import (
     _make_figdir,
     cleanup_geometry_snapshots,
     move,

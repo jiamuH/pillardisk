@@ -10,7 +10,7 @@ is varied between calls. Output is a (n_lines x 3) figure: F(f_trans=0),
 F(f_trans=0.3), and the difference F_0 - F_0.3.
 
 Usage:
-    python3 -m pillardisk.scripts.plot_ftrans_comparison [config_line.yaml]
+    python3 -m scripts.plot_ftrans_comparison [config_line.yaml]
 """
 
 import argparse
@@ -28,7 +28,7 @@ from pillardisk.pillar_line_time_cloudy import (
     load_cloudy_models,
     v_virial_from_mbh,
 )
-from pillardisk.scripts.plot_pillar_snapshots import _build_disk_with_one_pillar
+from scripts.plot_pillar_snapshots import _build_disk_with_one_pillar
 
 
 def _run_one_f_trans(disk, f_trans, cloudy_interp_dict, phi_grid,

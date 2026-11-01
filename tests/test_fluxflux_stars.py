@@ -31,7 +31,7 @@ from scipy.optimize import minimize
 
 from pillardisk.pillar_disk import C, ANGSTROM, PC_TO_LD
 import tests.test_lag_spectrum as tls
-from fluxflux_lib import (LD_CM, AU_CM, SIGMA_SB, L_EDD_PER_MSUN, b_nu,
+from pillardisk.fluxflux_lib import (LD_CM, AU_CM, SIGMA_SB, L_EDD_PER_MSUN, b_nu,
                           DiscGrid, diffuse_amplitude, diffuse_flux, eta_lp,
                           driving_lc, nonvar_anchor, load_pg0844,
                           overlay_pg0844, PG_KEYS, ticks, los_map)

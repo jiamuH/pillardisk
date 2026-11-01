@@ -19,7 +19,7 @@ Also prints a quick summary of the eta range per line and reports
 whether negative eta values occur over the spliced [15, 21] grid.
 
 Usage:
-    python3 -m pillardisk.scripts.plot_cloudy_responsivity_curves
+    python3 -m scripts.plot_cloudy_responsivity_curves
 """
 
 import argparse

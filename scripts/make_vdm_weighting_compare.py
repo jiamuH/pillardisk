@@ -19,7 +19,7 @@ Any cell-by-cell departure (non-power-law F-L curve, sign flip, etc.)
 shows up directly in the diff panel.
 
 Usage:
-    python3 -m pillardisk.scripts.make_vdm_weighting_compare [config_line.yaml]
+    python3 -m scripts.make_vdm_weighting_compare [config_line.yaml]
 """
 
 import argparse
@@ -40,8 +40,8 @@ from pillardisk.pillar_line_time_cloudy import (
     compute_velocity_delay_map_cloudy,
     v_virial_from_mbh,
 )
-from pillardisk.scripts.plot_pillar_snapshots import _build_disk_with_one_pillar
-from pillardisk.scripts.make_time_evolving_figures import make_many_pillars_config
+from scripts.plot_pillar_snapshots import _build_disk_with_one_pillar
+from scripts.make_time_evolving_figures import make_many_pillars_config
 
 
 def _build_disk_with_n100(config_file):

@@ -17,7 +17,7 @@ Runs, in order (each step is slow):
 Nothing is copied into pillar_disc_draft/figures/; that is done after checking.
 
 Usage:
-    python3 -m pillardisk.scripts.make_line_figures [--start N] [--steps 4,8]
+    python3 -m scripts.make_line_figures [--start N] [--steps 4,8]
 """
 
 import argparse
@@ -27,7 +27,7 @@ import runpy
 
 def make_rgb_map(config_file='config_line.yaml'):
     """100-pillar RGB emission-line map (moved here from make_disc_figures)."""
-    from pillardisk.scripts.make_disc_figures import _make_figdir, make_config, move
+    from scripts.make_disc_figures import _make_figdir, make_config, move
     from pillardisk.pillar_line_cloudy import main as cloudy_main
     figdir = _make_figdir(config_file)
     tmp = make_config(config_file, make_many=True)
@@ -40,7 +40,7 @@ def make_rgb_map(config_file='config_line.yaml'):
 
 
 def main(start=1, steps_wanted=None):
-    from pillardisk.scripts import (make_vdm_1pillar, make_vdm_frame,
+    from scripts import (make_vdm_1pillar, make_vdm_frame,
                             make_time_evolving_figures, make_vdm_weighting_compare,
                             plot_inclination_comparison, plot_height_comparison)
     steps = [
@@ -51,7 +51,7 @@ def main(start=1, steps_wanted=None):
         ('inclination appendix figure', lambda: plot_inclination_comparison.main()),
         ('height appendix figure', lambda: plot_height_comparison.main()),
         ('transparency appendix figure',
-         lambda: runpy.run_module('pillardisk.tests.test_ftrans_vdm', run_name='__main__')),
+         lambda: runpy.run_module('tests.test_ftrans_vdm', run_name='__main__')),
         ('RGB emission map', make_rgb_map),
     ]
     for i, (name, run) in enumerate(steps, start=1):

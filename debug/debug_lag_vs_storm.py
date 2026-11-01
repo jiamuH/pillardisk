@@ -7,11 +7,11 @@ For the bare bowl, the ripple model and every pillar model in the four scans:
   - the best-fitting alpha when the model curve is compared with
     tau = alpha [(lambda/1367)^(4/3) - 1]  (thin disc: alpha = 0.14 day).
 
-Run:  python3 -m pillardisk.debug.debug_lag_vs_storm
+Run:  python3 -m debug.debug_lag_vs_storm
 """
 import numpy as np
 
-from pillardisk.tests.test_lag_spectrum import (ALPHA_THIN_DISC, LAMBDA_REF, load_data,
+from tests.test_lag_spectrum import (ALPHA_THIN_DISC, LAMBDA_REF, load_data,
                                           load_or_compute_ripple, load_storm_lags,
                                           scans)
 

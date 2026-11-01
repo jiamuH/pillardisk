@@ -3,14 +3,14 @@ figure layout quickly. Same config as the paper figure but with a coarse disc
 grid (nr = 150, nphi = 90, 16 times fewer cells), written to a separate cache so
 it never mixes with the full-resolution run.
 
-Run:  python3 -m pillardisk.debug.debug_vdm_lowres
+Run:  python3 -m debug.debug_vdm_lowres
 """
 import os
 import tempfile
 
 import yaml
 
-from pillardisk.scripts.make_disc_figures import _run_cloudy_vdm
+from scripts.make_disc_figures import _run_cloudy_vdm
 
 CONFIG = 'config_line.yaml'
 CACHE = 'plots/vdm_manual_pillars_maps_lowres.npz'

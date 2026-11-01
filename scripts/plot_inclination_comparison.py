@@ -11,7 +11,7 @@ F(lambda, t) maps vertically. Residuals are not plotted -- the raw flux
 maps already show the foreshortening modulation at high i.
 
 Usage:
-    python3 -m pillardisk.scripts.plot_inclination_comparison [config_line.yaml]
+    python3 -m scripts.plot_inclination_comparison [config_line.yaml]
 """
 
 import argparse
@@ -28,7 +28,7 @@ from pillardisk.pillar_line_time_cloudy import (
     load_cloudy_models,
     v_virial_from_mbh,
 )
-from pillardisk.scripts.plot_pillar_snapshots import _build_disk_with_one_pillar
+from scripts.plot_pillar_snapshots import _build_disk_with_one_pillar
 
 
 def _set_inclination_deg(disk, i_deg):

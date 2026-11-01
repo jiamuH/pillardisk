@@ -52,7 +52,8 @@ Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator heightsplot   (replot, no training)
       python3 -m transient.ray_emulator emulate --src RUN --out DIR
       python3 -m transient.ray_emulator compare --out DIR   (face-on maps)
-      python3 -m transient.ray_emulator dense --h 0.5 --nrays 30000
+      python3 -m transient.ray_emulator dense --h 0.5 --nrays 30000  (+ map)
+      python3 -m transient.ray_emulator redo --run h0.5_n30000   (re-emulate)
       python3 -m transient.ray_emulator synth --out DIR   (re-smooth, no training)
       python3 -m transient.ray_emulator gapfill --src DENSE_RUN   (Cloudy where
           the emulator is blind; picked up by the next emulate)
@@ -700,7 +701,23 @@ def dense(h_ld, nrays, nphi, out=None, max_iter=400):
     out = out or f'{RUNS}/emulated/h{h_ld:g}_n{nrays}'
     write_adaptive(out, h_ld, nrays, nphi)
     emulate(out, out, training_runs(), max_iter)
+    faceon(out)
     return out
+
+
+def faceon(out):
+    """cloudy_rays' face-on map of the emulated run out"""
+    from transient.cloudy_rays import faceon_map
+    faceon_map(out, 2)
+
+
+def redo(run, max_iter=400):
+    """Re-emulate the dense run <RUNS>/emulated/<run> in place on its own
+    plan (current training_runs(): retrains once if they changed) and
+    redraw its face-on map"""
+    out = os.path.join(RUNS, 'emulated', run)
+    emulate(out, out, training_runs(), max_iter)
+    faceon(out)
 
 
 CMP_LINES = (('ha', (1,), r'H$\bm{\alpha}$'), ('he2', (7,), r'He\,II'),
@@ -805,7 +822,7 @@ def main():
     ap.add_argument('step', choices=['table', 'validate', 'heights',
                                        'heightsplot', 'emulate',
                                        'compare', 'dense', 'synth',
-                                       'gapfill'])
+                                       'gapfill', 'redo'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -821,6 +838,8 @@ def main():
                     help='dense: rays in the plan')
     ap.add_argument('--nphi', type=int, default=256,
                     help='dense: phi columns (at most the sim phi cells)')
+    ap.add_argument('--run', default=None,
+                    help='redo: a run name under <RUNS>/emulated')
     ap.add_argument('--n', type=int, default=GAP_N,
                     help='gapfill: Cloudy rays to add')
     ap.add_argument('--ncpu', type=int, default=GAP_NCPU,
@@ -839,6 +858,8 @@ def main():
     elif a.step == 'emulate':
         emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
                 a.max_iter)
+    elif a.step == 'redo':
+        redo(a.run, a.max_iter)
     elif a.step == 'gapfill':
         gapfill(a.src, a.n, a.out, a.ncpu, not a.norun)
     elif a.step == 'synth':

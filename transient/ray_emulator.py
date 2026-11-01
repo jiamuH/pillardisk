@@ -54,7 +54,7 @@ Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator compare --out DIR   (face-on maps)
       python3 -m transient.ray_emulator dense --h 0.5 --nrays 30000  (+ map)
       python3 -m transient.ray_emulator redo --run h0.5_n30000   (re-emulate)
-      python3 -m transient.ray_emulator synth --out DIR   (re-smooth, no training)
+      python3 -m transient.ray_emulator synth --run NAME  (rebuild + map, no training)
       python3 -m transient.ray_emulator gapfill --src DENSE_RUN   (Cloudy where
           the emulator is blind; picked up by the next emulate)
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
@@ -469,6 +469,10 @@ def fit_models(tabs, max_iter=400):
     return models
 
 
+SYN_DS = 0.005              # [r0] largest step of a synthetic profile (the
+                            # sim's radial cells are 0.012 r0)
+
+
 def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=40):
     """one emulated ray from its predicted targets p {target: value} and
     its deck (s, n_H; s_skin): (ems (npt, NEMS) on a Cloudy depth grid,
@@ -486,6 +490,13 @@ def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=40):
         sl, sr = max(c - lo, fl) / 1.645, max(hi - c, fl) / 1.645
         shape[key] = (c, sl, sr, lo, hi)
         grids.append(np.linspace(c - 4 * sl, c + 4 * sr, npt))
+        # and at most SYN_DS apart in s: the face-on map puts each point
+        # in one radial cell, so a wide (grazing) layer sampled coarser
+        # than the cells leaves empty cells between its points (speckle)
+        sa, sb = np.interp(np.clip([c - 4 * sl, c + 4 * sr], 0, nmax),
+                           col, s)
+        ds = SYN_DS * CONFIG['R0_LD'] * LD_CM
+        grids.append(np.interp(np.arange(sa, sb, ds), s, col))
     Ng = np.unique(np.clip(np.concatenate(grids), 0, nmax))
     sg = np.interp(Ng, col, s)
     d = sg - s[0]
@@ -839,7 +850,7 @@ def main():
     ap.add_argument('--nphi', type=int, default=256,
                     help='dense: phi columns (at most the sim phi cells)')
     ap.add_argument('--run', default=None,
-                    help='redo: a run name under <RUNS>/emulated')
+                    help='redo / synth: a run name under <RUNS>/emulated')
     ap.add_argument('--n', type=int, default=GAP_N,
                     help='gapfill: Cloudy rays to add')
     ap.add_argument('--ncpu', type=int, default=GAP_NCPU,
@@ -863,7 +874,9 @@ def main():
     elif a.step == 'gapfill':
         gapfill(a.src, a.n, a.out, a.ncpu, not a.norun)
     elif a.step == 'synth':
-        synth(a.out, a.smooth)
+        out = a.out or os.path.join(RUNS, 'emulated', a.run)
+        synth(out, a.smooth)
+        faceon(out)
     elif a.step == 'dense':
         dense(a.h, a.nrays, a.nphi, a.out, a.max_iter)
     elif a.step == 'compare':

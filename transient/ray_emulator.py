@@ -51,6 +51,7 @@ Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator heights
       python3 -m transient.ray_emulator heightsplot   (replot, no training)
       python3 -m transient.ray_emulator emulate --src RUN --out DIR
+      python3 -m transient.ray_emulator compare --out DIR   (face-on maps)
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
@@ -555,10 +556,108 @@ def emulate(src, out, train=None, max_iter=400):
     print(f"wrote {path}: {len(names)} emulated rays of {src}")
 
 
+CMP_LINES = (('ha', (1,), r'H$\bm{\alpha}$'), ('he2', (7,), r'He\,II'),
+             ('c4', (3, 4), r'C\,IV'), ('mg2', (5, 6), r'Mg\,II'))
+CMP_DEX = 0.5               # [dex] the log-ratio colour range
+
+
+def compare_faceon(out):
+    """Face-on surface brightness of the emulated run out against its
+    source run's Cloudy rays (cloudy_rays.faceon_surface on both): rows
+    H alpha, He II, C IV, Mg II; columns Cloudy, emulated, log ratio.
+    Writes <out>/faceon_compare.npz and <out>/plots/faceon_compare.png"""
+    from matplotlib.colors import LogNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from transient.cloudy_rays import DUMP, faceon_surface
+    from transient.sim_spectrum import load_sim
+    src = str(np.load(os.path.join(out, 'emulated.npz'))['src'])
+    sim = load_sim(DUMP)
+    chans = [(c, None) for _, c, _ in CMP_LINES]
+    Sc, okc, _ = faceon_surface(src, sim, 2, chans)
+    Se, oke, _ = faceon_surface(out, sim, 2, chans)
+    ok = okc & oke
+    r0 = CONFIG['R0_LD'] * LD_CM
+    rf, phf = sim['rf'], sim['phf']
+    area = (sim['r'] * r0 * np.diff(rf) * r0)[None, :] * \
+        np.diff(phf)[:, None]
+    np.savez(os.path.join(out, 'faceon_compare.npz'), S_cloudy=Sc,
+             S_emulated=Se, ok=ok, lines=[k for k, _, _ in CMP_LINES])
+    plt = plot_style()
+    R, P = np.meshgrid(rf, phf)
+    X, Y = R * np.cos(P), R * np.sin(P)
+    fig, axs = plt.subplots(len(CMP_LINES), 3, figsize=(21, 6.6 *
+                                                         len(CMP_LINES)),
+                            sharex=True, sharey=True)
+    for i, (key, _, tex) in enumerate(CMP_LINES):
+        smax = np.nanmax(np.where(ok, Sc[i], np.nan))
+        norm = LogNorm(smax * 1e-5, smax)
+        cmap = plt.get_cmap('magma').copy()
+        cmap.set_bad('white')
+        for j, S in enumerate((Sc[i], Se[i])):
+            ax = axs[i, j]
+            pc = ax.pcolormesh(X, Y, np.where(ok, np.maximum(S, norm.vmin),
+                                              np.nan),
+                               norm=norm, cmap=cmap, shading='flat',
+                               rasterized=True)
+        cax = make_axes_locatable(axs[i, 1]).append_axes('right',
+                                                         size='4.5%',
+                                                         pad=0.1)
+        fig.colorbar(pc, cax=cax).set_label(
+            r'$S\,[\rm erg\,s^{-1}\,cm^{-2}]$', fontsize=19)
+        make_axes_locatable(axs[i, 0]).append_axes(
+            'right', size='4.5%', pad=0.1).set_visible(False)
+        lr = np.log10(np.maximum(Se[i], 1e-300) / np.maximum(Sc[i], 1e-300))
+        lr = np.where(ok & (Sc[i] > norm.vmin), lr, np.nan)
+        pc = axs[i, 2].pcolormesh(X, Y, lr, cmap='RdBu_r', vmin=-CMP_DEX,
+                                  vmax=CMP_DEX, shading='flat',
+                                  rasterized=True)
+        cax = make_axes_locatable(axs[i, 2]).append_axes('right',
+                                                         size='4.5%',
+                                                         pad=0.1)
+        fig.colorbar(pc, cax=cax).set_label(
+            r'$\log S_{\rm emu}/S_{\rm Cloudy}$', fontsize=19)
+        tot = np.log10(np.nansum(np.where(ok, Se[i], 0) * area)
+                       / np.nansum(np.where(ok, Sc[i], 0) * area))
+        axs[i, 0].text(0.04, 0.96, r'\textbf{' + tex + r'}', color='k',
+                       transform=axs[i, 0].transAxes, va='top',
+                       fontsize=26)
+        axs[i, 2].text(0.04, 0.96, r'\textbf{total %+.3f dex}' % tot,
+                       transform=axs[i, 2].transAxes, va='top',
+                       fontsize=19)
+        print(f"{key}: emulated / Cloudy total {tot:+.3f} dex; per-cell "
+              f"|log ratio| median {np.nanmedian(np.abs(lr)):.3f}, 84% "
+              f"{np.nanpercentile(np.abs(lr), 84):.3f} dex")
+    for j, t in enumerate((r'\textbf{Cloudy}', r'\textbf{emulated}',
+                           r'\textbf{emulated / Cloudy}')):
+        axs[0, j].set_title(t, fontsize=26)
+    for ax in axs.ravel():
+        ax.set_aspect('equal')
+        ax.set_xlim(-rf[-1], rf[-1])
+        ax.set_ylim(-rf[-1], rf[-1])
+        ax.set_yticks([-1, 0, 1, 2])         # none at -2: it meets x = -2
+        ax.minorticks_on()
+        ax.tick_params(which='both', direction='in', labelsize=19,
+                       top=True, right=True)
+        ax.tick_params(which='major', length=10, width=2)
+        ax.tick_params(which='minor', length=5, width=1.5)
+    for ax in axs[-1]:
+        ax.set_xlabel(r'$x\,[r_0]$')
+    for ax in axs[:, 0]:
+        ax.set_ylabel(r'$y\,[r_0]$')
+    fig.tight_layout(h_pad=0.3, w_pad=0.3)
+    pdir = os.path.join(out, 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    path = os.path.join(pdir, 'faceon_compare.png')
+    fig.savefig(path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', choices=['table', 'validate', 'heights',
-                                       'heightsplot', 'emulate'])
+                                       'heightsplot', 'emulate',
+                                       'compare'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -578,6 +677,8 @@ def main():
     elif a.step == 'emulate':
         emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
                 a.max_iter)
+    elif a.step == 'compare':
+        compare_faceon(a.out or f'{RUNS}/emulated/h0.5_val')
     elif a.step == 'heights':
         validate_heights(a.runs, a.max_iter)
     else:

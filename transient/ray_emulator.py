@@ -508,19 +508,43 @@ def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=40):
 SMOOTH_N = 5                # rays in the running median along each column
 
 
-def emulate(src, out, train=None, max_iter=400):
-    """An emulated run in out: the ray plan of run src (rays_meta.npz and
-    its decks), every ray's targets predicted by models trained on the
-    runs train (default HEIGHT_RUNS without src), saved raw to
-    <out>/emulated_pred.npz (with each ray's s_skin); then synth"""
-    src = os.path.abspath(src)
-    if train is None:
-        train = [r for r in HEIGHT_RUNS if os.path.abspath(r) != src]
+MODELS_DIR = f'{RUNS}/train/emulator_models'     # trained models, reused
+
+
+def trained_models(train, max_iter=400):
+    """{target: model} trained on the runs train, loaded from MODELS_DIR
+    when a saved set matches (same runs, rays, table version and max_iter),
+    else fitted (fit_models) and saved there (one file per training set)"""
+    import hashlib
+    import joblib
     tabs = [build_table(r) for r in train]
+    key = repr((sorted(os.path.abspath(r) for r in train),
+                [len(t['name']) for t in tabs], TABLE_VERSION, max_iter))
+    path = os.path.join(MODELS_DIR, hashlib.md5(key.encode()).hexdigest()[:12]
+                        + '.joblib')
+    if os.path.exists(path):
+        print(f"loaded models {path}", flush=True)
+        return joblib.load(path)
     print("training on " + ', '.join(
         f"h = {float(t['h'][0]):.2f} r0 ({len(t['h'])} rays)" for t in tabs),
         flush=True)
     models = fit_models(tabs, max_iter)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    joblib.dump(models, path)
+    print(f"saved models {path}", flush=True)
+    return models
+
+
+def emulate(src, out, train=None, max_iter=400):
+    """An emulated run in out: the ray plan of run src (rays_meta.npz and
+    its decks), every ray's targets predicted by models trained on the
+    runs train (default HEIGHT_RUNS without src; trained_models: fitted
+    once per training set, then reused), saved raw to
+    <out>/emulated_pred.npz (with each ray's s_skin); then synth"""
+    src = os.path.abspath(src)
+    if train is None:
+        train = [r for r in HEIGHT_RUNS if os.path.abspath(r) != src]
+    models = trained_models(train, max_iter)
     m = np.load(os.path.join(src, 'rays_meta.npz'))
     r0 = CONFIG['R0_LD'] * LD_CM
     names = sorted(m['name'].astype(str))
@@ -531,6 +555,13 @@ def emulate(src, out, train=None, max_iter=400):
         feats.append([f[k] for k in FEATURES])
         sks.append(sk)
     X = np.array(feats)
+    Xt = np.column_stack([np.concatenate([build_table(r)[k] for r in train])
+                          for k in FEATURES])
+    lo, hi = np.percentile(Xt, 1, axis=0), np.percentile(Xt, 99, axis=0)
+    outside = ((X < lo) | (X > hi)).any(axis=1)
+    print(f"rays with a feature outside the training rays' 1-99%: "
+          f"{outside.mean():.0%} (trust drops there: trees do not "
+          f"extrapolate)", flush=True)
     cha = next(r['cha'] for r in load_rays(train[0]).values()
                if np.isfinite(r['cha']))
     os.makedirs(out, exist_ok=True)
@@ -539,7 +570,7 @@ def emulate(src, out, train=None, max_iter=400):
                     os.path.join(out, 'rays_meta.npz'))
     path = os.path.join(out, 'emulated_pred.npz')
     np.savez(path, name=np.array(names), src=src, train=np.array(train),
-             cha=cha, sk=np.array(sks), X=X,
+             cha=cha, sk=np.array(sks), X=X, outside=outside,
              **{f'pred_{k}': mdl.predict(X) for k, mdl in models.items()})
     print(f"wrote {path}: {len(names)} rays' predicted targets", flush=True)
     synth(out)

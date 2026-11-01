@@ -862,6 +862,11 @@ def main():
     ap.add_argument('--max-iter', type=int, default=400,
                     help='boosting iterations per target model')
     a = ap.parse_args()
+    if a.run is not None and not os.path.isdir(
+            os.path.join(RUNS, 'emulated', a.run)):
+        have = sorted(os.listdir(os.path.join(RUNS, 'emulated')))
+        ap.error(f"no run {a.run!r} under {RUNS}/emulated; have: "
+                 + ', '.join(have))
     if a.step == 'table':
         build_table(a.out)
     elif a.step == 'validate':

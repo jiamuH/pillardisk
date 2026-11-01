@@ -586,7 +586,17 @@ def load_rays(out, ncpu=16):
     <out>/rays_cache.npz; rays whose .out is new or changed (mtime, size)
     are re-read from their text output and the cache rewritten. Depths
     float64, the rest float32. A fine_rays set (<out>/synthetic.npz) maps
-    its rays onto its source run's (shared, not copied)."""
+    its rays onto its source run's (shared, not copied); an emulated run
+    (<out>/emulated.npz, ray_emulator emulate) has synthetic .ems only."""
+    emu = os.path.join(out, 'emulated.npz')
+    if os.path.exists(emu):
+        with np.load(emu) as z:
+            names, ne, ems, cha = z['name'], z['n_ems'], z['ems'], z['cha']
+        ke = np.cumsum(ne)
+        return {str(n): dict(name=str(n), fin=True, finl=True, crash=False,
+                             cha=float(cha), ems=ems[ke[i] - ne[i]:ke[i]],
+                             ovr=np.zeros((0, 1 + len(CACHE_OVR))))
+                for i, n in enumerate(names)}
     syn = os.path.join(out, 'synthetic.npz')
     if os.path.exists(syn):
         d = np.load(syn)
@@ -1619,7 +1629,9 @@ def civ_layers(out, sim):
       thick [cm]      the ray's path where the C3+ fraction exceeds 0.5
       Ntot [cm^-2]    the ray's whole C3+ column
       elev [rad]      the ray's elevation (< 0: descending)
-    C/H from the first ray's .out."""
+    C/H from the first ray's .out. An emulated run: emulated_layers."""
+    if os.path.exists(os.path.join(out, 'emulated.npz')):
+        return emulated_layers(out, sim, 'c4')[1]
     r0 = CONFIG['R0_LD'] * LD_CM
     geo, _, h = ray_geometry(out, sim)
     keys = ('iph', 'R', 'z', 'nl', 'Te', 'Nabove', 'thick', 'elev',
@@ -2153,7 +2165,10 @@ def line_layers(out, sim, key):
     the LAYER_Q to 1 - LAYER_Q quantiles (Ntot, thick), at unit absorber
     density (nl = 1). For tau >> 1 every line here has (Cloudy:
     1e4 - 1e7) beta ~ 1/tau, so the escape weights need only these paths:
-    the absorber density cancels. Returns (names, L)."""
+    the absorber density cancels. Returns (names, L). An emulated run:
+    emulated_layers."""
+    if os.path.exists(os.path.join(out, 'emulated.npz')):
+        return emulated_layers(out, sim, key)
     spec = LINE_SPECS[key]
     r0 = CONFIG['R0_LD'] * LD_CM
     geo, _, h = ray_geometry(out, sim)
@@ -2183,6 +2198,31 @@ def line_layers(out, sim, key):
     L = {k: a[:, i] for i, k in enumerate(keys)}
     L['iph'] = L['iph'].astype(int)
     print(f"{key} layers of {len(names)} rays (from the emissivity)")
+    return names, L
+
+
+def emulated_layers(out, sim, key):
+    """(names, L) of line key on every ray of an emulated run
+    (<out>/emulated.npz): as civ_layers for C IV (its emulated C3+
+    quantities), as line_layers for the others (unit absorber density,
+    the paths from the emulated 5%, centroid and 95% depths)"""
+    r0 = CONFIG['R0_LD'] * LD_CM
+    geo, _, h = ray_geometry(out, sim)
+    with np.load(os.path.join(out, 'emulated.npz')) as z:
+        names = [str(n) for n in z['name']]
+        dc, dlo, dhi, te = (z[f'{q}_{key}'] for q in ('dc', 'dlo', 'dhi',
+                                                      'Te'))
+        c4 = {q: z[f'{q}_c4'] for q in ('nl', 'Nabove', 'Ntot', 'thick')}
+    g = np.array([geo(n)[:3] for n in names])           # s0, sin a, cos a
+    sc = (g[:, 0] + dc) / r0
+    L = dict(iph=np.array([int(n[5:8]) for n in names]), R=sc * g[:, 1],
+             z=h + sc * g[:, 2], Te=te, elev=np.arctan2(g[:, 2], g[:, 1]))
+    if key == 'c4':
+        L.update(c4)
+    else:
+        L.update(nl=np.ones(len(names)), Nabove=np.maximum(
+            dc - dlo, 1e-3 * (dhi - dlo)), thick=dhi - dlo, Ntot=dhi - dlo)
+    print(f"{key} layers of {len(names)} emulated rays")
     return names, L
 
 

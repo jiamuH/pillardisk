@@ -23,7 +23,22 @@ slab quantities:
              log sum 4 pi j s^2 ds = lI_<line> + 2 log s_skin exactly
   lNc_<line> log of the emissivity-weighted column from the entry [cm^-2]
   lNw_<line> log of the column of its layer (5-95% of the emission)
+  lNlo_<line> log of the column from the entry to that layer's 5% point
+  lTe_<line> log T_e at the emission's (depth) centroid [K]
+  lrat_<line>  log ratio of the doublet's components (C IV, Mg II)
+and for C IV's escape (as cloudy_rays.civ_layers, from n(C3+)):
+  lnl_c4     log n(C3+) at the centroid [cm^-3]
+  lNab_c4    log C3+ column from the entry to the centroid [cm^-2]
+  lNtot_c4   log the ray's whole C3+ column
+  lthk_c4    log the path where the C3+ fraction exceeds 0.5 [cm]
 (positions in s follow from a ray's own column profile, its deck)
+
+`emulate` trains on runs and writes an emulated run: every ray of another
+run's plan (its decks; Cloudy need not have run them) gets a synthetic
+emissivity profile per line (a two-sided Gaussian in column through the
+predicted 5%, centroid and 95% points, normalised to I) and its emulated
+layer; cloudy_rays' map, escape and profile steps then run on it
+(<out>/emulated.npz, read by load_rays and the layer functions).
 
 `validate` holds out whole phi columns (GROUP_FOLDS folds; neighbouring rays
 in a column are correlated) and compares, ray by ray and per held-out column
@@ -35,18 +50,21 @@ predicts the one left out: can a height be emulated from the others?
 Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator heights
       python3 -m transient.ray_emulator heightsplot   (replot, no training)
+      python3 -m transient.ray_emulator emulate --src RUN --out DIR
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
 import argparse
 import os
+import shutil
 
 EMU_THREADS = 8
 os.environ.setdefault('OMP_NUM_THREADS', str(EMU_THREADS))
 
 import numpy as np                                        # noqa: E402
 
-from transient.cloudy_rays import load_rays, N_SURF, plot_style  # noqa
+from transient.cloudy_rays import (load_rays, N_SURF, plot_style,  # noqa
+                                   CACHE_OVR, NEMS)
 from transient.sim_spectrum import CONFIG, LD_CM                   # noqa
 
 LINES = dict(ha=(1,), hb=(2,), c4=(3, 4), mg2=(5, 6), he2=(7,))
@@ -54,8 +72,10 @@ LINE_TEX = dict(ha=r'H$\bm{\alpha}$', hb=r'H$\bm{\beta}$', c4=r'C\,IV',
                 mg2=r'Mg\,II', he2=r'He\,II\,1640')
 FEATURES = ('lphi_skin', 'lN_pre', 'lL_skin', 'ln_p1', 'ln_p3', 'lN_post',
             'lnmax', 'lands')
-TARGETS = ('lI', 'lNc', 'lNw')
-TABLE_VERSION = 2           # slab features and targets
+LINE_T = ('lI', 'lNc', 'lNw', 'lNlo', 'lTe')       # every line
+C4_T = ('lnl', 'lNab', 'lNtot', 'lthk')            # C IV's C3+ layer
+TARGETS = LINE_T + ('lrat',) + C4_T
+TABLE_VERSION = 3           # + layer quantiles, T_e, doublet ratio, C3+
 RUNS = '/data2/jhuang/runs/cloudy_rays'
 HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
@@ -106,24 +126,45 @@ def ray_features(lphi, s, n, r0):
                 lands=float(len(hit) > 0)), sk
 
 
-def ray_targets(e, s_deck, n_deck, sk):
-    """the TARGETS of one ray from its .ems (depth, 4 pi j columns) and its
-    deck's (s, n_H)"""
+def ray_targets(ray, s_deck, n_deck, sk):
+    """the TARGETS of one ray from its cache entry (.ems: depth, 4 pi j
+    columns; .ovr; C/H) and its deck's (s, n_H)"""
+    e, ov = ray['ems'], ray['ovr']
     s = s_deck[0] + e[:, 0]
     ds = np.gradient(e[:, 0])
     col = np.interp(s, s_deck, column(s_deck, n_deck))
+    oc = {k: ov[:, 1 + i] for i, k in enumerate(CACHE_OVR)}
     out = {}
     for key, cols in LINES.items():
         w = e[:, list(cols)].sum(axis=1) * (s / sk) ** 2 * ds
         tot = w.sum()
+        keys = LINE_T + (('lrat',) if len(cols) == 2 else ()) + \
+            (C4_T if key == 'c4' else ())
+        out.update({f'{t}_{key}': np.nan for t in keys})
         if not tot > 0:
-            out.update({f'{t}_{key}': np.nan for t in TARGETS})
             continue
         cw = np.cumsum(w) / tot
         q5, q95 = np.interp([0.05, 0.95], cw, col)
+        dc = np.sum(w * e[:, 0]) / tot
         out[f'lI_{key}'] = np.log10(tot)
         out[f'lNc_{key}'] = np.log10(max(np.sum(w * col) / tot, 1e10))
         out[f'lNw_{key}'] = np.log10(max(q95 - q5, 1e10))
+        out[f'lNlo_{key}'] = np.log10(max(q5, 1e10))
+        out[f'lTe_{key}'] = np.log10(np.interp(dc, ov[:, 0], oc['Te']))
+        if len(cols) == 2:
+            a, b = (np.sum(e[:, c] * ds) for c in cols)
+            if a > 0 and b > 0:
+                out[f'lrat_{key}'] = np.log10(a / b)
+        if key == 'c4':
+            nl = oc['C4'] * oc['hden'] * ray['cha']
+            dd = np.gradient(ov[:, 0])
+            Ncum = np.cumsum(nl * dd)
+            out['lnl_c4'] = np.log10(max(np.interp(dc, ov[:, 0], nl),
+                                         1e-10))
+            out['lNab_c4'] = np.log10(max(np.interp(dc, ov[:, 0], Ncum),
+                                          1.0))
+            out['lNtot_c4'] = np.log10(max(Ncum[-1], 1.0))
+            out['lthk_c4'] = np.log10(max(np.sum(dd[oc['C4'] > 0.5]), 1.0))
     return out
 
 
@@ -153,7 +194,7 @@ def build_table(out):
         iph, al, _ = meta[name]
         lphi, s, n = read_deck(os.path.join(out, 'rays', name + '.in'))
         f, sk = ray_features(lphi, s, n, r0)
-        t = ray_targets(ray['ems'], s, n, sk)
+        t = ray_targets(ray, s, n, sk)
         # alpha (the baseline), h and s_skin (L = s_skin^2 I) are labels,
         # not features
         rows.append(dict(name=name, iph=iph, alpha=al, h=h,
@@ -406,14 +447,127 @@ def heights_plot(path=HEIGHTS_NPZ):
     print(f"wrote {out}")
 
 
+def fit_models(tabs, max_iter=400):
+    """{target: model} trained on the rays of tables tabs"""
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    X = np.column_stack([np.concatenate([t[k] for t in tabs])
+                         for k in FEATURES])
+    models = {}
+    for k in [k for k in tabs[0] if k.split('_')[0] in TARGETS]:
+        y = np.concatenate([t[k] for t in tabs])
+        ok = np.isfinite(y)
+        models[k] = HistGradientBoostingRegressor(
+            max_iter=max_iter, learning_rate=0.05, random_state=0).fit(
+                X[ok], y[ok])
+    return models
+
+
+def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=80):
+    """one emulated ray from its predicted targets p {target: value} and
+    its deck (s, n_H; s_skin): (ems (npt, NEMS) on a Cloudy depth grid,
+    {line: (d_centroid, d_5%, d_95%) [cm]}). Each line: a two-sided
+    Gaussian in column, peak at the centroid, widths from the 5% and 95%
+    points (1.645 sigma), normalised to sum 4 pi j (s/s_skin)^2 ds = I"""
+    col = column(s, n)
+    nmax = col[-1]
+    shape, grids = {}, [[0.0, nmax]]
+    for key in LINES:
+        lo = 10 ** p[f'lNlo_{key}']
+        hi = lo + 10 ** p[f'lNw_{key}']
+        c = np.clip(10 ** p[f'lNc_{key}'], lo, hi)
+        fl = sigma_floor * (hi - lo)
+        sl, sr = max(c - lo, fl) / 1.645, max(hi - c, fl) / 1.645
+        shape[key] = (c, sl, sr, lo, hi)
+        grids.append(np.linspace(c - 4 * sl, c + 4 * sr, npt))
+    Ng = np.unique(np.clip(np.concatenate(grids), 0, nmax))
+    sg = np.interp(Ng, col, s)
+    d = sg - s[0]
+    dd = np.gradient(d)
+    ng = np.interp(sg, s, n)
+    e = np.zeros((len(d), NEMS))
+    e[:, 0] = d
+    lay = {}
+    for key, cols in LINES.items():
+        c, sl, sr, lo, hi = shape[key]
+        q = np.exp(-0.5 * ((Ng - c) / np.where(Ng < c, sl, sr)) ** 2)
+        w = q * ng * dd                       # = j (s/s_skin)^2 ds
+        j = q * ng * (sk / sg) ** 2 * 10 ** p[f'lI_{key}'] / max(
+            w.sum(), 1e-300)
+        if len(cols) == 2:
+            r = 10 ** p[f'lrat_{key}']
+            e[:, cols[0]], e[:, cols[1]] = j * r / (1 + r), j / (1 + r)
+        else:
+            e[:, cols[0]] = j
+        lay[key] = tuple(np.interp(v, col, s) - s[0] for v in (c, lo, hi))
+    return e, lay
+
+
+def emulate(src, out, train=None, max_iter=400):
+    """An emulated run in out: the ray plan of run src (rays_meta.npz and
+    its decks), every ray emulated by models trained on the runs train
+    (default HEIGHT_RUNS without src). Writes <out>/rays_meta.npz (src's)
+    and <out>/emulated.npz: each ray's synthetic .ems (synth_ray) and,
+    per line, its layer (d_c, d_lo, d_hi [cm], T_e) and C IV's C3+
+    quantities, which cloudy_rays reads in place of Cloudy's output"""
+    src = os.path.abspath(src)
+    if train is None:
+        train = [r for r in HEIGHT_RUNS if os.path.abspath(r) != src]
+    tabs = [build_table(r) for r in train]
+    print("training on " + ', '.join(
+        f"h = {float(t['h'][0]):.2f} r0 ({len(t['h'])} rays)" for t in tabs),
+        flush=True)
+    models = fit_models(tabs, max_iter)
+    m = np.load(os.path.join(src, 'rays_meta.npz'))
+    r0 = CONFIG['R0_LD'] * LD_CM
+    names = sorted(m['name'].astype(str))
+    feats, decks = [], []
+    for name in names:
+        lphi, s, n = read_deck(os.path.join(src, 'rays', name + '.in'))
+        f, sk = ray_features(lphi, s, n, r0)
+        feats.append([f[k] for k in FEATURES])
+        decks.append((s, n, sk))
+    X = np.array(feats)
+    pred = {k: mdl.predict(X) for k, mdl in models.items()}
+    ems, lay = [], {key: [] for key in LINES}
+    for i, (s, n, sk) in enumerate(decks):
+        e, ly = synth_ray({k: v[i] for k, v in pred.items()}, s, n, sk)
+        ems.append(e)
+        for key in LINES:
+            lay[key].append(ly[key])
+    cha = next(r['cha'] for r in load_rays(train[0]).values()
+               if np.isfinite(r['cha']))
+    save = dict(name=np.array(names), src=src, train=np.array(train),
+                cha=cha, n_ems=np.array([len(e) for e in ems]),
+                ems=np.concatenate(ems))
+    for key in LINES:
+        a = np.array(lay[key])
+        save.update({f'dc_{key}': a[:, 0], f'dlo_{key}': a[:, 1],
+                     f'dhi_{key}': a[:, 2],
+                     f'Te_{key}': 10 ** pred[f'lTe_{key}']})
+    save.update(nl_c4=10 ** pred['lnl_c4'], Nabove_c4=10 ** pred['lNab_c4'],
+                Ntot_c4=10 ** pred['lNtot_c4'],
+                thick_c4=10 ** pred['lthk_c4'])
+    os.makedirs(out, exist_ok=True)
+    shutil.copy(os.path.join(src, 'rays_meta.npz'),
+                os.path.join(out, 'rays_meta.npz'))
+    path = os.path.join(out, 'emulated.npz')
+    np.savez(path, **save)
+    print(f"wrote {path}: {len(names)} emulated rays of {src}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', choices=['table', 'validate', 'heights',
-                                       'heightsplot'])
+                                       'heightsplot', 'emulate'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
                     help='heights: one run per lamp height')
+    ap.add_argument('--src', default=f'{RUNS}/edd10_h0.5_adapt',
+                    help='emulate: the run whose ray plan is emulated')
+    ap.add_argument('--train', nargs='+', default=None,
+                    help='emulate: training runs (default: the heights '
+                    'runs but --src)')
     ap.add_argument('--max-iter', type=int, default=400,
                     help='boosting iterations per target model')
     a = ap.parse_args()
@@ -421,6 +575,9 @@ def main():
         build_table(a.out)
     elif a.step == 'validate':
         validate(a.out, a.max_iter)
+    elif a.step == 'emulate':
+        emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
+                a.max_iter)
     elif a.step == 'heights':
         validate_heights(a.runs, a.max_iter)
     else:

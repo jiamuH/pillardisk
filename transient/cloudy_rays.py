@@ -70,7 +70,7 @@ outside the grid get n_H = N_FLOOR, and phi(H) = Q_ION / 4 pi d_in^2 at
 the entry distance d_in from the lamp. Names ray_p<iph>_a<ia>; the
 geometry (alpha, d_in, the ray's solid angle) goes to rays_meta.npz.
 
-Run:  python3 -m transient.cloudy_rays write --out /data2/jhuang/runs/cloudy_rays/edd10
+Run:  python3 -m transient.cloudy_rays write --out /data2/jhuang/runs/cloudy_rays/edd10_h0
       python3 -m transient.cloudy_rays run --out ... --ncpu 90
       python3 -m transient.cloudy_rays extract --out ...
 """

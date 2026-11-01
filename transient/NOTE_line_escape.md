@@ -7,7 +7,7 @@ MOCASSIN (`/data2/jhuang/runs/mocassin/moc_edd10`). Written 2026-10-17.
 ## Sim velocity structure (`cloudy_rays vmaps`)
 
 - Command: `python3 -m transient.cloudy_rays vmaps --out
-  /data2/jhuang/runs/cloudy_rays/edd10`; writes `plots/vel_{grad,shear,
+  /data2/jhuang/runs/cloudy_rays/edd10_h0`; writes `plots/vel_{grad,shear,
   disp,normal}.png`, meridional cuts through the star (phi 335, index
   238), the arm (phi 70, index 49, strongest Sigma excess away from the
   star, 3.6x the phi-median at R = 1) and the quietest column (phi 199,

@@ -54,10 +54,13 @@ Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator compare --out DIR   (face-on maps)
       python3 -m transient.ray_emulator dense --h 0.5 --nrays 30000
       python3 -m transient.ray_emulator synth --out DIR   (re-smooth, no training)
+      python3 -m transient.ray_emulator gapfill --src DENSE_RUN   (Cloudy where
+          the emulator is blind; picked up by the next emulate)
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
 import argparse
+import glob
 import os
 import shutil
 
@@ -509,6 +512,60 @@ SMOOTH_N = 5                # rays in the running median along each column
 
 
 MODELS_DIR = f'{RUNS}/train/emulator_models'     # trained models, reused
+GAP_N = 300                 # gapfill: Cloudy rays per gap set
+GAP_NCPU = 40               # gapfill: cores (niced)
+
+
+def training_runs(exclude=None):
+    """the emulator's training runs: HEIGHT_RUNS and every gapfill set
+    (<RUNS>/train/gap_*), less the run exclude"""
+    gaps = sorted(os.path.dirname(p) for p in
+                  glob.glob(f'{RUNS}/train/gap_*/rays_meta.npz'))
+    ex = os.path.abspath(exclude) if exclude else None
+    return [r for r in list(HEIGHT_RUNS) + gaps if os.path.abspath(r) != ex]
+
+
+def gapfill(src, n=GAP_N, out=None, ncpu=GAP_NCPU, run=True):
+    """A training set where the emulator is blind: of the emulated run
+    src's rays whose features fall outside the training rays' 1-99%
+    (emulated_pred.npz 'outside'), n spread over that region (farthest-
+    point sampling in features standardised by the training rays), their
+    decks copied to out (default <RUNS>/train/gap_<src name>) with their
+    rays_meta rows; then Cloudy on them (niced, ncpu at a time,
+    unfinished only: a stopped run resumes). training_runs() picks the set
+    up, so the next emulate retrains with it."""
+    from transient.cloudy_rays import run_rays
+    src = os.path.abspath(src)
+    out = out or f'{RUNS}/train/gap_{os.path.basename(src)}'
+    if not os.path.exists(os.path.join(out, 'rays_meta.npz')):
+        d = np.load(os.path.join(src, 'emulated_pred.npz'))
+        names, X = d['name'].astype(str), d['X']
+        cand = np.nonzero(d['outside'])[0]
+        Xt = np.column_stack([np.concatenate(
+            [build_table(r)[k] for r in training_runs(exclude=src)])
+            for k in FEATURES])
+        mu, sd = Xt.mean(axis=0), np.maximum(Xt.std(axis=0), 1e-6)
+        Z = (X[cand] - mu) / sd
+        pick = [int(np.argmax(np.linalg.norm(Z, axis=1)))]
+        dist = np.linalg.norm(Z - Z[pick[0]], axis=1)
+        while len(pick) < min(n, len(cand)):
+            pick.append(int(np.argmax(dist)))
+            dist = np.minimum(dist, np.linalg.norm(Z - Z[pick[-1]], axis=1))
+        chosen = set(names[cand[pick]])
+        m = np.load(os.path.join(src, 'rays_meta.npz'))
+        keep = np.array([str(nm) in chosen for nm in m['name']])
+        os.makedirs(os.path.join(out, 'rays'), exist_ok=True)
+        for nm in m['name'][keep]:
+            shutil.copy(os.path.join(src, 'rays', f'{nm}.in'),
+                        os.path.join(out, 'rays', f'{nm}.in'))
+        np.savez(os.path.join(out, 'rays_meta.npz'),
+                 **{k: (m[k][keep] if m[k].ndim else m[k]) for k in m.files})
+        print(f"wrote {keep.sum()} decks to {out}: of {len(cand)} rays of "
+              f"{src} outside the training range ({d['outside'].mean():.0%})",
+              flush=True)
+    if run:
+        os.nice(19)
+        run_rays(out, ncpu)
 
 
 def trained_models(train, max_iter=400):
@@ -538,12 +595,12 @@ def trained_models(train, max_iter=400):
 def emulate(src, out, train=None, max_iter=400):
     """An emulated run in out: the ray plan of run src (rays_meta.npz and
     its decks), every ray's targets predicted by models trained on the
-    runs train (default HEIGHT_RUNS without src; trained_models: fitted
+    runs train (default training_runs() without src; trained_models: fitted
     once per training set, then reused), saved raw to
     <out>/emulated_pred.npz (with each ray's s_skin); then synth"""
     src = os.path.abspath(src)
     if train is None:
-        train = [r for r in HEIGHT_RUNS if os.path.abspath(r) != src]
+        train = training_runs(exclude=src)
     models = trained_models(train, max_iter)
     m = np.load(os.path.join(src, 'rays_meta.npz'))
     r0 = CONFIG['R0_LD'] * LD_CM
@@ -638,11 +695,11 @@ def dense(h_ld, nrays, nphi, out=None, max_iter=400):
     """A dense emulated run: cloudy_rays' adaptive plan of ~nrays rays in
     nphi phi columns (at most one per sim phi cell) for a lamp at h_ld
     [ld], traced (decks only, no Cloudy) into out, then emulated there by
-    models trained on all HEIGHT_RUNS. Returns out."""
+    models trained on all training_runs(). Returns out."""
     from transient.cloudy_rays import write_adaptive
     out = out or f'{RUNS}/emulated/h{h_ld:g}_n{nrays}'
     write_adaptive(out, h_ld, nrays, nphi)
-    emulate(out, out, list(HEIGHT_RUNS), max_iter)
+    emulate(out, out, training_runs(), max_iter)
     return out
 
 
@@ -747,7 +804,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', choices=['table', 'validate', 'heights',
                                        'heightsplot', 'emulate',
-                                       'compare', 'dense', 'synth'])
+                                       'compare', 'dense', 'synth',
+                                       'gapfill'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -763,6 +821,12 @@ def main():
                     help='dense: rays in the plan')
     ap.add_argument('--nphi', type=int, default=256,
                     help='dense: phi columns (at most the sim phi cells)')
+    ap.add_argument('--n', type=int, default=GAP_N,
+                    help='gapfill: Cloudy rays to add')
+    ap.add_argument('--ncpu', type=int, default=GAP_NCPU,
+                    help='gapfill: cores for Cloudy')
+    ap.add_argument('--norun', action='store_true',
+                    help='gapfill: write the decks only')
     ap.add_argument('--smooth', type=int, default=SMOOTH_N,
                     help='synth: running-median rays along a column')
     ap.add_argument('--max-iter', type=int, default=400,
@@ -775,6 +839,8 @@ def main():
     elif a.step == 'emulate':
         emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
                 a.max_iter)
+    elif a.step == 'gapfill':
+        gapfill(a.src, a.n, a.out, a.ncpu, not a.norun)
     elif a.step == 'synth':
         synth(a.out, a.smooth)
     elif a.step == 'dense':

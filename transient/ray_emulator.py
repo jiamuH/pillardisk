@@ -11,16 +11,19 @@ ray (dlaw table). The ray "lands" where n_H first exceeds N_SURF:
   ln_p1, ln_p3   log n_H 0.01 and 0.03 r0 past it
   lN_post    log column from there to the ray's end
   lnmax      log of the highest n_H along the ray
-  sin_graze  sine of the angle between the ray and the skin there (|ray .
-             grad n_H| / |grad n_H|, from the sim): unlike the direction
-             from the lamp, comparable between lamp heights
-  R_skin, z_skin   the landing point [r0]
   lands      1 if n_H ever exceeds N_SURF (else the skin is the n_H peak)
-  h          the lamp height [r0]
-Targets (from the run's ray cache), per line (Ha, Hb, C IV, Mg II, He II):
-  lL_<line>  log sum 4 pi j s^2 ds [erg/s/sr x 4 pi]
-  dc_<line>  its emissivity-weighted point minus the skin [r0]
-  lw_<line>  log of its layer (5-95% of the emission in depth) [r0]
+Only what Cloudy's 1D slab sees: no lamp height, landing position or
+incidence angle (the geometry enters afterwards, placing and projecting the
+layer), so a new lamp height is emulated wherever its rays fall inside the
+training rays' feature space.
+Targets (from the run's ray cache), per line (Ha, Hb, C IV, Mg II, He II),
+slab quantities:
+  lI_<line>  log sum 4 pi j (s/s_skin)^2 ds [erg/s/cm^2]: per unit area at
+             the skin (Cloudy dilutes spherically from the entry); the ray's
+             log sum 4 pi j s^2 ds = lI_<line> + 2 log s_skin exactly
+  lNc_<line> log of the emissivity-weighted column from the entry [cm^-2]
+  lNw_<line> log of the column of its layer (5-95% of the emission)
+(positions in s follow from a ray's own column profile, its deck)
 
 `validate` holds out whole phi columns (GROUP_FOLDS folds; neighbouring rays
 in a column are correlated) and compares, ray by ray and per held-out column
@@ -42,16 +45,16 @@ os.environ.setdefault('OMP_NUM_THREADS', str(EMU_THREADS))
 
 import numpy as np                                        # noqa: E402
 
-from transient.cloudy_rays import (load_rays, N_SURF, plot_style,  # noqa
-                                   density_interp, DUMP)
-from transient.sim_spectrum import (CONFIG, LD_CM, load_sim,  # noqa: E402
-                                    to_physical)
+from transient.cloudy_rays import load_rays, N_SURF, plot_style  # noqa
+from transient.sim_spectrum import CONFIG, LD_CM                   # noqa
 
 LINES = dict(ha=(1,), hb=(2,), c4=(3, 4), mg2=(5, 6), he2=(7,))
 LINE_TEX = dict(ha=r'H$\bm{\alpha}$', hb=r'H$\bm{\beta}$', c4=r'C\,IV',
                 mg2=r'Mg\,II', he2=r'He\,II\,1640')
 FEATURES = ('lphi_skin', 'lN_pre', 'lL_skin', 'ln_p1', 'ln_p3', 'lN_post',
-            'lnmax', 'sin_graze', 'R_skin', 'z_skin', 'lands', 'h')
+            'lnmax', 'lands')
+TARGETS = ('lI', 'lNc', 'lNw')
+TABLE_VERSION = 2           # slab features and targets
 RUNS = '/data2/jhuang/runs/cloudy_rays'
 HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
@@ -76,10 +79,15 @@ def read_deck(path):
     return lphi, 10 ** a[:, 0], 10 ** a[:, 1]
 
 
-def ray_features(lphi, s, n, alpha, h, r0):
-    """the FEATURES of one ray (see the module docstring)"""
-    col = np.concatenate([[0], np.cumsum(0.5 * (n[1:] + n[:-1])
-                                         * np.diff(s))])
+def column(s, n):
+    """column [cm^-2] from the entry along the deck's (s, n_H)"""
+    return np.concatenate([[0], np.cumsum(0.5 * (n[1:] + n[:-1])
+                                          * np.diff(s))])
+
+
+def ray_features(lphi, s, n, r0):
+    """the FEATURES of one ray (see the module docstring), and s_skin"""
+    col = column(s, n)
     hit = np.nonzero(n >= N_SURF)[0]
     k = hit[0] if len(hit) else int(np.argmax(n))
     sk = s[k]
@@ -92,49 +100,28 @@ def ray_features(lphi, s, n, alpha, h, r0):
                 lN_pre=np.log10(col[k] + 1e10),
                 lL_skin=lsc, ln_p1=at(0.01), ln_p3=at(0.03),
                 lN_post=np.log10(col[-1] - col[k] + 1e10),
-                lnmax=np.log10(n.max()), alpha=alpha,
-                R_skin=sk * np.sin(alpha) / r0,
-                z_skin=h + sk * np.cos(alpha) / r0,
+                lnmax=np.log10(n.max()),
                 lands=float(len(hit) > 0)), sk
 
 
-def sin_graze(sim, itp, phi, alpha, h, sk_r0, eps=0.005):
-    """|ray . grad n_H| / |grad n_H| at the landing point (sk_r0 [r0]
-    from the lamp at z = h along (alpha, phi)), log n_H differenced over
-    +- eps r0 in x, y, z"""
-    d = np.array([np.sin(alpha) * np.cos(phi), np.sin(alpha) * np.sin(phi),
-                  np.cos(alpha)])
-    p = np.array([0.0, 0.0, h]) + sk_r0 * d
-    pts = p[None, :] + eps * np.concatenate([np.eye(3), -np.eye(3)])
-    r = np.linalg.norm(pts, axis=1)
-    q = np.column_stack([np.mod(np.arctan2(pts[:, 1], pts[:, 0]), 2 * np.pi),
-                         np.clip(np.arccos(pts[:, 2] / r), sim['th'][0],
-                                 sim['th'][-1]),
-                         np.clip(r, sim['r'][0], sim['r'][-1])])
-    v = itp(q)
-    g = (v[:3] - v[3:]) / (2 * eps)
-    gn = np.linalg.norm(g)
-    return float(abs(g @ d) / gn) if gn > 0 else 0.0
-
-
-def ray_targets(e, s0, sk, r0):
-    """the targets of one ray from its .ems (depth, 4 pi j columns)"""
-    d = e[:, 0]
-    s = s0 + d
-    ds = np.gradient(d)
+def ray_targets(e, s_deck, n_deck, sk):
+    """the TARGETS of one ray from its .ems (depth, 4 pi j columns) and its
+    deck's (s, n_H)"""
+    s = s_deck[0] + e[:, 0]
+    ds = np.gradient(e[:, 0])
+    col = np.interp(s, s_deck, column(s_deck, n_deck))
     out = {}
     for key, cols in LINES.items():
-        w = e[:, list(cols)].sum(axis=1) * s ** 2 * ds
+        w = e[:, list(cols)].sum(axis=1) * (s / sk) ** 2 * ds
         tot = w.sum()
         if not tot > 0:
-            out.update({f'lL_{key}': np.nan, f'dc_{key}': np.nan,
-                        f'lw_{key}': np.nan})
+            out.update({f'{t}_{key}': np.nan for t in TARGETS})
             continue
         cw = np.cumsum(w) / tot
-        q5, q95 = np.interp([0.05, 0.95], cw, s)
-        out[f'lL_{key}'] = np.log10(tot)
-        out[f'dc_{key}'] = (np.sum(w * s) / tot - sk) / r0
-        out[f'lw_{key}'] = np.log10(max(q95 - q5, 1e-6 * r0) / r0)
+        q5, q95 = np.interp([0.05, 0.95], cw, col)
+        out[f'lI_{key}'] = np.log10(tot)
+        out[f'lNc_{key}'] = np.log10(max(np.sum(w * col) / tot, 1e10))
+        out[f'lNw_{key}'] = np.log10(max(q95 - q5, 1e10))
     return out
 
 
@@ -147,13 +134,12 @@ def build_table(out):
     if os.path.exists(path):
         d = np.load(path)
         # rebuilt when more rays have finished (a run still going)
-        if all(k in d.files for k in FEATURES) and 'nfin' in d.files \
+        if 'version' in d.files and int(d['version']) == TABLE_VERSION \
                 and int(d['nfin']) == nfin:
-            return {k: d[k] for k in d.files if k != 'nfin'}
+            return {k: d[k] for k in d.files
+                    if k not in ('nfin', 'version')}
     if nfin == 0:
         return None
-    sim = load_sim(DUMP)
-    itp = density_interp(sim, to_physical(sim, CONFIG))
     m = np.load(os.path.join(out, 'rays_meta.npz'))
     h, r0 = float(m['hlamp_r0']), CONFIG['R0_LD'] * LD_CM
     meta = {str(n): (int(p), float(a), float(d0)) for n, p, a, d0 in
@@ -164,14 +150,15 @@ def build_table(out):
             continue
         iph, al, _ = meta[name]
         lphi, s, n = read_deck(os.path.join(out, 'rays', name + '.in'))
-        f, sk = ray_features(lphi, s, n, al, h, r0)
-        f['sin_graze'] = sin_graze(sim, itp, sim['ph'][iph], al, h, sk / r0)
-        f['h'] = h
-        t = ray_targets(ray['ems'], s[0], sk, r0)
-        rows.append(dict(name=name, iph=iph, **f, **t))
+        f, sk = ray_features(lphi, s, n, r0)
+        t = ray_targets(ray['ems'], s, n, sk)
+        # alpha (the baseline), h and s_skin (L = s_skin^2 I) are labels,
+        # not features
+        rows.append(dict(name=name, iph=iph, alpha=al, h=h,
+                         lsk=np.log10(sk), **f, **t))
     tab = {k: np.array([r[k] for r in rows]) for k in rows[0]}
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez(path, nfin=nfin, **tab)
+    np.savez(path, nfin=nfin, version=TABLE_VERSION, **tab)
     print(f"emulator table: {len(rows)} rays -> {path}")
     return tab
 
@@ -211,8 +198,7 @@ def validate(out, max_iter=400):
     fold_of = dict(zip(rng.permutation(cols),
                        np.arange(len(cols)) % GROUP_FOLDS))
     fold = np.array([fold_of[c] for c in tab['iph']])
-    targets = [k for k in tab if k.split('_')[0] in ('lL', 'dc', 'lw')
-               and k not in FEATURES]
+    targets = [k for k in tab if k.split('_')[0] in TARGETS]
     pred = {k: np.full(len(X), np.nan) for k in targets}
     base = {k: np.full(len(X), np.nan) for k in targets}
     for f in range(GROUP_FOLDS):
@@ -232,21 +218,21 @@ def validate(out, max_iter=400):
         y = tab[k]
         ok = np.isfinite(y)
         e1, e2 = np.abs(pred[k] - y)[ok], np.abs(base[k] - y)[ok]
-        unit = 'dex' if k.startswith('l') else 'r0'
-        print(f"{k:10s} median {np.median(e1):6.3f} 84% {np.percentile(e1, 84):6.3f} {unit}"
-              f"   median {np.nanmedian(e2):6.3f} 84% {np.nanpercentile(e2, 84):6.3f} {unit}")
+        print(f"{k:10s} median {np.median(e1):6.3f} 84% {np.percentile(e1, 84):6.3f} dex"
+              f"   median {np.nanmedian(e2):6.3f} 84% {np.nanpercentile(e2, 84):6.3f} dex")
     # what the maps and spectra sum: each held-out column's total per line
     print("per-column total luminosity (the rays' sum), |log pred/true|:")
     tot = {}
     for key in LINES:
-        k = f'lL_{key}'
-        y = tab[k]
+        k = f'lI_{key}'
+        y = tab[k] + 2 * tab['lsk']                      # log L = lI + 2 lsk
+        yp, yb = pred[k] + 2 * tab['lsk'], base[k] + 2 * tab['lsk']
         r = []
         for c in cols:
             s = (tab['iph'] == c) & np.isfinite(y)
             t = np.log10(np.sum(10 ** y[s]))
-            r.append((t, np.log10(np.sum(10 ** pred[k][s])) - t,
-                      np.log10(np.nansum(10 ** base[k][s])) - t))
+            r.append((t, np.log10(np.sum(10 ** yp[s])) - t,
+                      np.log10(np.nansum(10 ** yb[s])) - t))
         tot[key] = np.array(r)
         a = np.abs(tot[key][:, 1:])
         print(f"  {key:4s} emulator median {np.median(a[:, 0]):.3f} max "
@@ -258,7 +244,7 @@ def validate(out, max_iter=400):
     plt = plot_style()
     fig, axs = plt.subplots(2, 3, figsize=(20, 13))
     for ax, key in zip(axs.ravel(), LINES):
-        k = f'lL_{key}'
+        k = f'lI_{key}'
         y = tab[k]
         ax.plot(y, base[k], '.', color='0.6', ms=3, label=r'\textbf{neighbours}')
         ax.plot(y, pred[k], '.', color='orangered', ms=3,
@@ -268,10 +254,10 @@ def validate(out, max_iter=400):
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
         ax.set_title(r'\textbf{' + LINE_TEX[key] + r'}', fontsize=23)
-        ax.set_xlabel(r'$\log L_{\rm Cloudy}$')
+        ax.set_xlabel(r'$\log I_{\rm Cloudy}$')
         ax.tick_params(which='both', direction='in', labelsize=17)
     for ax in axs[:, 0]:
-        ax.set_ylabel(r'$\log L_{\rm predicted}$')
+        ax.set_ylabel(r'$\log I_{\rm predicted}$')
     axs[0, 0].legend(fontsize=17, frameon=False, loc='upper left',
                      markerscale=4)
     ax = axs[1, 2]
@@ -313,8 +299,7 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
         m = np.load(os.path.join(r, 'rays_meta.npz'))
         dom = dict(zip(m['name'].astype(str), m['domega']))
         doms.append(np.array([dom[str(n)] for n in t['name']]))
-    targets = [k for k in tabs[0] if k.split('_')[0] in ('lL', 'dc', 'lw')
-               and k not in FEATURES]
+    targets = [k for k in tabs[0] if k.split('_')[0] in TARGETS]
     print(f"leave-one-height-out over {len(runs)} runs: " + ', '.join(
         f"h = {float(t['h'][0]):.2f} r0 ({len(t['h'])} rays)" for t in tabs))
     for i, (r, t) in enumerate(zip(runs, tabs)):
@@ -323,8 +308,7 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
                              for k in FEATURES])
         Xt = np.column_stack([t[k] for k in FEATURES])
         lo, hi = np.percentile(X, 1, axis=0), np.percentile(X, 99, axis=0)
-        cov = [j for j, k in enumerate(FEATURES) if k != 'h']  # h always is
-        outside = np.mean(((Xt < lo) | (Xt > hi))[:, cov].any(axis=1))
+        outside = np.mean(((Xt < lo) | (Xt > hi)).any(axis=1))
         print(f"== held out h = {float(t['h'][0]):.2f} r0 ({r}); "
               f"rays with a feature outside the others' 1-99%: "
               f"{outside:.0%}")
@@ -338,12 +322,12 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
             p = mdl.predict(Xt)
             e = np.abs(p - t[k])[np.isfinite(t[k])]
             line = (f"  {k:8s} median {np.median(e):6.3f} 84% "
-                    f"{np.percentile(e, 84):6.3f} "
-                    f"{'dex' if k.startswith('l') else 'r0'}")
-            if k.startswith('lL_'):
+                    f"{np.percentile(e, 84):6.3f} dex")
+            if k.startswith('lI_'):
                 s_ = np.isfinite(t[k])
-                tot = np.log10(np.sum(10 ** t[k][s_] * doms[i][s_]))
-                pt = np.log10(np.sum(10 ** p[s_] * doms[i][s_]))
+                w = doms[i][s_] * 10 ** (2 * t['lsk'][s_])  # L = s_skin^2 I
+                tot = np.log10(np.sum(10 ** t[k][s_] * w))
+                pt = np.log10(np.sum(10 ** p[s_] * w))
                 line += f";  run total {pt - tot:+.3f} dex"
             print(line, flush=True)
 

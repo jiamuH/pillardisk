@@ -53,6 +53,7 @@ Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator emulate --src RUN --out DIR
       python3 -m transient.ray_emulator compare --out DIR   (face-on maps)
       python3 -m transient.ray_emulator dense --h 0.5 --nrays 30000
+      python3 -m transient.ray_emulator synth --out DIR   (re-smooth, no training)
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
@@ -464,7 +465,7 @@ def fit_models(tabs, max_iter=400):
     return models
 
 
-def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=80):
+def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=40):
     """one emulated ray from its predicted targets p {target: value} and
     its deck (s, n_H; s_skin): (ems (npt, NEMS) on a Cloudy depth grid,
     {line: (d_centroid, d_5%, d_95%) [cm]}). Each line: a two-sided
@@ -504,13 +505,14 @@ def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=80):
     return e, lay
 
 
+SMOOTH_N = 5                # rays in the running median along each column
+
+
 def emulate(src, out, train=None, max_iter=400):
     """An emulated run in out: the ray plan of run src (rays_meta.npz and
-    its decks), every ray emulated by models trained on the runs train
-    (default HEIGHT_RUNS without src). Writes <out>/rays_meta.npz (src's)
-    and <out>/emulated.npz: each ray's synthetic .ems (synth_ray) and,
-    per line, its layer (d_c, d_lo, d_hi [cm], T_e) and C IV's C3+
-    quantities, which cloudy_rays reads in place of Cloudy's output"""
+    its decks), every ray's targets predicted by models trained on the
+    runs train (default HEIGHT_RUNS without src), saved raw to
+    <out>/emulated_pred.npz (with each ray's s_skin); then synth"""
     src = os.path.abspath(src)
     if train is None:
         train = [r for r in HEIGHT_RUNS if os.path.abspath(r) != src]
@@ -522,25 +524,71 @@ def emulate(src, out, train=None, max_iter=400):
     m = np.load(os.path.join(src, 'rays_meta.npz'))
     r0 = CONFIG['R0_LD'] * LD_CM
     names = sorted(m['name'].astype(str))
-    feats, decks = [], []
+    feats, sks = [], []
     for name in names:
         lphi, s, n = read_deck(os.path.join(src, 'rays', name + '.in'))
         f, sk = ray_features(lphi, s, n, r0)
         feats.append([f[k] for k in FEATURES])
-        decks.append((s, n, sk))
+        sks.append(sk)
     X = np.array(feats)
-    pred = {k: mdl.predict(X) for k, mdl in models.items()}
+    cha = next(r['cha'] for r in load_rays(train[0]).values()
+               if np.isfinite(r['cha']))
+    os.makedirs(out, exist_ok=True)
+    if os.path.abspath(out) != src:
+        shutil.copy(os.path.join(src, 'rays_meta.npz'),
+                    os.path.join(out, 'rays_meta.npz'))
+    path = os.path.join(out, 'emulated_pred.npz')
+    np.savez(path, name=np.array(names), src=src, train=np.array(train),
+             cha=cha, sk=np.array(sks), X=X,
+             **{f'pred_{k}': mdl.predict(X) for k, mdl in models.items()})
+    print(f"wrote {path}: {len(names)} rays' predicted targets", flush=True)
+    synth(out)
+
+
+def smooth_columns(names, meta, v, nwin=SMOOTH_N):
+    """v (per ray, aligned with names) with a running median over nwin
+    neighbouring rays in alpha within each phi column (ends: the nearest
+    rays); the trees' piecewise-constant predictions step between
+    neighbours, Cloudy's own outputs do not"""
+    from scipy.ndimage import median_filter
+    al = dict(zip(meta['name'].astype(str), meta['alpha']))
+    iph = np.array([int(n[5:8]) for n in names])
+    a = np.array([al[n] for n in names])
+    out = v.copy()
+    for c in np.unique(iph):
+        k = np.nonzero(iph == c)[0]
+        k = k[np.argsort(a[k])]
+        out[k] = median_filter(v[k], size=min(nwin, len(k)), mode='nearest')
+    return out
+
+
+def synth(out, nwin=SMOOTH_N):
+    """<out>/emulated.npz from the raw predictions <out>/emulated_pred.npz
+    (no training): each target smoothed along its phi column
+    (smooth_columns, nwin rays; 1 = none), then each ray's synthetic .ems
+    (synth_ray; depths float64, emissivities float32) and, per line, its
+    layer (d_c, d_lo, d_hi [cm], T_e) and C IV's C3+ quantities, which
+    cloudy_rays reads in place of Cloudy's output"""
+    d = np.load(os.path.join(out, 'emulated_pred.npz'))
+    src = str(d['src'])
+    names = d['name'].astype(str)
+    meta = np.load(os.path.join(out, 'rays_meta.npz'))
+    pred = {k[5:]: d[k] for k in d.files if k.startswith('pred_')}
+    if nwin > 1:
+        pred = {k: smooth_columns(names, meta, v, nwin)
+                for k, v in pred.items()}
     ems, lay = [], {key: [] for key in LINES}
-    for i, (s, n, sk) in enumerate(decks):
-        e, ly = synth_ray({k: v[i] for k, v in pred.items()}, s, n, sk)
+    for i, name in enumerate(names):
+        _, s, n = read_deck(os.path.join(src, 'rays', name + '.in'))
+        e, ly = synth_ray({k: v[i] for k, v in pred.items()}, s, n,
+                          d['sk'][i])
         ems.append(e)
         for key in LINES:
             lay[key].append(ly[key])
-    cha = next(r['cha'] for r in load_rays(train[0]).values()
-               if np.isfinite(r['cha']))
-    save = dict(name=np.array(names), src=src, train=np.array(train),
-                cha=cha, n_ems=np.array([len(e) for e in ems]),
-                ems=np.concatenate(ems))
+    E = np.concatenate(ems)
+    save = dict(name=names, src=src, train=d['train'], cha=d['cha'],
+                nwin=nwin, n_ems=np.array([len(e) for e in ems]),
+                ems_d=E[:, 0], ems_v=E[:, 1:].astype(np.float32))
     for key in LINES:
         a = np.array(lay[key])
         save.update({f'dc_{key}': a[:, 0], f'dlo_{key}': a[:, 1],
@@ -549,13 +597,10 @@ def emulate(src, out, train=None, max_iter=400):
     save.update(nl_c4=10 ** pred['lnl_c4'], Nabove_c4=10 ** pred['lNab_c4'],
                 Ntot_c4=10 ** pred['lNtot_c4'],
                 thick_c4=10 ** pred['lthk_c4'])
-    os.makedirs(out, exist_ok=True)
-    if os.path.abspath(out) != src:
-        shutil.copy(os.path.join(src, 'rays_meta.npz'),
-                    os.path.join(out, 'rays_meta.npz'))
     path = os.path.join(out, 'emulated.npz')
     np.savez(path, **save)
-    print(f"wrote {path}: {len(names)} emulated rays of {src}")
+    print(f"wrote {path}: {len(names)} emulated rays of {src} (running "
+          f"median over {nwin} rays; {os.path.getsize(path) / 1e6:.0f} MB)")
 
 
 def dense(h_ld, nrays, nphi, out=None, max_iter=400):
@@ -671,7 +716,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', choices=['table', 'validate', 'heights',
                                        'heightsplot', 'emulate',
-                                       'compare', 'dense'])
+                                       'compare', 'dense', 'synth'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -687,6 +732,8 @@ def main():
                     help='dense: rays in the plan')
     ap.add_argument('--nphi', type=int, default=256,
                     help='dense: phi columns (at most the sim phi cells)')
+    ap.add_argument('--smooth', type=int, default=SMOOTH_N,
+                    help='synth: running-median rays along a column')
     ap.add_argument('--max-iter', type=int, default=400,
                     help='boosting iterations per target model')
     a = ap.parse_args()
@@ -697,6 +744,8 @@ def main():
     elif a.step == 'emulate':
         emulate(a.src, a.out or f'{RUNS}/emulated/h0.5_val', a.train,
                 a.max_iter)
+    elif a.step == 'synth':
+        synth(a.out, a.smooth)
     elif a.step == 'dense':
         dense(a.h, a.nrays, a.nphi, a.out, a.max_iter)
     elif a.step == 'compare':

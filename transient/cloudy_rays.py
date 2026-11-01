@@ -591,7 +591,8 @@ def load_rays(out, ncpu=16):
     emu = os.path.join(out, 'emulated.npz')
     if os.path.exists(emu):
         with np.load(emu) as z:
-            names, ne, ems, cha = z['name'], z['n_ems'], z['ems'], z['cha']
+            names, ne, cha = z['name'], z['n_ems'], z['cha']
+            ems = np.column_stack([z['ems_d'], z['ems_v'].astype(float)])
         ke = np.cumsum(ne)
         return {str(n): dict(name=str(n), fin=True, finl=True, crash=False,
                              cha=float(cha), ems=ems[ke[i] - ne[i]:ke[i]],

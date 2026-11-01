@@ -34,6 +34,7 @@ predicts the one left out: can a height be emulated from the others?
 
 Run:  python3 -m transient.ray_emulator validate --out RUN_DIR
       python3 -m transient.ray_emulator heights
+      python3 -m transient.ray_emulator heightsplot   (replot, no training)
 (the tree models use EMU_THREADS threads: all cores fight on a busy machine)
 """
 
@@ -60,6 +61,7 @@ HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
 GROUP_FOLDS = 8
 MIN_RAYS = 50               # heights: a run needs this many finished rays
+HEIGHTS_NPZ = f'{RUNS}/train/emulator_heights.npz'   # heights' predictions
 
 
 def read_deck(path):
@@ -283,7 +285,8 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
     """Leave one lamp height out: for each run in runs (one lamp height
     each), train on all the others' rays and predict its rays; prints the
     errors per target and of the run's total luminosity per line (what its
-    maps and spectra sum, weighted by each ray's solid angle)"""
+    maps and spectra sum, weighted by each ray's solid angle); saves every
+    held-out ray's prediction to HEIGHTS_NPZ and plots them (heights_plot)"""
     from sklearn.ensemble import HistGradientBoostingRegressor
     runs = [r for r in runs if os.path.exists(os.path.join(r, 'rays_meta.npz'))]
     tabs = [build_table(r) for r in runs]
@@ -294,7 +297,7 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
             print(f"skipped {r}: fewer than {MIN_RAYS} finished rays")
     runs = [r for r, k in zip(runs, keep) if k]
     tabs = [t for t, k in zip(tabs, keep) if k]
-    doms = []
+    doms, save = [], {}
     for r, t in zip(runs, tabs):
         m = np.load(os.path.join(r, 'rays_meta.npz'))
         dom = dict(zip(m['name'].astype(str), m['domega']))
@@ -308,7 +311,12 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
                              for k in FEATURES])
         Xt = np.column_stack([t[k] for k in FEATURES])
         lo, hi = np.percentile(X, 1, axis=0), np.percentile(X, 99, axis=0)
-        outside = np.mean(((Xt < lo) | (Xt > hi)).any(axis=1))
+        out_ = ((Xt < lo) | (Xt > hi)).any(axis=1)
+        outside = np.mean(out_)
+        save[f'r{i}_h'] = float(t['h'][0])
+        save[f'r{i}_outside'] = out_
+        save[f'r{i}_lsk'] = t['lsk']
+        save[f'r{i}_domega'] = doms[i]
         print(f"== held out h = {float(t['h'][0]):.2f} r0 ({r}); "
               f"rays with a feature outside the others' 1-99%: "
               f"{outside:.0%}")
@@ -320,6 +328,7 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
                                                 random_state=0)
             mdl.fit(X[ok], y[ok])
             p = mdl.predict(Xt)
+            save[f'r{i}_true_{k}'], save[f'r{i}_pred_{k}'] = t[k], p
             e = np.abs(p - t[k])[np.isfinite(t[k])]
             line = (f"  {k:8s} median {np.median(e):6.3f} 84% "
                     f"{np.percentile(e, 84):6.3f} dex")
@@ -330,11 +339,77 @@ def validate_heights(runs=HEIGHT_RUNS, max_iter=400):
                 pt = np.log10(np.sum(10 ** p[s_] * w))
                 line += f";  run total {pt - tot:+.3f} dex"
             print(line, flush=True)
+    np.savez(HEIGHTS_NPZ, nrun=len(runs), runs=np.array(runs), **save)
+    print(f"wrote {HEIGHTS_NPZ}")
+    heights_plot()
+
+
+def heights_plot(path=HEIGHTS_NPZ):
+    """the held-out rays' emulated against Cloudy I, lines (columns) x
+    held-out heights (rows); rays with a feature outside the training
+    runs' 1-99% in grey; each panel's median per-ray error and run-total
+    error. Writes plots/emulator_heights.png next to HEIGHTS_NPZ"""
+    d = np.load(path)
+    nrun = int(d['nrun'])
+    order = sorted(range(nrun), key=lambda i: float(d[f'r{i}_h']))
+    plt = plot_style()
+    fig, axs = plt.subplots(nrun, len(LINES), figsize=(5 * len(LINES),
+                                                       5 * nrun),
+                            sharex='col', sharey='col')
+    axs = np.atleast_2d(axs)
+    for c, key in enumerate(LINES):
+        k = f'lI_{key}'
+        allv = np.concatenate([d[f'r{i}_true_{k}'] for i in order])
+        lo, hi = np.nanpercentile(allv, [0.5, 99.9])
+        lo, hi = lo - 0.2, hi + 0.2
+        for row, i in enumerate(order):
+            ax = axs[row, c]
+            y, p = d[f'r{i}_true_{k}'], d[f'r{i}_pred_{k}']
+            ok = np.isfinite(y)
+            o = d[f'r{i}_outside'].astype(bool)
+            ax.plot(y[ok & ~o], p[ok & ~o], '.', color='dodgerblue', ms=4,
+                    label=r'\textbf{inside}')
+            ax.plot(y[ok & o], p[ok & o], '.', color='0.6', ms=4,
+                    label=r'\textbf{outside}')
+            ax.plot([lo, hi], [lo, hi], 'k-', lw=1)
+            w = d[f'r{i}_domega'][ok] * 10 ** (2 * d[f'r{i}_lsk'][ok])
+            tot = (np.log10(np.sum(10 ** p[ok] * w))
+                   - np.log10(np.sum(10 ** y[ok] * w)))
+            ax.text(0.04, 0.96, r'\textbf{median %.3f dex}' % np.median(
+                np.abs(p - y)[ok]) + '\n' + r'\textbf{total %+.3f dex}'
+                    % tot, transform=ax.transAxes, va='top', fontsize=17)
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.minorticks_on()
+            ax.tick_params(which='both', direction='in', labelsize=17,
+                           top=True, right=True)
+            ax.tick_params(which='major', length=10, width=2)
+            ax.tick_params(which='minor', length=5, width=1.5)
+            if row == 0:
+                ax.set_title(r'\textbf{' + LINE_TEX[key] + r'}', fontsize=23)
+            if c == len(LINES) - 1:
+                ax.text(1.04, 0.5, r'$\bm{h = %.1f}$\,\textbf{ld}'
+                        % (float(d[f'r{i}_h']) * CONFIG['R0_LD']),
+                        transform=ax.transAxes, rotation=270, va='center',
+                        fontsize=21)
+        axs[-1, c].set_xlabel(r'$\log I_{\rm Cloudy}$')
+    for ax in axs[:, 0]:
+        ax.set_ylabel(r'$\log I_{\rm emulated}$')
+    axs[0, 0].legend(fontsize=15, frameon=False, loc='lower right',
+                     markerscale=3)
+    fig.tight_layout(h_pad=0.3, w_pad=0.3)
+    pdir = os.path.join(os.path.dirname(path), 'plots')
+    os.makedirs(pdir, exist_ok=True)
+    out = os.path.join(pdir, 'emulator_heights.png')
+    fig.savefig(out, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {out}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('step', choices=['table', 'validate', 'heights'])
+    ap.add_argument('step', choices=['table', 'validate', 'heights',
+                                       'heightsplot'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -346,8 +421,10 @@ def main():
         build_table(a.out)
     elif a.step == 'validate':
         validate(a.out, a.max_iter)
-    else:
+    elif a.step == 'heights':
         validate_heights(a.runs, a.max_iter)
+    else:
+        heights_plot()
 
 
 if __name__ == '__main__':

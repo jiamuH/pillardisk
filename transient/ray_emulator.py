@@ -21,9 +21,12 @@ slab quantities:
   lI_<line>  log sum 4 pi j (s/s_skin)^2 ds [erg/s/cm^2]: per unit area at
              the skin (Cloudy dilutes spherically from the entry); the ray's
              log sum 4 pi j s^2 ds = lI_<line> + 2 log s_skin exactly
-  lNc_<line> log of the emissivity-weighted column from the entry [cm^-2]
-  lNw_<line> log of the column of its layer (5-95% of the emission)
-  lNlo_<line> log of the column from the entry to that layer's 5% point
+  lq<f>_<line>  log of the column from the entry [cm^-2] within which the
+             fraction f/1000 of I is emitted (QFRAC: 0.5% to 99.5%): the
+             emission's whole distribution in column, tails included (at a
+             low lamp a ray lights the rim, crosses thin gas and lights a
+             second layer far out: one emission curve in column, two
+             layers in distance)
   lTe_<line> log T_e at the emission's (depth) centroid [K]
   lrat_<line>  log ratio of the doublet's components (C IV, Mg II)
 and for C IV's escape (as cloudy_rays.civ_layers, from n(C3+)):
@@ -36,7 +39,9 @@ and for C IV's escape (as cloudy_rays.civ_layers, from n(C3+)):
 `emulate` trains on runs and writes an emulated run: every ray of another
 run's plan (its decks; Cloudy need not have run them) gets a synthetic
 emissivity profile per line (a two-sided Gaussian in column through the
-predicted 5%, centroid and 95% points, normalised to I) and its emulated
+predicted column quantiles: a monotone spline of the emitted fraction
+against log column, mapped to depth through the deck's own density
+profile, normalised to I) and its emulated
 layer; cloudy_rays' map, escape and profile steps then run on it
 (<out>/emulated.npz, read by load_rays and the layer functions).
 
@@ -79,10 +84,13 @@ LINE_TEX = dict(ha=r'H$\bm{\alpha}$', hb=r'H$\bm{\beta}$', c4=r'C\,IV',
                 mg2=r'Mg\,II', he2=r'He\,II\,1640')
 FEATURES = ('lphi_skin', 'lN_pre', 'lL_skin', 'ln_p1', 'ln_p3', 'lN_post',
             'lnmax', 'lands')
-LINE_T = ('lI', 'lNc', 'lNw', 'lNlo', 'lTe')       # every line
+QFRAC = (0.005, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.98, 0.99,
+         0.995)             # emitted fractions at the lq targets
+Q_T = tuple(f'lq{round(q * 1000):03d}' for q in QFRAC)
+LINE_T = ('lI',) + Q_T + ('lTe',)                  # every line
 C4_T = ('lnl', 'lNab', 'lNtot', 'lthk')            # C IV's C3+ layer
 TARGETS = LINE_T + ('lrat',) + C4_T
-TABLE_VERSION = 3           # + layer quantiles, T_e, doublet ratio, C3+
+TABLE_VERSION = 4           # column quantiles of the emission (QFRAC)
 RUNS = '/data2/jhuang/runs/cloudy_rays'
 HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
@@ -153,12 +161,10 @@ def ray_targets(ray, s_deck, n_deck, sk):
         if not tot > 0:
             continue
         cw = np.cumsum(w) / tot
-        q5, q95 = np.interp([0.05, 0.95], cw, col)
         dc = np.sum(w * e[:, 0]) / tot
         out[f'lI_{key}'] = np.log10(tot)
-        out[f'lNc_{key}'] = np.log10(max(np.sum(w * col) / tot, 1e10))
-        out[f'lNw_{key}'] = np.log10(max(q95 - q5, 1e10))
-        out[f'lNlo_{key}'] = np.log10(max(q5, 1e10))
+        for t, q in zip(Q_T, QFRAC):
+            out[f'{t}_{key}'] = np.log10(max(np.interp(q, cw, col), 1e10))
         out[f'lTe_{key}'] = np.log10(np.interp(dc, ov[:, 0], oc['Te']))
         if len(cols) == 2:
             a, b = (np.sum(e[:, c] * ds) for c in cols)
@@ -475,50 +481,72 @@ SYN_DS = 0.005              # [r0] largest step of a synthetic profile (the
                             # sim's radial cells are 0.012 r0)
 
 
-def synth_ray(p, s, n, sk, sigma_floor=0.02, npt=40):
+def column_cdf(lq):
+    """the emitted fraction F(log N) from one line's log column quantiles
+    lq (at QFRAC; made non-decreasing): a monotone (PCHIP) spline through
+    them, F = 0 and 1 one quantile spacing beyond the ends. Returns
+    (F, its log N range)"""
+    from scipy.interpolate import PchipInterpolator
+    x = np.maximum.accumulate(np.asarray(lq, float))
+    x = x + 1e-4 * np.arange(len(x))          # strictly increasing
+    x = np.concatenate([[x[0] - max(x[1] - x[0], 0.01)], x,
+                        [x[-1] + max(x[-1] - x[-2], 0.01)]])
+    f = np.concatenate([[0.0], QFRAC, [1.0]])
+    return PchipInterpolator(x, f, extrapolate=False), (x[0], x[-1])
+
+
+def synth_ray(p, s, n, sk, npg=60):
     """one emulated ray from its predicted targets p {target: value} and
-    its deck (s, n_H; s_skin): (ems (npt, NEMS) on a Cloudy depth grid,
-    {line: (d_centroid, d_5%, d_95%) [cm]}). Each line: a two-sided
-    Gaussian in column, peak at the centroid, widths from the 5% and 95%
-    points (1.645 sigma), normalised to sum 4 pi j (s/s_skin)^2 ds = I"""
+    its deck (s, n_H; s_skin): (ems (npt, NEMS) on a depth grid, {line:
+    (d_centroid, d_5%, d_95%) [cm]}). Each line: the emitted fraction
+    against column (column_cdf of its lq quantiles), differentiated and
+    placed along the ray by the deck's column profile, normalised to sum
+    4 pi j (s/s_skin)^2 ds = I. Low density stretches (little column) get
+    little emission, so a curve continuous in column can split into
+    separate layers in depth."""
     col = column(s, n)
     nmax = col[-1]
-    shape, grids = {}, [[0.0, nmax]]
+    cdf, grids = {}, [[0.0, nmax]]
+    ds = SYN_DS * CONFIG['R0_LD'] * LD_CM
     for key in LINES:
-        lo = 10 ** p[f'lNlo_{key}']
-        hi = lo + 10 ** p[f'lNw_{key}']
-        c = np.clip(10 ** p[f'lNc_{key}'], lo, hi)
-        fl = sigma_floor * (hi - lo)
-        sl, sr = max(c - lo, fl) / 1.645, max(hi - c, fl) / 1.645
-        shape[key] = (c, sl, sr, lo, hi)
-        grids.append(np.linspace(c - 4 * sl, c + 4 * sr, npt))
-        # and at most SYN_DS apart in s: the face-on map puts each point
-        # in one radial cell, so a wide (grazing) layer sampled coarser
-        # than the cells leaves empty cells between its points (speckle)
-        sa, sb = np.interp(np.clip([c - 4 * sl, c + 4 * sr], 0, nmax),
-                           col, s)
-        ds = SYN_DS * CONFIG['R0_LD'] * LD_CM
+        F, (xa, xb) = column_cdf([p[f'{t}_{key}'] for t in Q_T])
+        cdf[key] = F
+        na, nb = np.clip([10 ** xa, 10 ** xb], 0, nmax)
+        # log-even in column, and at most SYN_DS apart in s: the face-on
+        # map puts each point in one radial cell, so a wide (grazing)
+        # layer sampled coarser than the cells leaves empty cells
+        grids.append(np.logspace(np.log10(max(na, 1e10)),
+                                 np.log10(max(nb, 1e10)), npg))
+        sa, sb = np.interp([na, nb], col, s)
         grids.append(np.interp(np.arange(sa, sb, ds), s, col))
+        grids.append(col[(col >= na) & (col <= nb)])
     Ng = np.unique(np.clip(np.concatenate(grids), 0, nmax))
     sg = np.interp(Ng, col, s)
     d = sg - s[0]
     dd = np.gradient(d)
     ng = np.interp(sg, s, n)
+    lN = np.log10(np.maximum(Ng, 1e-30))
     e = np.zeros((len(d), NEMS))
     e[:, 0] = d
     lay = {}
     for key, cols in LINES.items():
-        c, sl, sr, lo, hi = shape[key]
-        q = np.exp(-0.5 * ((Ng - c) / np.where(Ng < c, sl, sr)) ** 2)
+        F = cdf[key]
+        # dF/dN = dF/dlogN / (N ln 10); zero outside the spline's range
+        q = np.nan_to_num(F.derivative()(lN)) / (np.maximum(Ng, 1e-30)
+                                                 * np.log(10))
+        q = np.maximum(q, 0)
         w = q * ng * dd                       # = j (s/s_skin)^2 ds
-        j = q * ng * (sk / sg) ** 2 * 10 ** p[f'lI_{key}'] / max(
-            w.sum(), 1e-300)
+        tot = w.sum()
+        j = q * ng * (sk / sg) ** 2 * 10 ** p[f'lI_{key}'] / max(tot,
+                                                                 1e-300)
         if len(cols) == 2:
             r = 10 ** p[f'lrat_{key}']
             e[:, cols[0]], e[:, cols[1]] = j * r / (1 + r), j / (1 + r)
         else:
             e[:, cols[0]] = j
-        lay[key] = tuple(np.interp(v, col, s) - s[0] for v in (c, lo, hi))
+        dc = np.sum(w * d) / max(tot, 1e-300)
+        cw = np.cumsum(w) / max(tot, 1e-300)
+        lay[key] = (dc,) + tuple(np.interp([0.05, 0.95], cw, d))
     return e, lay
 
 

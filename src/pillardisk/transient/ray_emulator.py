@@ -807,47 +807,68 @@ def dense_current(h_ld, nrays=30000, nphi=256, max_iter=400):
     return out
 
 
-def faceon_cached(out, sim):
-    """cloudy_rays.faceon_surface of RGB_LINES for run out, cached in
-    <out>/faceon_rgb.npz (redone when emulated.npz is newer): (S (3, nph,
-    nr), ok)"""
-    from pillardisk.transient.cloudy_rays import faceon_surface
-    path = os.path.join(out, 'faceon_rgb.npz')
+def faceon_cached(out, sim, incl=None, variant=None):
+    """cloudy_rays.faceon_surface of RGB_LINES for run out: (S (3, nph,
+    nr), ok). incl [deg] given: observed, each ray's line times its escape
+    weight toward an observer at incl (line_escape, escape variant
+    variant of CIV_VARIANTS). Cached in <out>/faceon_rgb[_i<incl>_<variant>]
+    .npz, redone when emulated.npz is newer."""
+    from pillardisk.transient.cloudy_rays import (
+        faceon_surface, line_escape, CIV_VARIANTS, to_physical)
+    tag = '' if incl is None else f'_i{incl:g}_{variant}'
+    path = os.path.join(out, f'faceon_rgb{tag}.npz')
     src = os.path.join(out, 'emulated.npz')
     if os.path.exists(path) and os.path.getmtime(path) > \
             os.path.getmtime(src):
         d = np.load(path)
         return d['S'], d['ok']
-    S, ok, _ = faceon_surface(out, sim, 2, [(c, None)
-                                             for _, c, _, _ in RGB_LINES])
+    rws = [None] * len(RGB_LINES)
+    if incl is not None:
+        var = [v for v in CIV_VARIANTS if v[0] == variant]
+        phys = to_physical(sim, CONFIG)
+        rws = []
+        for key, _, _, _ in RGB_LINES:
+            names, _, ftab = line_escape(out, sim, phys, key, var,
+                                         incs=(float(incl),))
+            f = ftab[(float(incl), variant)]
+            rws.append(dict(zip(names, f)))
+            print(f"{os.path.basename(out)} {key}: escape weight "
+                  f"median {np.median(f):.2f}", flush=True)
+    S, ok, _ = faceon_surface(out, sim, 2, [(c, rw) for (_, c, _, _), rw
+                                            in zip(RGB_LINES, rws)])
     np.savez(path, S=S, ok=ok, lines=[k for k, _, _, _ in RGB_LINES])
     return S, ok
 
 
-def rgb_heights(hs=RGB_HS, nrays=30000, max_iter=400, plot=None):
+def rgb_heights(hs=RGB_HS, nrays=30000, max_iter=400, plot=None,
+                incl=None, variant='vtz100'):
     """Face-on RGB composites (R = H alpha, G = Mg II, B = C IV; all the
-    emitted light, faceon_surface) of dense emulated runs at the lamp
+    emitted light, faceon_surface; or, incl [deg] given, the light
+    escaping toward an observer at incl, faceon_cached) of dense emulated
+    runs at the lamp
     heights hs [ld], one panel each, one colour stretch for all (each
     channel divided by its largest cell over every panel: hue = line
     balance over RGB_DEX, brightness = strongest line over MAP_DEX).
     Missing or outdated runs are made first (dense_current). Writes
-    <RUNS>/emulated/rgb_heights.npz and plots/rgb_heights.png there."""
+    <RUNS>/emulated/rgb_heights[_i<incl>_<variant>].npz and
+    plots/rgb_heights[...].png there."""
     from pillardisk.transient.cloudy_rays import (DUMP, rgb_cells, draw_rgb,
                                                   RGB_DEX, MAP_DEX)
     from pillardisk.transient.sim_spectrum import load_sim
     sim = load_sim(DUMP)
     runs = [dense_current(h, nrays, max_iter=max_iter) for h in hs]
-    SS, oks = zip(*[faceon_cached(r, sim) for r in runs])
+    SS, oks = zip(*[faceon_cached(r, sim, incl, variant) for r in runs])
+    tag = '' if incl is None else f'_i{incl:g}_{variant}'
     SS, oks = np.array(SS), np.array(oks)
     x = np.moveaxis(SS, 1, -1)                   # (nh, nph, nr, 3)
     xmax = np.array([np.nanmax(np.where(oks, x[..., k], np.nan))
                      for k in range(3)])
     rgb = rgb_cells(x, xmax)
     plot = plot or os.path.join(RUNS, 'emulated', 'plots',
-                                'rgb_heights.png')
+                                f'rgb_heights{tag}.png')
     os.makedirs(os.path.dirname(plot), exist_ok=True)
     np.savez(os.path.join(os.path.dirname(os.path.dirname(plot)),
-                          'rgb_heights.npz'), h_ld=np.array(hs), S=SS,
+                          f'rgb_heights{tag}.npz'), h_ld=np.array(hs), S=SS,
              ok=oks, xmax=xmax, rgb=rgb, runs=np.array(runs),
              lines=[k for k, _, _, _ in RGB_LINES])
     plt = plot_style()
@@ -874,6 +895,11 @@ def rgb_heights(hs=RGB_HS, nrays=30000, max_iter=400, plot=None):
                  rf'\textbf{{brightness {MAP_DEX:g} dex}}', color='0.4',
                  ha='right', va='top', transform=axs[-1].transAxes,
                  fontsize=15)
+    if incl is not None:
+        vlab = (rf'$\bm{{v_{{t,z}} = {variant[3:]}}}$\,\textbf{{km/s}}'
+                if variant.startswith('vtz') else rf'\textbf{{{variant}}}')
+        fig.suptitle(rf'\textbf{{observed, $\bm{{i = {incl:g}^\circ}}$, '
+                     rf'escape: }}' + vlab, fontsize=24, y=0.98)
     fig.subplots_adjust(wspace=0.04)
     fig.savefig(plot, dpi=130, bbox_inches='tight')
     plt.close(fig)
@@ -1004,6 +1030,12 @@ def main():
                     help='dense: phi columns (at most the sim phi cells)')
     ap.add_argument('--hs', type=float, nargs='+', default=list(RGB_HS),
                     help='rgb: lamp heights [ld]')
+    ap.add_argument('--incl', type=float, default=None,
+                    help='rgb: observed at this inclination [deg] (escape '
+                    'weights; default: all the emitted light)')
+    ap.add_argument('--variant', default='vtz100',
+                    help='rgb --incl: escape variant (cloudy_rays '
+                    'CIV_VARIANTS)')
     ap.add_argument('--run', default=None,
                     help='redo / synth: a run name under <RUNS>/emulated')
     ap.add_argument('--n', type=int, default=GAP_N,
@@ -1045,7 +1077,8 @@ def main():
     elif a.step == 'compare':
         compare_faceon(a.out or f'{RUNS}/emulated/{a.val or "h0.5"}_val')
     elif a.step == 'rgb':
-        rgb_heights(a.hs, a.nrays, a.max_iter)
+        rgb_heights(a.hs, a.nrays, a.max_iter, incl=a.incl,
+                    variant=a.variant)
     elif a.step == 'heights':
         validate_heights(a.runs, a.max_iter)
     else:

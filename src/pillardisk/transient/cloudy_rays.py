@@ -2078,7 +2078,7 @@ CIV_LABELS['static'], CIV_COLORS['static'] = CIV_LABELS['noshear'], 'k'
 
 
 def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None,
-               variants=None):
+               variants=None, incs=LOSG_INCL):
     """Escape weights of each ray's C IV toward an observer at LOSG_INCL,
     f = beta(tau_obs) / <beta> (see civ_emission_map) for CIV_VARIANTS:
     (names, L, {(inc, variant): f}), f aligned with names and civ_layers
@@ -2144,7 +2144,7 @@ def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None,
     def esc(t):
         return np.where(t > 1e-8, -np.expm1(-t) / np.maximum(t, 1e-300), 1.0)
     ftab = {}
-    for inc in LOSG_INCL:
+    for inc in incs:
         o = np.array([[np.sin(np.radians(inc)), 0.0, np.cos(np.radians(inc))]])
         pt, sh, blocked = layer_crossings(sim, phys, L, inc)
         for var, vtz in variants:
@@ -2163,6 +2163,8 @@ def civ_escape(out, sim, phys, L=None, names=None, mass=12.011, k0=None,
 # lines for the escape-weighted profiles: .ems columns, rest (vacuum)
 # wavelengths [A], ion mass [amu]; lam_c the velocity zero (f-weighted)
 LINE_SPECS = dict(
+    ha=dict(cols=(1,), lam=(6564.61,), lam_c=6564.61, mass=1.008,
+            name=r'H\alpha'),
     c4=dict(cols=(3, 4), lam=(1548.19, 1550.77), lam_c=1549.06, mass=12.011,
             name=r'C\,IV'),
     mg2=dict(cols=(5, 6), lam=(2796.35, 2803.53), lam_c=2798.74,
@@ -2244,15 +2246,15 @@ def emulated_layers(out, sim, key):
     return names, L
 
 
-def line_escape(out, sim, phys, key, variants=None):
+def line_escape(out, sim, phys, key, variants=None, incs=LOSG_INCL):
     """civ_escape for line key: C IV from its C3+ column, the others
-    from line_layers"""
+    from line_layers; at the inclinations incs [deg]"""
     if key == 'c4':
-        return civ_escape(out, sim, phys, variants=variants)
+        return civ_escape(out, sim, phys, variants=variants, incs=incs)
     names, L = line_layers(out, sim, key)
     return civ_escape(out, sim, phys, L=L, names=names,
                       mass=LINE_SPECS[key]['mass'], k0=1 / np.sqrt(np.pi),
-                      variants=variants)
+                      variants=variants, incs=incs)
 
 
 def civ_emission_map(out, dph, plotonly=False):

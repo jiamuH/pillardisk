@@ -152,3 +152,11 @@ add to it rather than re-deriving.
   `faceon_map`).
 - Heights in run names are in ld: h0.5 = 0.25 r0. The training runs
   cover 0-1 ld.
+- Observed version: `emu rgb --incl 45`.
+  - Each ray's line is multiplied by its escape weight toward an observer
+    at that inclination (`line_escape`). The default variant is `vtz100`;
+    change it with `--variant`.
+  - Cached in `faceon_rgb_i45_vtz100.npz`; output
+    `rgb_heights_i45_vtz100.{png,npz}`.
+  - Ha was added to `LINE_SPECS` for this, with the same unit-density
+    paths as Hb.

@@ -12,6 +12,12 @@ ray (dlaw table). The ray "lands" where n_H first exceeds N_SURF:
   lN_post    log column from there to the ray's end
   lnmax      log of the highest n_H along the ray
   lands      1 if n_H ever exceeds N_SURF (else the skin is the n_H peak)
+  lNS<f>     log Stromgren column: the column from the entry within which
+             case-B recombinations (alpha_B 1.1 n_H^2 s^2 ds) use up the
+             fraction f/100 of the entry's ionising photons (phi s0^2;
+             SFRAC: 100% to 1%); log column at the end + 0.5 if never
+             reached (whether and where the front breaks through the rim)
+  lrec       log of the ray's total recombinations / ionising photons
 Only what Cloudy's 1D slab sees: no lamp height, landing position or
 incidence angle (the geometry enters afterwards, placing and projecting the
 layer), so a new lamp height is emulated wherever its rays fall inside the
@@ -84,13 +90,16 @@ LINE_TEX = dict(ha=r'H$\bm{\alpha}$', hb=r'H$\bm{\beta}$', c4=r'C\,IV',
                 mg2=r'Mg\,II', he2=r'He\,II\,1640')
 FEATURES = ('lphi_skin', 'lN_pre', 'lL_skin', 'ln_p1', 'ln_p3', 'lN_post',
             'lnmax', 'lands')
+SFRAC = (1.0, 0.3, 0.1, 0.03, 0.01)    # photon fractions at the lNS features
+ALPHA_B = 2.6e-13                       # case-B H recombination [cm^3/s]
+FEATURES += tuple(f'lNS{round(f * 100):03d}' for f in SFRAC) + ('lrec',)
 QFRAC = (0.005, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.98, 0.99,
          0.995)             # emitted fractions at the lq targets
 Q_T = tuple(f'lq{round(q * 1000):03d}' for q in QFRAC)
 LINE_T = ('lI',) + Q_T + ('lTe',)                  # every line
 C4_T = ('lnl', 'lNab', 'lNtot', 'lthk')            # C IV's C3+ layer
 TARGETS = LINE_T + ('lrat',) + C4_T
-TABLE_VERSION = 4           # column quantiles of the emission (QFRAC)
+TABLE_VERSION = 5           # + Stromgren-column features (SFRAC)
 RUNS = '/data2/jhuang/runs/cloudy_rays'
 HEIGHT_RUNS = (f'{RUNS}/train/h0.0', f'{RUNS}/train/h0.2',
                f'{RUNS}/edd10_h0.5_adapt', f'{RUNS}/train/h1.0')
@@ -135,7 +144,16 @@ def ray_features(lphi, s, n, r0):
     g = (lnn[j1] - lnn[j0]) / max(s[j1] - s[j0], 1.0)  # d ln n / ds [1/cm]
     lsc = np.log10(np.clip(1 / max(abs(g), 1e-30) / r0, 1e-6, 10))
     at = lambda ds: np.log10(np.interp(sk + ds * r0, s, n))
-    return dict(lphi_skin=lphi + 2 * np.log10(s[0] / sk),
+    g2 = ALPHA_B * 1.1 * n ** 2 * s ** 2
+    rec = np.concatenate([[0], np.cumsum(0.5 * (g2[1:] + g2[:-1])
+                                         * np.diff(s))])
+    need = 10 ** lphi * s[0] ** 2
+    strom = {f'lNS{round(f * 100):03d}':
+             (np.log10(np.interp(f * need, rec, col) + 1e10)
+              if rec[-1] > f * need else np.log10(col[-1] + 1e10) + 0.5)
+             for f in SFRAC}
+    return dict(**strom, lrec=np.log10(max(rec[-1], 1e-30) / need),
+                lphi_skin=lphi + 2 * np.log10(s[0] / sk),
                 lN_pre=np.log10(col[k] + 1e10),
                 lL_skin=lsc, ln_p1=at(0.01), ln_p3=at(0.03),
                 lN_post=np.log10(col[-1] - col[k] + 1e10),

@@ -135,3 +135,20 @@ add to it rather than re-deriving.
 - **Out of date since v5:** `emu redo --run h0.5_n30000`,
   `emu redo --run h0.05_n30000` and `emu emulate --val h0.5` all need
   rerunning.
+
+## RGB maps across lamp heights (`emu rgb`, added 2026-11-02)
+
+- `emu rgb` (default `--hs 0 0.05 0.2 0.5 1`, in ld) uses the dense
+  emulated runs `emulated/h<h>_n30000`:
+  - makes any that are missing;
+  - re-emulates any older than `TABLE_VERSION` (`version` in
+    `emulated_pred.npz`);
+  - caches each run's face-on maps in `faceon_rgb.npz`.
+- Output: `emulated/plots/rgb_heights.png` and
+  `emulated/rgb_heights.npz`.
+- Colours: R = Ha, G = Mg II, B = C IV. All-direction emission. One
+  stretch shared by every panel (each line divided by its largest cell
+  over all heights; hue over 1.5 dex, brightness over 4 dex, as in
+  `faceon_map`).
+- Heights in run names are in ld: h0.5 = 0.25 r0. The training runs
+  cover 0-1 ld.

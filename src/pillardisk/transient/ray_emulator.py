@@ -687,6 +687,7 @@ def emulate(src, out, train=None, max_iter=400):
                     os.path.join(out, 'rays_meta.npz'))
     path = os.path.join(out, 'emulated_pred.npz')
     np.savez(path, name=np.array(names), src=src, train=np.array(train),
+             version=TABLE_VERSION,
              cha=cha, sk=np.array(sks), X=X, outside=outside,
              **{f'pred_{k}': mdl.predict(X) for k, mdl in models.items()})
     print(f"wrote {path}: {len(names)} rays' predicted targets", flush=True)
@@ -777,6 +778,106 @@ def redo(run, max_iter=400):
     out = os.path.join(RUNS, 'emulated', run)
     emulate(out, out, training_runs(), max_iter)
     faceon(out)
+
+
+RGB_HS = (0.0, 0.05, 0.2, 0.5, 1.0)     # [ld] rgb: lamp heights
+RGB_LINES = (('ha', (1,), r'H\boldmath$\alpha$', 'red'),
+             ('mg2', (5, 6), r'Mg\,II', 'lime'),
+             ('c4', (3, 4), r'C\,IV', 'dodgerblue'))      # R, G, B
+
+
+def dense_current(h_ld, nrays=30000, nphi=256, max_iter=400):
+    """<RUNS>/emulated/h<h>_n<nrays>, made (dense) if missing and
+    re-emulated (redo) if its predictions predate TABLE_VERSION"""
+    from pillardisk.transient.cloudy_rays import write_adaptive
+    out = f'{RUNS}/emulated/h{h_ld:g}_n{nrays}'
+    pred = os.path.join(out, 'emulated_pred.npz')
+    ver = -1
+    if os.path.exists(pred):
+        with np.load(pred) as d:
+            ver = int(d['version']) if 'version' in d.files else -1
+    if not os.path.exists(os.path.join(out, 'rays_meta.npz')):
+        print(f"h = {h_ld:g} ld: no dense run, making {out}", flush=True)
+        write_adaptive(out, h_ld, nrays, nphi)
+        emulate(out, out, training_runs(), max_iter)
+    elif ver != TABLE_VERSION:
+        print(f"h = {h_ld:g} ld: {out} predates table version "
+              f"{TABLE_VERSION}, re-emulating", flush=True)
+        emulate(out, out, training_runs(), max_iter)
+    return out
+
+
+def faceon_cached(out, sim):
+    """cloudy_rays.faceon_surface of RGB_LINES for run out, cached in
+    <out>/faceon_rgb.npz (redone when emulated.npz is newer): (S (3, nph,
+    nr), ok)"""
+    from pillardisk.transient.cloudy_rays import faceon_surface
+    path = os.path.join(out, 'faceon_rgb.npz')
+    src = os.path.join(out, 'emulated.npz')
+    if os.path.exists(path) and os.path.getmtime(path) > \
+            os.path.getmtime(src):
+        d = np.load(path)
+        return d['S'], d['ok']
+    S, ok, _ = faceon_surface(out, sim, 2, [(c, None)
+                                             for _, c, _, _ in RGB_LINES])
+    np.savez(path, S=S, ok=ok, lines=[k for k, _, _, _ in RGB_LINES])
+    return S, ok
+
+
+def rgb_heights(hs=RGB_HS, nrays=30000, max_iter=400, plot=None):
+    """Face-on RGB composites (R = H alpha, G = Mg II, B = C IV; all the
+    emitted light, faceon_surface) of dense emulated runs at the lamp
+    heights hs [ld], one panel each, one colour stretch for all (each
+    channel divided by its largest cell over every panel: hue = line
+    balance over RGB_DEX, brightness = strongest line over MAP_DEX).
+    Missing or outdated runs are made first (dense_current). Writes
+    <RUNS>/emulated/rgb_heights.npz and plots/rgb_heights.png there."""
+    from pillardisk.transient.cloudy_rays import (DUMP, rgb_cells, draw_rgb,
+                                                  RGB_DEX, MAP_DEX)
+    from pillardisk.transient.sim_spectrum import load_sim
+    sim = load_sim(DUMP)
+    runs = [dense_current(h, nrays, max_iter=max_iter) for h in hs]
+    SS, oks = zip(*[faceon_cached(r, sim) for r in runs])
+    SS, oks = np.array(SS), np.array(oks)
+    x = np.moveaxis(SS, 1, -1)                   # (nh, nph, nr, 3)
+    xmax = np.array([np.nanmax(np.where(oks, x[..., k], np.nan))
+                     for k in range(3)])
+    rgb = rgb_cells(x, xmax)
+    plot = plot or os.path.join(RUNS, 'emulated', 'plots',
+                                'rgb_heights.png')
+    os.makedirs(os.path.dirname(plot), exist_ok=True)
+    np.savez(os.path.join(os.path.dirname(os.path.dirname(plot)),
+                          'rgb_heights.npz'), h_ld=np.array(hs), S=SS,
+             ok=oks, xmax=xmax, rgb=rgb, runs=np.array(runs),
+             lines=[k for k, _, _, _ in RGB_LINES])
+    plt = plot_style()
+    rf, phf = sim['rf'], sim['phf']
+    R, P = np.meshgrid(rf, phf)
+    X, Y = R * np.cos(P), R * np.sin(P)
+    fig, axs = plt.subplots(1, len(hs), figsize=(6.2 * len(hs), 6.6),
+                            sharex=True, sharey=True)
+    axs = np.atleast_1d(axs)
+    for i, (ax, h) in enumerate(zip(axs, hs)):
+        draw_rgb(ax, X, Y, rgb[i], oks[i])
+        ax.set_aspect('equal')
+        ax.set_xlim(-rf[-1], rf[-1])
+        ax.set_ylim(-rf[-1], rf[-1])
+        ax.set_title(rf'$\bm{{h = {h:g}}}$\,\textbf{{ld}}', fontsize=24)
+        ax.set_xticks([-1, 0, 1])          # none at +-2: panels meet there
+        ax.set_xlabel(r'$\bm{x\,[r_0]}$')
+        ax.tick_params(which='both', direction='in', labelsize=19)
+    axs[0].set_ylabel(r'$\bm{y\,[r_0]}$')
+    for j, (_, _, tex, c) in enumerate(RGB_LINES):
+        axs[0].text(0.04, 0.96 - 0.08 * j, rf'\textbf{{{tex}}}', color=c,
+                    transform=axs[0].transAxes, va='top', fontsize=21)
+    axs[-1].text(0.97, 0.96, rf'\textbf{{hue {RGB_DEX:g} dex}}' '\n'
+                 rf'\textbf{{brightness {MAP_DEX:g} dex}}', color='0.4',
+                 ha='right', va='top', transform=axs[-1].transAxes,
+                 fontsize=15)
+    fig.subplots_adjust(wspace=0.04)
+    fig.savefig(plot, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f"wrote {plot}: heights {', '.join(f'{h:g}' for h in hs)} ld")
 
 
 CMP_LINES = (('ha', (1,), r'H$\bm{\alpha}$'), ('he2', (7,), r'He\,II'),
@@ -881,7 +982,7 @@ def main():
     ap.add_argument('step', choices=['table', 'validate', 'heights',
                                        'heightsplot', 'emulate',
                                        'compare', 'dense', 'synth',
-                                       'gapfill', 'redo'])
+                                       'gapfill', 'redo', 'rgb'])
     ap.add_argument('--out', default=None,
                     help='table / validate: the run directory')
     ap.add_argument('--runs', nargs='+', default=list(HEIGHT_RUNS),
@@ -901,6 +1002,8 @@ def main():
                     help='dense: rays in the plan')
     ap.add_argument('--nphi', type=int, default=256,
                     help='dense: phi columns (at most the sim phi cells)')
+    ap.add_argument('--hs', type=float, nargs='+', default=list(RGB_HS),
+                    help='rgb: lamp heights [ld]')
     ap.add_argument('--run', default=None,
                     help='redo / synth: a run name under <RUNS>/emulated')
     ap.add_argument('--n', type=int, default=GAP_N,
@@ -941,6 +1044,8 @@ def main():
         dense(a.h, a.nrays, a.nphi, a.out, a.max_iter)
     elif a.step == 'compare':
         compare_faceon(a.out or f'{RUNS}/emulated/{a.val or "h0.5"}_val')
+    elif a.step == 'rgb':
+        rgb_heights(a.hs, a.nrays, a.max_iter)
     elif a.step == 'heights':
         validate_heights(a.runs, a.max_iter)
     else:

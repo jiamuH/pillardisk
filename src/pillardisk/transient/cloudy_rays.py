@@ -1347,6 +1347,35 @@ def faceon_surface(out, sim, dph, chans):
                        crashed=crashed)
 
 
+RGB_DEX, MAP_DEX = 1.5, 4.0     # composite: hue range, brightness range
+
+
+def rgb_cells(x, xmax, rgb_dex=RGB_DEX, map_dex=MAP_DEX):
+    """(..., 3) colours from three channel maps x (..., 3), each divided
+    by its xmax (3,) (shared across panels for comparable maps): hue from
+    the local balance (each channel relative to the pixel's strongest,
+    over rgb_dex), brightness from the strongest over map_dex, on black"""
+    x = np.nan_to_num(x / np.asarray(xmax, float))
+    xm = x.max(axis=-1)
+    hue = np.clip(1 + np.log10(x / np.maximum(xm, 1e-300)[..., None]
+                               + 1e-300) / rgb_dex, 0, 1)
+    bri = np.clip(1 + np.log10(np.maximum(xm, 1e-300)) / map_dex, 0, 1)
+    return hue * bri[..., None]
+
+
+def draw_rgb(ax, X, Y, rgb, ok):
+    """per-cell colours rgb (nph, nr, 3) on the (phi, r) cell edges X, Y;
+    white where not ok (no data)"""
+    from matplotlib.colors import ListedColormap
+    img = np.where(ok[..., None], rgb, 1.0)
+    # pcolormesh with per-cell colours: a dummy array + facecolors
+    pcm = ax.pcolormesh(X, Y, np.zeros(ok.shape), shading='flat',
+                        cmap=ListedColormap(['k']), rasterized=True)
+    pcm.set_array(None)
+    pcm.set_facecolor(img.reshape(-1, 3))
+    return pcm
+
+
 def faceon_map(out, dph):
     """Face-on surface brightness [erg/s/cm^2] of H alpha, Mg II, C IV from
     the finished rays (lamp at the origin: rays = sim columns): each ray's
@@ -1409,22 +1438,10 @@ def faceon_map(out, dph):
     # He II; hue from the local balance (each line relative to its own
     # maximum, then to the pixel's strongest, over RGB_DEX), brightness
     # from the strongest over MAP_DEX, on black; as plot_map
-    RGB_DEX, MAP_DEX = 1.5, 4.0
     ax = axs[1, 1]
     x = np.stack([S[3], S[2], S[1]], axis=-1)            # (nph, nr, 3)
-    x = np.nan_to_num(x / np.nanmax(x.reshape(-1, 3), axis=0))
-    xm = x.max(axis=-1)
-    hue = np.clip(1 + np.log10(x / np.maximum(xm, 1e-300)[..., None]
-                               + 1e-300) / RGB_DEX, 0, 1)
-    bri = np.clip(1 + np.log10(np.maximum(xm, 1e-300)) / MAP_DEX, 0, 1)
-    rgb = hue * bri[..., None]
-    from matplotlib.colors import ListedColormap
-    img = np.where(ok[..., None], rgb, 1.0)              # white = no data
-    # pcolormesh with per-cell colours: draw via a dummy array + facecolors
-    pcm = ax.pcolormesh(X, Y, np.zeros(ok.shape), shading='flat',
-                        cmap=ListedColormap(['k']), rasterized=True)
-    pcm.set_array(None)
-    pcm.set_facecolor(img.reshape(-1, 3))
+    draw_rgb(ax, X, Y, rgb_cells(x, np.nanmax(x.reshape(-1, 3), axis=0)),
+             ok)
     ax.set_aspect('equal')
     ax.set_xlim(-rf[-1], rf[-1])
     ax.set_ylim(-rf[-1], rf[-1])

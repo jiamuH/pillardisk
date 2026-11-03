@@ -91,3 +91,53 @@ Caveats:
   - lit rays: raise the incident flux by the local diffuse/direct ratio;
   - shadowed gas: give it its own Cloudy rays with a soft, recombination-
     like SED of the estimated flux.
+
+## MOCASSIN check (2026-11-03, `debug/diag_moc_diffuse.py`)
+
+Run: `moc_edd10`, lamp at the origin (h = 0), on a 49 x 49 x 65 grid of
+~1e14 cm cells.
+- "Direct front": a straight-ray case-B march on MOCASSIN's own grid
+  (`march_mask`, the photon budget Q/4pi), i.e. what the lamp alone
+  ionises.
+- Cells beyond that front, binned by their distance from the nearest
+  directly reached cell (upper half):
+
+  | cells beyond | n | x(H+) median | x > 0.1 | x > 0.5 | Ha share | Mg II share | C IV share |
+  |---|---|---|---|---|---|---|---|
+  | 1 | 3457 | 1e-14 | 17% | 12% | 30% | 60% | 0% |
+  | 2 | 2519 | 4e-15 | 2.5% | 1.3% | 0% | 0% | 0% |
+  | 3-5 | 6645 | 2e-15 | 0% | 0% | 0.6% | 0% | 0% |
+  | > 5 | 9682 | 1e-15 | 0% | 0% | 0% | 0% | 0% |
+
+- **Top dense cell of each column (n_H > N_SURF):**
+  - reached directly: 139 columns, x(H+) median 0.32 (16-84%:
+    0.07-0.95);
+  - beyond the front: 1693 columns, x(H+) ~ 2e-15, at the floor.
+- **MOCASSIN shows no diffuse ionisation of shadowed gas.** Light beyond
+  the direct front comes only from the first cell behind it, i.e. cells
+  that straddle the front (or a slightly deeper front). Shadowed surfaces
+  get no ionising packets at all.
+- The estimate above predicted 1-8% of an unblocked lamp there. At
+  n ~ 1e10 that gives x(H+) ~ 1e-2 for a whole 1e14 cm cell, which would
+  be visible.
+
+**MOCASSIN cannot settle it, because of resolution.** In Cloudy the
+reflected ionising light leaves a ~1e12 cm ionised skin. In MOCASSIN that
+skin is smeared over a 1e14 cm cell with x(H+) ~ 0.3. A recombination
+photon emitted there faces tau_912 ~ 6e-18 x 7e9 x 1e14 ~ 4e6 inside its
+own cell, so it is absorbed on the spot and never reaches other gas.
+MOCASSIN's diffuse field therefore comes only from fully ionised, low
+density cells, and is weak. So:
+- **MOCASSIN does not support the estimate.**
+- **MOCASSIN cannot rule it out either.** Its cells suppress the very
+  escape that the estimate rests on.
+
+Ways to decide:
+- **Test Cloudy's reflection.** Rerun one ray with the hot entry gas cut
+  (deck starting at the skin) and see whether the reflected ionising
+  fraction stays ~1. That separates skin recombination photons from the
+  hot gas's EUV.
+- **Check how Cloudy's own escape depends on the skin.** If the reflected
+  Lyman continuum comes from a skin much thinner than MOCASSIN's cells,
+  that confirms that the resolution blocks it.
+- **Run MOCASSIN at finer resolution** near the lit surface (expensive).

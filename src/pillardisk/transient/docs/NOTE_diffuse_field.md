@@ -141,3 +141,21 @@ Ways to decide:
   Lyman continuum comes from a skin much thinner than MOCASSIN's cells,
   that confirms that the resolution blocks it.
 - **Run MOCASSIN at finer resolution** near the lit surface (expensive).
+
+## Skin-start Cloudy test (set up 2026-11-03, `debug/diag_skin_ray.py`)
+
+- **Test rays:** ray_p178_a09 and ray_p009_a00 from train/h0.0. Both
+  enter through thin hot gas:
+  - entry n_H 2e9 and 6e8, T_e 1e6 and 3e6 K;
+  - ray_p009_a00's skin lies 1.2e15 cm in.
+- **What changes:** each is rerun starting at its skin (the first
+  n_H >= N_SURF point), with phi(H) diluted to there.
+- **Question:** does the reflected ionising fraction (~0.95) survive
+  without the hot gas in front?
+- **Already known:** rays that enter dense gas, with nothing to cut,
+  reflect almost as much. ray_p215_a06 (n_H 1.3e10, T_e 2e5 K at its
+  face) reflects 0.94 of the ionising energy; ray_p044_a07 (3e11, 4e4 K)
+  reflects 0.70. So the lit face itself seems to reflect most of it.
+- **Run:** `python3 -m pillardisk.transient.debug.diag_skin_ray all`
+  (~40 min). Output: `/data2/jhuang/runs/cloudy_rays/diffuse/skin_test/`,
+  holding `skin_test.npz` and `skin_test.png`.

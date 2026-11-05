@@ -27,7 +27,11 @@ import os
 
 import numpy as np
 
-TABLE_DIR = '/data2/jhuang/data/opacity_tables'
+# local copy in the repository's data/ when present, else the server path
+TABLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..',
+                         'data', 'opacity_tables')
+if not os.path.isdir(TABLE_DIR):
+    TABLE_DIR = '/data2/jhuang/data/opacity_tables'
 F05 = os.path.join(TABLE_DIR, 'f05', 'x', 'g7.02.tron')
 OPAL = os.path.join(TABLE_DIR, 'opal', 'GN93hz')
 OPAL_TABLE = 73                         # X = 0.70, Z = 0.02
@@ -102,6 +106,21 @@ def kappa_at(tab, logT, logrho):
     q = np.column_stack([logT, np.clip(logR, lr[0], lr[-1])])
     return f(q), clamped
 
+
+
+def kappa_table(logT, log_nh, f05=None, opal=None):
+    """log kappa_R [cm^2/g] on logT at fixed n_H = 10^log_nh [cm^-3] (rho = 1.4 m_H
+    n_H): Ferguson+05 at log T <= T_JOIN, OPAL above (solar tables unless given).
+    Returns (log kappa, clamped), clamped True where log R is off the table."""
+    f05 = read_f05() if f05 is None else f05
+    opal = read_opal() if opal is None else opal
+    logT = np.asarray(logT, float)
+    logrho = np.log10(1.4 * MH) + log_nh
+    lo = logT <= T_JOIN
+    k, c = np.empty_like(logT), np.empty(logT.shape, bool)
+    k[lo], c[lo] = kappa_at(f05, logT[lo], logrho)
+    k[~lo], c[~lo] = kappa_at(opal, logT[~lo], logrho)
+    return k, c
 
 # ---- analytic gas opacity components (LTE, Saha) ----
 KB_EV, KB_CGS, HPL, CL, ME = 8.6173e-5, 1.3807e-16, 6.6261e-27, 2.9979e10, \
